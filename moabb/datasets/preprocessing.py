@@ -7,7 +7,20 @@ import mne
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import FunctionTransformer, Pipeline, _name_estimators
-from sklearn.utils._repr_html.estimator import _VisualBlock
+
+
+# Handle different scikit-learn versions for _VisualBlock import
+# sklearn >= 1.6 moved _VisualBlock to sklearn.utils._repr_html.estimator
+# sklearn < 1.6 has it in sklearn.utils._estimator_html_repr
+try:
+    from sklearn.utils._repr_html.estimator import _VisualBlock
+except (ImportError, ModuleNotFoundError):
+    try:
+        from sklearn.utils._estimator_html_repr import _VisualBlock
+    except (ImportError, ModuleNotFoundError):
+        # Fallback: create a dummy _VisualBlock for older sklearn versions
+        # that don't have HTML representation support
+        _VisualBlock = None
 
 
 log = logging.getLogger(__name__)
@@ -88,7 +101,9 @@ class ForkPipelines(TransformerMixin, BaseEstimator):
         return True
 
     def _sk_visual_block_(self):
-        """Tell sklearn’s diagrammer to lay us out in parallel."""
+        """Tell sklearn's diagrammer to lay us out in parallel."""
+        if _VisualBlock is None:
+            return NotImplemented
         names, estimators = zip(*self.transformers)
         return _VisualBlock(
             kind="parallel",
@@ -114,7 +129,9 @@ class FixedTransformer(TransformerMixin, BaseEstimator):
         return True
 
     def _sk_visual_block_(self):
-        """Tell sklearn’s diagrammer to lay us out in parallel."""
+        """Tell sklearn's diagrammer to lay us out in parallel."""
+        if _VisualBlock is None:
+            return NotImplemented
         return _VisualBlock(
             kind="parallel",
             name_caption=str(self.__class__.__name__),
@@ -405,6 +422,8 @@ class NamedFunctionTransformer(FunctionTransformer):
         return self._display_name
 
     def _sk_visual_block_(self):
+        if _VisualBlock is None:
+            return NotImplemented
         return _VisualBlock(
             kind="single",
             estimators=self,

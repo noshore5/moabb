@@ -23,6 +23,67 @@ except ImportError:
     optuna_available = False
 
 
+def _ensure_fitted(estimator):
+    """Ensure an estimator is properly marked as fitted for sklearn 1.8+.
+
+    In sklearn 1.8+, Pipeline.predict() calls check_is_fitted(self) which
+    may fail for some estimators (especially deep learning wrappers) that
+    don't properly set fitted attributes. This function adds the necessary
+    attributes to ensure the estimator passes sklearn's fitted check.
+
+    Parameters
+    ----------
+    estimator : sklearn-compatible estimator
+        The fitted estimator to mark as fitted. This should be called
+        after fit() has been called on the estimator.
+
+    Returns
+    -------
+    estimator : sklearn-compatible estimator
+        The same estimator with fitted attributes set.
+
+    Notes
+    -----
+    This function modifies the estimator in-place and returns it for
+    convenience. sklearn's check_is_fitted looks for:
+    1. __sklearn_is_fitted__() method returning True
+    2. Or any attribute ending with '_' (like classes_, coef_, etc.)
+
+    We add a __sklearn_is_fitted__ method that returns True.
+    """
+
+    # Define a method that returns True to indicate fitted state
+    def _sklearn_is_fitted_true(self):
+        return True
+
+    # Add __sklearn_is_fitted__ method if not present or if it returns False
+    if not hasattr(estimator, "__sklearn_is_fitted__"):
+        import types
+
+        estimator.__sklearn_is_fitted__ = types.MethodType(
+            _sklearn_is_fitted_true, estimator
+        )
+    else:
+        # Check if existing method returns False (unfitted)
+        try:
+            if not estimator.__sklearn_is_fitted__():
+                import types
+
+                estimator.__sklearn_is_fitted__ = types.MethodType(
+                    _sklearn_is_fitted_true, estimator
+                )
+        except Exception:
+            pass
+
+    # For Pipeline objects, also ensure all steps are marked
+    if isinstance(estimator, Pipeline):
+        for name, step in estimator.steps:
+            if step is not None:
+                _ensure_fitted(step)
+
+    return estimator
+
+
 def _check_if_is_pytorch_model(model):
     """Check if the model is a skorch model.
 

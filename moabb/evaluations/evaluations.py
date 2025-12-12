@@ -25,6 +25,7 @@ from moabb.evaluations.splitters import (
 )
 from moabb.evaluations.utils import (
     _create_save_path,
+    _ensure_fitted,
     _save_model_cv,
 )
 
@@ -226,6 +227,7 @@ class WithinSessionEvaluation(BaseEvaluation):
                         cvclf = clone(grid_clf)
 
                         cvclf.fit(X_[train], y_[train])
+                        _ensure_fitted(cvclf)
 
                         score = scorer(cvclf, X_[test], y_[test])
 
@@ -308,6 +310,7 @@ class WithinSessionEvaluation(BaseEvaluation):
         t_start = time()
         try:
             model = clf.fit(X_train, y_train)
+            _ensure_fitted(model)
             score = _score(
                 estimator=model,
                 X_test=X_test,
@@ -540,6 +543,7 @@ class CrossSessionEvaluation(BaseEvaluation):
                     cvclf = clone(grid_clf)
 
                     cvclf.fit(X[train], y[train])
+                    _ensure_fitted(cvclf)
 
                     model_list.append(cvclf)
                     score = scorer(cvclf, X[test], y[test])
@@ -724,6 +728,7 @@ class CrossSubjectEvaluation(BaseEvaluation):
                     )
 
                 model = deepcopy(clf).fit(X[train], y[train])
+                _ensure_fitted(model)
 
                 if _carbonfootprint:
                     emissions = tracker.stop()
