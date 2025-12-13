@@ -71,6 +71,7 @@ extensions = [
     "numpydoc",
     "sphinx_favicon",
     "sphinxcontrib.jquery",
+    "sphinx_sitemap",
 ]
 
 
@@ -224,19 +225,30 @@ html_theme_options = {
         dict(
             name="GitHub",
             url="https://github.com/NeuroTechX/moabb",
-            icon="fa-brands fa-square-github",
+            icon="fa-brands fa-github",
+        ),
+        dict(
+            name="PyPI",
+            url="https://pypi.org/project/moabb/",
+            icon="fa-brands fa-python",
         ),
     ],
-    "github_url": "https://github.com/NeuroTechX/moabb",
     "icon_links_label": "External Links",  # for screen reader
-    "use_edit_page_button": False,
+    "use_edit_page_button": True,
     "navigation_with_keys": False,
     "collapse_navigation": False,
     "navigation_depth": -1,
     "show_toc_level": 1,
     "nosidebar": True,
-    "navbar_end": ["theme-switcher"],
-    "announcement": "https://raw.githubusercontent.com/neurotechx/moabb/develop/docs/source/_templates/custom-template.html",
+    "navbar_end": ["theme-switcher", "navbar-icon-links"],
+    "announcement": (
+        "<strong>Using MOABB in academic work?</strong> "
+        "<a class='moabb-announcement-cta' href='cite.html'>Cite MOABB</a> "
+        "<span class='moabb-announcement-secondary'>"
+        "DOI: <a href='https://doi.org/10.5281/zenodo.10034224'>10.5281/zenodo.10034224</a> · "
+        "Explore <a href='paper_results.html'>benchmark results</a>"
+        "</span>"
+    ),
     "show_version_warning_banner": True,
     "analytics": dict(google_analytics_id="G-5WJBKDMSTE"),
     "pygments_light_style": "tango",
@@ -245,6 +257,15 @@ html_theme_options = {
         "image_light": "moabb_light.svg",
         "image_dark": "moabb_dark.svg",
     },
+    "secondary_sidebar_items": {
+        "**": [
+            "page-toc",
+            "sg_download_links",
+            "sg_launcher_links",
+        ],
+    },
+    "footer_start": ["copyright"],
+    "footer_end": ["sphinx-version", "theme-version"],
 }
 
 html_sidebars = {
@@ -263,8 +284,14 @@ html_logo = "images/moabb_logo.svg"
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ["_static"]
 
+# Base URL for sitemap generation (required by sphinx_sitemap)
+html_baseurl = "https://neurotechx.github.io/moabb/"
+
+# Sitemap configuration
+sitemap_url_scheme = "{link}"
+
 html_css_files = [
-    "https://raw.githubusercontent.com/neurotechx/moabb/refs/heads/develop/docs/source/_static/css/custom.css",
+    "css/custom.css",
     "https://cdn.datatables.net/v/dt/dt-2.0.4/b-3.0.2/b-html5-3.0.2/datatables.min.css",
 ]
 
@@ -302,6 +329,56 @@ html_context = {
     "github_repo": "moabb",
     "github_version": "develop",
     "doc_path": "docs",
+    # Colab launcher for Sphinx-Gallery examples (see _templates/sg_launcher_links.html)
+    "colab_repo": "NeuroTechX/moabb",
+    "colab_branch": "gh-pages",
+    # Docs are deployed under docs/ in gh-pages and moabb.github.io
+    "colab_docs_path": "docs",
+    # Homepage carousel highlighting MOABB components
+    "carousel": [
+        dict(
+            title="Datasets",
+            text="Access 30+ open EEG datasets for motor imagery, P300, and SSVEP paradigms.",
+            url="dataset_summary.html",
+            img="datasets_overview.png",
+            alt="Datasets overview",
+        ),
+        dict(
+            title="Evaluations",
+            text="Cross-session, cross-subject, and within-session evaluation schemes.",
+            url="api.html#evaluations",
+            img="crosssubj.png",
+            alt="Cross-subject evaluation",
+        ),
+        dict(
+            title="Preprocessing",
+            text="Flexible preprocessing pipelines with MNE-Python integration.",
+            url="auto_examples/advanced_examples/plot_pre_processing_steps.html",
+            img="architecture.png",
+            alt="Preprocessing steps",
+        ),
+        dict(
+            title="Paradigms",
+            text="Motor imagery, P300, SSVEP, and other BCI paradigms ready to use.",
+            url="auto_examples/paradigm_examples/index.html",
+            img="M.png",
+            alt="Paradigms",
+        ),
+        dict(
+            title="Analysis & Statistics",
+            text="Comprehensive analysis tools, statistical tests, and visualizations.",
+            url="auto_examples/advanced_examples/plot_statistical_analysis.html",
+            img="statistical_analysis.png",
+            alt="Statistical analysis",
+        ),
+        dict(
+            title="Benchmark Results",
+            text="Explore the largest BCI EEG benchmark with standardized results.",
+            url="paper_results.html",
+            img="withinsess.png",
+            alt="Benchmark results",
+        ),
+    ],
 }
 
 

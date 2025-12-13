@@ -24,7 +24,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -76,6 +75,7 @@ docs = [
     "sphinx-gallery>=0.18.0",
     "sphinx-bootstrap-theme>=0.8.1",
     "pydata-sphinx-theme>=0.16.1",
+    "nbformat>=5.10.4",
     "numpydoc>=1.8.0",
     "myst-parser>=4.0.1",
     "sphinx-design>=0.6.1",
@@ -85,6 +85,7 @@ docs = [
     "sphinx-favicon>=1.0.1",
     "mne-features>=0.3",
     "snowballstemmer>=3.0.1",
+    "sphinx-sitemap",
 ]
 all = [
     "moabb[carbonemission]",
