@@ -74,6 +74,10 @@ extensions = [
     "sphinx_sitemap",
 ]
 
+_build_sitemap = os.environ.get("MOABB_BUILD_SITEMAP", "1").strip().lower()
+if _build_sitemap in {"0", "false", "no"}:
+    extensions = [ext for ext in extensions if ext != "sphinx_sitemap"]
+
 
 def linkcode_resolve(domain, info):  # noqa: C901
     """Determine the URL corresponding to a Python object.
@@ -245,7 +249,7 @@ html_theme_options = {
         "<strong>Using MOABB in academic work?</strong> "
         "<a class='moabb-announcement-cta' href='cite.html'>Cite MOABB</a> "
         "<span class='moabb-announcement-secondary'>"
-        "DOI: <a href='https://doi.org/10.5281/zenodo.10034224'>10.5281/zenodo.10034224</a> · "
+        "DOI: <a href='https://doi.org/10.5281/zenodo.10034223'>10.5281/zenodo.10034223</a> · "
         "Explore <a href='paper_results.html'>benchmark results</a>"
         "</span>"
     ),
@@ -338,7 +342,7 @@ html_context = {
     "carousel": [
         dict(
             title="Datasets",
-            text="Access 30+ open EEG datasets for motor imagery, P300, and SSVEP paradigms.",
+            text="Access 67+ open EEG datasets for motor imagery, P300, and SSVEP paradigms.",
             url="dataset_summary.html",
             img="datasets_overview.png",
             alt="Datasets overview",

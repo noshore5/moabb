@@ -18,7 +18,7 @@
     <a href="https://neurotechx.github.io/moabb/dataset_summary.html">Datasets</a>
   </p>
   <p>
-    <a href="https://doi.org/10.5281/zenodo.10034224"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.10034224.svg" alt="DOI"></a>
+    <a href="https://doi.org/10.5281/zenodo.10034223"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.10034223.svg" alt="DOI"></a>
     <a href="https://github.com/NeuroTechX/moabb/actions?query=branch%3Adevelop"><img src="https://github.com/NeuroTechX/moabb/workflows/Test/badge.svg" alt="Build Status"></a>
     <a href="https://pypi.org/project/moabb/"><img src="https://img.shields.io/pypi/v/moabb?color=blue&style=flat-square" alt="PyPI"></a>
     <a href="https://pypi.org/project/moabb/"><img src="https://img.shields.io/pypi/v/moabb?label=version&color=orange&style=flat-square" alt="Version"></a>
@@ -153,8 +153,8 @@ If you use MOABB in your experiments, please cite MOABB and the related publicat
 <summary>Citation (APA + BibTeX)</summary>
 
 <p><strong>APA</strong></p>
-<pre><code>Aristimunha, B., Carrara, I., Guetschel, P., Sedlar, S., Rodrigues, P., Sosulski, J., Narayanan, D., Bjareholt, E., Barthelemy, Q., Schirrmeister, R. T., Kobler, R., Kalunga, E., Darmet, L., Gregoire, C., Abdul Hussain, A., Gatti, R., Goncharenko, V., Thielen, J., Moreau, T., Roy, Y., Jayaram, V., Barachant, A., &amp; Chevallier, S. (2025).
-Mother of all BCI Benchmarks (MOABB), 2025. DOI: 10.5281/zenodo.10034223.</code></pre>
+<pre><code>Aristimunha, B., Carrara, I., Guetschel, P., Sedlar, S., Rodrigues, P., Sosulski, J., Narayanan, D., Bjareholt, E., Barthelemy, Q., Schirrmeister, R. T., Kobler, R., Kalunga, E., Darmet, L., Gregoire, C., Abdul Hussain, A., Gatti, R., Goncharenko, V., Andreev, A., Thielen, J., Moreau, T., Roy, Y., Jayaram, V., Barachant, A., &amp; Chevallier, S. (2025).
+Mother of all BCI Benchmarks (MOABB) (Version 1.4.3). Zenodo. https://doi.org/10.5281/zenodo.10034223</code></pre>
 
 <p><strong>BibTeX</strong></p>
 <pre><code>@software{Aristimunha_Mother_of_all,
@@ -175,6 +175,7 @@ Mother of all BCI Benchmarks (MOABB), 2025. DOI: 10.5281/zenodo.10034223.</code>
                   Abdul Hussain, Ali and
                   Gatti, Ramiro and
                   Goncharenko, Vladislav and
+                  Andreev, Anton and
                   Thielen, Jordy and
                   Moreau, Thomas and
                   Roy, Yannick and
@@ -184,7 +185,7 @@ Mother of all BCI Benchmarks (MOABB), 2025. DOI: 10.5281/zenodo.10034223.</code>
   title        = {Mother of all BCI Benchmarks},
   year         = 2025,
   publisher    = {Zenodo},
-  version      = {v1.2.0},
+  version      = {1.4.3},
   url          = {https://github.com/NeuroTechX/moabb},
   doi          = {10.5281/zenodo.10034223},
 }</code></pre>
