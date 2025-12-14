@@ -24,14 +24,17 @@
     <a href="https://pypi.org/project/moabb/"><img src="https://img.shields.io/pypi/v/moabb?label=version&color=orange&style=flat-square" alt="Version"></a>
     <a href="https://pypi.org/project/moabb/"><img src="https://img.shields.io/pypi/pyversions/moabb?style=flat-square" alt="Python versions"></a>
     <a href="https://pepy.tech/project/moabb"><img src="https://pepy.tech/badge/moabb" alt="Downloads"></a>
+    <a href="https://github.com/NeuroTechX/moabb/actions/workflows/link-check.yml"><img src="https://github.com/NeuroTechX/moabb/actions/workflows/link-check.yml/badge.svg" alt="Link Check"></a>
   </p>
 </div>
 
 ## Quickstart
 
-```bash
+
+```shell
 pip install moabb
 ```
+
 
 ```python
 import moabb
@@ -57,7 +60,8 @@ results = evaluation.process(pipelines)
 print(results.head())
 ```
 
-For full installation options and troubleshooting, see the docs: https://neurotechx.github.io/moabb/install/install.html
+For full installation options and troubleshooting, see the [documentation](https://neurotechx.github.io/moabb/install/install.html).
+
 
 ## Disclaimer
 
@@ -147,17 +151,25 @@ we're here to help.
 
 If you use MOABB in your experiments, please cite MOABB and the related publications:
 
-- Citation guide: https://neurotechx.github.io/moabb/cite.html
+📚 [Full citation guide](https://neurotechx.github.io/moabb/cite.html)
 
-<details open>
-<summary>Citation (APA + BibTeX)</summary>
+### Software Citation
 
-<p><strong>APA</strong></p>
-<pre><code>Aristimunha, B., Carrara, I., Guetschel, P., Sedlar, S., Rodrigues, P., Sosulski, J., Narayanan, D., Bjareholt, E., Barthelemy, Q., Schirrmeister, R. T., Kobler, R., Kalunga, E., Darmet, L., Gregoire, C., Abdul Hussain, A., Gatti, R., Goncharenko, V., Andreev, A., Thielen, J., Moreau, T., Roy, Y., Jayaram, V., Barachant, A., &amp; Chevallier, S. (2025).
-Mother of all BCI Benchmarks (MOABB) (Version 1.4.3). Zenodo. https://doi.org/10.5281/zenodo.10034223</code></pre>
+#### APA Format
 
-<p><strong>BibTeX</strong></p>
-<pre><code>@software{Aristimunha_Mother_of_all,
+```text
+Aristimunha, B., Carrara, I., Guetschel, P., Sedlar, S., Rodrigues, P., Sosulski, J.,
+Narayanan, D., Bjareholt, E., Barthelemy, Q., Schirrmeister, R. T., Kobler, R.,
+Kalunga, E., Darmet, L., Gregoire, C., Abdul Hussain, A., Gatti, R., Goncharenko, V.,
+Andreev, A., Thielen, J., Moreau, T., Roy, Y., Jayaram, V., Barachant, A., &
+Chevallier, S. (2025). Mother of all BCI Benchmarks (MOABB) (Version 1.4.3).
+Zenodo. https://doi.org/10.5281/zenodo.10034223
+```
+
+#### BibTeX Format
+
+```bibtex
+@software{Aristimunha_Mother_of_all,
   author       = {Aristimunha, Bruno and
                   Carrara, Igor and
                   Guetschel, Pierre and
@@ -188,34 +200,36 @@ Mother of all BCI Benchmarks (MOABB) (Version 1.4.3). Zenodo. https://doi.org/10
   version      = {1.4.3},
   url          = {https://github.com/NeuroTechX/moabb},
   doi          = {10.5281/zenodo.10034223},
-}</code></pre>
+}
+```
 
-<p>If you want to cite the scientific contributions of MOABB, you could use the following papers:</p>
+### Scientific Publications
 
-<blockquote>
-  <p>
-    Sylvain Chevallier, Igor Carrara, Bruno Aristimunha, Pierre Guetschel, Sara Sedlar, Bruna Junqueira Lopes,
-    Sébastien Velut, Salim Khazem, Thomas Moreau<br>
-    <a href="https://cnrs.hal.science/hal-04537061/">“The largest EEG-based BCI reproducibility study for open science: the MOABB benchmark”</a><br>
-    HAL: hal-04537061.
-  </p>
-</blockquote>
+If you want to cite the scientific contributions of MOABB, please use the following papers:
 
-<blockquote>
-  <p>
-    Vinay Jayaram and Alexandre Barachant.<br>
-    <a href="http://iopscience.iop.org/article/10.1088/1741-2552/aadea0/meta">“MOABB: trustworthy algorithm benchmarking for BCIs.”</a><br>
-    Journal of neural engineering 15.6 (2018): 066011.<br>
-    <a href="https://doi.org/10.1088/1741-2552/aadea0">DOI</a>
-  </p>
-</blockquote>
+#### MOABB Benchmark Paper
 
-<p>
-  If you publish a paper using MOABB, please contact us on Github and open an issue!
-  We would love to hear about your work and help you promote it.
-</p>
+> Sylvain Chevallier, Igor Carrara, Bruno Aristimunha, Pierre Guetschel, Sara Sedlar,
+> Bruna Junqueira Lopes, Sébastien Velut, Salim Khazem, Thomas Moreau
+>
+> **["The largest EEG-based BCI reproducibility study for open science: the MOABB benchmark"](https://cnrs.hal.science/hal-04537061/)**
+>
+> HAL: hal-04537061
 
-</details>
+#### Original MOABB Paper
+
+> Vinay Jayaram and Alexandre Barachant
+>
+> **["MOABB: trustworthy algorithm benchmarking for BCIs"](http://iopscience.iop.org/article/10.1088/1741-2552/aadea0/meta)**
+>
+> Journal of Neural Engineering 15.6 (2018): 066011
+>
+> [DOI: 10.1088/1741-2552/aadea0](https://doi.org/10.1088/1741-2552/aadea0)
+
+---
+
+📣 **If you publish a paper using MOABB, please [open an issue](https://github.com/NeuroTechX/moabb/issues) to let us know!**
+We would love to hear about your work and help you promote it.
 
 ## Contact us
 
