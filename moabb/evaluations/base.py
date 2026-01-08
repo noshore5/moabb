@@ -13,6 +13,7 @@ from moabb.evaluations.utils import (
     check_search_available,
 )
 from moabb.paradigms.base import BaseParadigm
+from moabb.utils import verbose
 
 
 search_methods, optuna_available = check_search_available()
@@ -68,6 +69,10 @@ class BaseEvaluation(ABC):
     time_out: default=60*15
         Cut off time for the optuna search expressed in seconds, the default value is 15 minutes.
         Only used with optuna equal to True.
+    verbose: bool, str, int, default=None
+        If not None, override the default MOABB logging level used by this evaluation
+        (see :func:`moabb.utils.verbose` for more information on how this is handled).
+        If used, it should be passed as a keyword-argument only.
 
     Notes
     -----
@@ -75,10 +80,13 @@ class BaseEvaluation(ABC):
        n_splits, save_model, cache_config parameters.
     .. versionadded:: 1.1.1
        optuna, time_out parameters.
+    .. versionadded:: 1.5
+       verbose parameter.
     """
 
     search = False
 
+    @verbose
     def __init__(
         self,
         paradigm,
@@ -98,6 +106,7 @@ class BaseEvaluation(ABC):
         cache_config=None,
         optuna=False,
         time_out=60 * 15,
+        verbose=None,
     ):
         self.random_state = random_state
         self.n_jobs = n_jobs
@@ -111,6 +120,7 @@ class BaseEvaluation(ABC):
         self.cache_config = cache_config
         self.optuna = optuna
         self.time_out = time_out
+        self.verbose = verbose
 
         if self.optuna and not optuna_available:
             raise ImportError("Optuna is not available. Please install it first.")
