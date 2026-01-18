@@ -34,6 +34,15 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 
+def _ppl_needs_epochs(pn):
+    """Check if the pipeline needs MNE epochs as input."""
+    ppl_with_epochs = ["SSVEP CCA", "TRCA-SSVEP", "MsetCCA-SSVEP"]
+    if any(s in pn for s in ppl_with_epochs):
+        return True
+    else:
+        return False
+
+
 def benchmark(  # noqa: C901
     pipelines="./pipelines/",
     evaluations=None,
@@ -41,6 +50,7 @@ def benchmark(  # noqa: C901
     results="./results/",
     overwrite=False,
     output="./benchmark/",
+    suffix="",
     n_jobs=-1,
     plot=False,
     contexts=None,
@@ -110,6 +120,10 @@ def benchmark(  # noqa: C901
 
     output : str
         Folder to store the analysis results.
+
+    suffix : str
+        Suffix for the results file. Use this to differentiate results from
+        different benchmark runs that use the same paradigm and evaluation.
 
     n_jobs : int
         Number of threads to use for running parallel jobs.
@@ -243,7 +257,10 @@ def benchmark(  # noqa: C901
 
             ppl_with_epochs, ppl_with_array = {}, {}
             for pn, pv in prdgms_from_pipelines[paradigm].items():
-                ppl_with_array[pn] = pv
+                if _ppl_needs_epochs(pn):
+                    ppl_with_epochs[pn] = pv
+                else:
+                    ppl_with_array[pn] = pv
 
             if len(ppl_with_epochs) > 0:
                 # Keras pipelines require return_epochs=True
@@ -254,6 +271,7 @@ def benchmark(  # noqa: C901
                     hdf5_path=results,
                     n_jobs=n_jobs,
                     overwrite=overwrite,
+                    suffix=suffix,
                     return_epochs=True,
                     n_splits=n_splits,
                     cache_config=cache_config,
@@ -277,6 +295,7 @@ def benchmark(  # noqa: C901
                     hdf5_path=results,
                     n_jobs=n_jobs,
                     overwrite=overwrite,
+                    suffix=suffix,
                     n_splits=n_splits,
                     cache_config=cache_config,
                     optuna=optuna,

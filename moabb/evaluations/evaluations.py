@@ -29,6 +29,19 @@ from moabb.evaluations.utils import (
     _ensure_fitted,
     _save_model_cv,
 )
+from moabb.pipelines.classification import SSVEP_CCA, SSVEP_TRCA, SSVEP_MsetCCA
+
+
+def _pipeline_requires_epochs(pipeline):
+    """Check if any step in the pipeline requires MNE Epochs objects."""
+    # Handle non-pipeline classifiers (like DummyClassifier)
+    if not hasattr(pipeline, "steps"):
+        return isinstance(pipeline, (SSVEP_CCA, SSVEP_TRCA, SSVEP_MsetCCA))
+
+    for name, step in pipeline.steps:
+        if isinstance(step, (SSVEP_CCA, SSVEP_TRCA, SSVEP_MsetCCA)):
+            return True
+    return False
 
 
 try:
@@ -163,14 +176,21 @@ class WithinSessionEvaluation(BaseEvaluation):
                 continue
 
             # get the data
+            # Force return_epochs=True if any pipeline requires MNE Epochs objects
+            requires_epochs = any(
+                _pipeline_requires_epochs(clf) for clf in run_pipes.values()
+            )
+            return_epochs = True if requires_epochs else self.return_epochs
+            # For pipelines requiring epochs, don't pass process_pipeline to ensure it's created
+            # with return_epochs=True
             X, y, metadata = self.paradigm.get_data(
                 dataset=dataset,
                 subjects=[subject],
-                return_epochs=self.return_epochs,
+                return_epochs=return_epochs,
                 return_raws=self.return_raws,
                 cache_config=self.cache_config,
                 postprocess_pipeline=postprocess_pipeline,
-                process_pipelines=[process_pipeline],
+                process_pipelines=None if requires_epochs else [process_pipeline],
             )
             # iterate over sessions
             for session in np.unique(metadata.session):
@@ -526,14 +546,21 @@ class CrossSessionEvaluation(BaseEvaluation):
                 continue
 
             # get the data
+            # Force return_epochs=True if any pipeline requires MNE Epochs objects
+            requires_epochs = any(
+                _pipeline_requires_epochs(clf) for clf in run_pipes.values()
+            )
+            return_epochs = True if requires_epochs else self.return_epochs
+            # For pipelines requiring epochs, don't pass process_pipeline to ensure it's created
+            # with return_epochs=True
             X, y, metadata = self.paradigm.get_data(
                 dataset=dataset,
                 subjects=[subject],
-                return_epochs=self.return_epochs,
+                return_epochs=return_epochs,
                 return_raws=self.return_raws,
                 cache_config=self.cache_config,
                 postprocess_pipeline=postprocess_pipeline,
-                process_pipelines=[process_pipeline],
+                process_pipelines=None if requires_epochs else [process_pipeline],
             )
             le = LabelEncoder()
             y = y if self.mne_labels else le.fit_transform(y)
@@ -690,13 +717,20 @@ class CrossSubjectEvaluation(BaseEvaluation):
         if len(run_pipes) == 0:
             return
 
+        # Force return_epochs=True if any pipeline requires MNE Epochs objects
+        requires_epochs = any(
+            _pipeline_requires_epochs(clf) for clf in run_pipes.values()
+        )
+        return_epochs = True if requires_epochs else self.return_epochs
+        # For pipelines requiring epochs, don't pass process_pipeline to ensure it's created
+        # with return_epochs=True
         X, y, metadata = self.paradigm.get_data(
             dataset=dataset,
-            return_epochs=self.return_epochs,
+            return_epochs=return_epochs,
             return_raws=self.return_raws,
             cache_config=self.cache_config,
             postprocess_pipeline=postprocess_pipeline,
-            process_pipelines=[process_pipeline],
+            process_pipelines=None if requires_epochs else [process_pipeline],
         )
         le = LabelEncoder()
         y = y if self.mne_labels else le.fit_transform(y)
