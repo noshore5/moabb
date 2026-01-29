@@ -48,6 +48,7 @@ Bugs
 - Normalize Zenodo download paths and add a custom user-agent to improve download robustness (:gh:`946` by `Bruno Aristimunha`_)
 - Use the BNCI mirror host to avoid download timeouts (:gh:`946` by `Bruno Aristimunha`_)
 - Fix copytree FileExistsError in BrainInvaders2013a download by adding dirs_exist_ok=True (by `Bruno Aristimunha`_)
+- Ensure optional additional scoring columns in evaluation results (:gh:`957` by `Ethan Davis`_)
 
 Code health
 ~~~~~~~~~~~
