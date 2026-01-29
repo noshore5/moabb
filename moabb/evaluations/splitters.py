@@ -103,12 +103,17 @@ class WithinSessionSplitter(BaseCrossValidator):
                 indices = subject_indices[session_mask]
                 y_session = y_subject[session_mask]
 
+                # Reset random state for each session to match original evaluation
+                # behavior where a new splitter was created for each session
+                cv_kwargs = {**self._cv_kwargs}
+                if self.shuffle and "random_state" in cv_kwargs:
+                    cv_kwargs["random_state"] = check_random_state(self.random_state)
+
                 # Instantiate a new internal splitter for each session
-                splitter = self.cv_class(**self._cv_kwargs)
+                splitter = self.cv_class(**cv_kwargs)
 
                 # Split using the current instance of StratifiedKFold by default
                 for train_ix, test_ix in splitter.split(indices, y_session):
-
                     yield indices[train_ix], indices[test_ix]
 
 

@@ -194,95 +194,140 @@ class WithinSessionEvaluation(BaseEvaluation):
                 postprocess_pipeline=postprocess_pipeline,
                 process_pipelines=None if requires_epochs else [process_pipeline],
             )
-            # iterate over sessions
-            for session in np.unique(metadata.session):
-                ix = metadata.session == session
+            for name, clf in run_pipes.items():
+                # Create splitter ONCE - handles all sessions internally
+                self.cv = WithinSessionSplitter(
+                    n_folds=5,
+                    shuffle=True,
+                    random_state=self.random_state,
+                )
+                inner_cv = StratifiedKFold(
+                    3, shuffle=True, random_state=self.random_state
+                )
 
-                for name, clf in run_pipes.items():
-                    self.cv = WithinSessionSplitter(
-                        n_folds=5,
-                        shuffle=True,
-                        random_state=self.random_state,
-                    )
-                    inner_cv = StratifiedKFold(
-                        3, shuffle=True, random_state=self.random_state
-                    )
+                # Implement Grid Search
+                grid_clf = clone(clf)
+                grid_clf = self._grid_search(
+                    param_grid=param_grid,
+                    name=name,
+                    grid_clf=grid_clf,
+                    inner_cv=inner_cv,
+                )
 
-                    # Implement Grid Search
-                    grid_clf = clone(clf)
-                    grid_clf = self._grid_search(
-                        param_grid=param_grid,
-                        name=name,
-                        grid_clf=grid_clf,
-                        inner_cv=inner_cv,
-                    )
+                le = LabelEncoder()
+                y_cv = le.fit_transform(y)
+                y_ = y if self.mne_labels else y_cv
 
-                    le = LabelEncoder()
-                    y_cv = le.fit_transform(y[ix])
-                    X_ = X[ix]
-                    y_ = y[ix] if self.mne_labels else y_cv
-                    meta_ = metadata[ix].reset_index(drop=True)
-                    acc = list()
+                # Create scorer once before CV loop
+                scorer = _create_scorer(grid_clf, self.paradigm.scoring)
 
+                # Track session and accumulate scores per session
+                prev_session = None
+                acc = []
+                cv_ind = 0
+                n_samples_session = 0
+                duration = 0.0
+                emissions = np.nan
+                task_name = ""
+
+                if _carbonfootprint:
+                    # Initialise CodeCarbon per cross-validation
+                    tracker = EmissionsTracker(**self.codecarbon_config)
+                    tracker.start()
+
+                for train, test in self.cv.split(y_, metadata):
+                    session = metadata.iloc[test[0]]["session"]
+
+                    # When session changes, yield accumulated results and reset
+                    if session != prev_session and prev_session is not None:
+                        if _carbonfootprint:
+                            tracker.stop()
+
+                        nchan = (
+                            X.info["nchan"] if isinstance(X, BaseEpochs) else X.shape[1]
+                        )
+                        res = {
+                            "time": duration / 5,  # 5 fold CV
+                            "dataset": dataset,
+                            "subject": subject,
+                            "session": prev_session,
+                            "n_samples": n_samples_session,
+                            "n_channels": nchan,
+                            "pipeline": name,
+                        }
+                        mean_scores = _average_scores(acc)
+                        _update_result_with_scores(res, mean_scores)
+
+                        if _carbonfootprint:
+                            res["carbon_emission"] = (1000 * emissions,)
+                            res["codecarbon_task_name"] = task_name
+
+                        yield res
+                        acc = []
+                        cv_ind = 0
+                        n_samples_session = 0
+
+                        if _carbonfootprint:
+                            tracker = EmissionsTracker(**self.codecarbon_config)
+                            tracker.start()
+
+                    prev_session = session
+
+                    # Get session-specific sample count on first fold
+                    if cv_ind == 0:
+                        session_mask = metadata["session"] == session
+                        n_samples_session = session_mask.sum()
+
+                    cvclf = clone(grid_clf)
+
+                    # Fit classifier with tracking
                     if _carbonfootprint:
-                        # Initialise CodeCarbon per cross-validation
-                        tracker = EmissionsTracker(**self.codecarbon_config)
-                        tracker.start()
+                        task_name = str(uuid4())
+                        tracker.start_task(task_name)
+                    t_start = perf_counter()
+                    cvclf.fit(X[train], y_[train])
+                    duration = perf_counter() - t_start
+                    if _carbonfootprint:
+                        emissions_data = tracker.stop_task()
+                        emissions = emissions_data.emissions if emissions_data else np.nan
 
-                    # Create scorer once before CV loop
-                    scorer = _create_scorer(grid_clf, self.paradigm.scoring)
+                    if self.hdf5_path is not None and self.save_model:
+                        model_save_path = _create_save_path(
+                            self.hdf5_path,
+                            dataset.code,
+                            subject,
+                            session,
+                            name,
+                            grid=self.search,
+                            eval_type="WithinSession",
+                        )
+                        _save_model_cv(
+                            model=cvclf,
+                            save_path=model_save_path,
+                            cv_index=cv_ind,
+                        )
 
-                    for cv_ind, (train, test) in enumerate(self.cv.split(y_, meta_)):
-                        cvclf = clone(grid_clf)
+                    _ensure_fitted(cvclf)
+                    # scorer always returns dict
+                    score = scorer(cvclf, X[test], y_[test])
+                    acc.append(score)
+                    cv_ind += 1
 
-                        # Fit classifier with tracking
-                        if _carbonfootprint:
-                            task_name = str(uuid4())
-                            tracker.start_task(task_name)
-                        t_start = perf_counter()
-                        cvclf.fit(X_[train], y_[train])
-                        duration = perf_counter() - t_start
-                        if _carbonfootprint:
-                            emissions_data = tracker.stop_task()
-                            emissions = (
-                                emissions_data.emissions if emissions_data else np.nan
-                            )
-
-                        if self.hdf5_path is not None and self.save_model:
-                            model_save_path = _create_save_path(
-                                self.hdf5_path,
-                                dataset.code,
-                                subject,
-                                session,
-                                name,
-                                grid=self.search,
-                                eval_type="WithinSession",
-                            )
-                            _save_model_cv(
-                                model=cvclf,
-                                save_path=model_save_path,
-                                cv_index=cv_ind,
-                            )
-
-                        _ensure_fitted(cvclf)
-                        # scorer always returns dict
-                        score = scorer(cvclf, X_[test], y_[test])
-                        acc.append(score)
-
+                # Yield the last session
+                if acc:
                     if _carbonfootprint:
                         tracker.stop()
 
                     nchan = X.info["nchan"] if isinstance(X, BaseEpochs) else X.shape[1]
                     res = {
-                        "time": duration / self.cv.n_folds,  # 5 fold CV
+                        "time": duration / 5,  # 5 fold CV
                         "dataset": dataset,
                         "subject": subject,
-                        "session": session,
-                        "n_samples": len(y_cv),  # not training sample
+                        "session": prev_session,
+                        "n_samples": n_samples_session,
                         "n_channels": nchan,
                         "pipeline": name,
                     }
-
                     mean_scores = _average_scores(acc)
                     _update_result_with_scores(res, mean_scores)
 
@@ -369,94 +414,113 @@ class WithinSessionEvaluation(BaseEvaluation):
                 postprocess_pipeline=postprocess_pipeline,
                 process_pipelines=[process_pipeline],
             )
-            # shuffle_data = True if self.n_perms > 1 else False
-            for session in np.unique(metadata_all.session):
-                sess_idx = metadata_all.session == session
-                X_sess = X_all[sess_idx]
-                y_sess = y_all[sess_idx]
-                # metadata_sess = metadata_all[sess_idx]
 
-                # Initialize tracker once per session instead of per iteration
-                if _carbonfootprint:
-                    tracker = EmissionsTracker(**self.codecarbon_config)
-                    tracker.start()
+            # Use WithinSessionSplitter with StratifiedShuffleSplit as inner CV
+            splitter = WithinSessionSplitter(
+                n_folds=self.n_perms[0],
+                shuffle=True,
+                random_state=self.random_state,
+                cv_class=StratifiedShuffleSplit,
+                test_size=self.test_size,
+            )
 
-                sss = StratifiedShuffleSplit(
-                    n_splits=self.n_perms[0], test_size=self.test_size
-                )
-                for perm_i, (train_idx, test_idx) in enumerate(sss.split(X_sess, y_sess)):
-                    X_train_all = X_sess[train_idx]
-                    y_train_all = y_sess[train_idx]
-                    X_test = X_sess[test_idx]
-                    y_test = y_sess[test_idx]
-                    data_size_steps = self.get_data_size_subsets(y_train_all)
-                    for di, subset_indices in enumerate(data_size_steps):
-                        if perm_i >= self.n_perms[di]:
-                            continue
-                        not_enough_data = False
-                        log.info(
-                            f"Permutation: {perm_i + 1},"
-                            f" Training samples: {len(subset_indices)}"
+            prev_session = None
+            perm_i = 0
+            tracker = None
+
+            for train_idx, test_idx in splitter.split(y_all, metadata_all):
+                session = metadata_all.iloc[test_idx[0]]["session"]
+
+                # Reset permutation counter when session changes
+                if session != prev_session:
+                    perm_i = 0
+                    if _carbonfootprint:
+                        # Stop previous tracker if exists
+                        if tracker is not None:
+                            try:
+                                tracker.stop()
+                            except Exception:
+                                pass
+                        tracker = EmissionsTracker(**self.codecarbon_config)
+                        tracker.start()
+                    prev_session = session
+
+                X_train_all = X_all[train_idx]
+                y_train_all = y_all[train_idx]
+                X_test = X_all[test_idx]
+                y_test = y_all[test_idx]
+
+                # Data subsetting logic stays here (not in splitter)
+                data_size_steps = self.get_data_size_subsets(y_train_all)
+                for di, subset_indices in enumerate(data_size_steps):
+                    if perm_i >= self.n_perms[di]:
+                        continue
+                    not_enough_data = False
+                    log.info(
+                        f"Permutation: {perm_i + 1},"
+                        f" Training samples: {len(subset_indices)}"
+                    )
+
+                    if self.return_epochs:
+                        X_train = X_train_all[subset_indices]
+                    else:
+                        X_train = X_train_all[subset_indices, :]
+                    y_train = y_train_all[subset_indices]
+
+                    if len(np.unique(y_train)) < 2:
+                        log.warning(
+                            "For current data size, only one class" "would remain."
                         )
-
-                        if self.return_epochs:
-                            X_train = X_train_all[subset_indices]
+                        not_enough_data = True
+                    nchan = (
+                        X_train.info["nchan"]
+                        if isinstance(X_train, BaseEpochs)
+                        else X_train.shape[1]
+                    )
+                    for name, clf in run_pipes.items():
+                        res = {
+                            "dataset": dataset,
+                            "subject": subject,
+                            "session": session,
+                            "n_samples": len(y_train),
+                            "n_channels": nchan,
+                            "pipeline": name,
+                            # Additional columns
+                            "data_size": len(subset_indices),
+                            "permutation": perm_i + 1,
+                        }
+                        if not_enough_data:
+                            res["time"] = 0
+                            res["score"] = np.nan
+                            if _carbonfootprint:
+                                res["carbon_emission"] = (np.nan,)
+                                res["codecarbon_task_name"] = ""
                         else:
-                            X_train = X_train_all[subset_indices, :]
-                        y_train = y_train_all[subset_indices]
-                        # metadata = metadata_perm[:subset_indices]
+                            if _carbonfootprint:
+                                task_name = str(uuid4())
+                                tracker.start_task(task_name)
 
-                        if len(np.unique(y_train)) < 2:
-                            log.warning(
-                                "For current data size, only one class" "would remain."
+                            self.score_explicit(
+                                res, deepcopy(clf), X_train, y_train, X_test, y_test
                             )
-                            not_enough_data = True
-                        nchan = (
-                            X_train.info["nchan"]
-                            if isinstance(X_train, BaseEpochs)
-                            else X_train.shape[1]
-                        )
-                        for name, clf in run_pipes.items():
-                            res = {
-                                "dataset": dataset,
-                                "subject": subject,
-                                "session": session,
-                                "n_samples": len(y_train),
-                                "n_channels": nchan,
-                                "pipeline": name,
-                                # Additional columns
-                                "data_size": len(subset_indices),
-                                "permutation": perm_i + 1,
-                            }
-                            if not_enough_data:
-                                res["time"] = 0
-                                res["score"] = np.nan
-                                if _carbonfootprint:
-                                    res["carbon_emission"] = (np.nan,)
-                                    res["codecarbon_task_name"] = ""
-                            else:
-                                if _carbonfootprint:
-                                    task_name = str(uuid4())
-                                    tracker.start_task(task_name)
 
-                                self.score_explicit(
-                                    res, deepcopy(clf), X_train, y_train, X_test, y_test
+                            if _carbonfootprint:
+                                emissions_data = tracker.stop_task()
+                                emissions = (
+                                    emissions_data.emissions if emissions_data else np.nan
                                 )
+                                res["carbon_emission"] = (1000 * emissions,)
+                                res["codecarbon_task_name"] = task_name
+                        yield res
 
-                                if _carbonfootprint:
-                                    emissions_data = tracker.stop_task()
-                                    emissions = (
-                                        emissions_data.emissions
-                                        if emissions_data
-                                        else np.nan
-                                    )
-                                    res["carbon_emission"] = (1000 * emissions,)
-                                    res["codecarbon_task_name"] = task_name
-                            yield res
+                perm_i += 1
 
-                # Stop tracker after session is complete
-                if _carbonfootprint:
+            # Stop tracker after all sessions complete
+            if _carbonfootprint:
+                try:
                     tracker.stop()
+                except Exception:
+                    pass
 
     def evaluate(
         self, dataset, pipelines, param_grid, process_pipeline, postprocess_pipeline=None

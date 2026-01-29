@@ -63,7 +63,10 @@ def eval_split_within_session(shuffle, random_state, data):
             metadata_ = subject_metadata[session_mask]
             y_ = y_subject[session_mask]
 
-            cv = StratifiedKFold(n_splits=5, shuffle=shuffle, random_state=rng)
+            # Reset random state for each session to match original evaluation
+            # behavior where a new splitter was created for each session
+            session_rng = check_random_state(random_state) if shuffle else None
+            cv = StratifiedKFold(n_splits=5, shuffle=shuffle, random_state=session_rng)
 
             for idx_train, idx_test in cv.split(metadata_, y_):
                 yield indices[idx_train], indices[idx_test]
