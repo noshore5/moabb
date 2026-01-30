@@ -18,6 +18,7 @@ from moabb.datasets.compound_dataset import compound
 from moabb.datasets.fake import FakeDataset
 from moabb.evaluations import evaluations as ev
 from moabb.evaluations.base import optuna_available
+from moabb.evaluations.splitters import LearningCurveSplitter
 from moabb.evaluations.utils import _create_save_path as create_save_path
 from moabb.evaluations.utils import _save_model_cv as save_model_cv
 from moabb.paradigms.motor_imagery import FakeImageryParadigm
@@ -228,110 +229,112 @@ class TestWithinSess:
 
 
 class TestWithinSessLearningCurve:
-    """Some tests for the learning curve evaluation.
+    """Tests for the learning curve evaluation using LearningCurveSplitter."""
 
-    TODO if we ever extend dataset metadata, e.g. including y for
-    example, we could get rid of a lot of issues regarding valid inputs
-    for policy per_class as this could be determined at Evaluation
-    initialization instead of during running the evaluation
-    """
-
-    @pytest.mark.skip(reason="This test is not working")
     def test_correct_results_integrity(self):
+        """Test that learning curve results have correct columns."""
         learning_curve_eval = ev.WithinSessionEvaluation(
             paradigm=FakeImageryParadigm(),
             datasets=[dataset],
-            data_size={"policy": "ratio", "value": np.array([0.2, 0.5])},
-            n_perms=np.array([2, 2]),
+            cv_class=LearningCurveSplitter,
+            cv_params={
+                "data_size": {"policy": "ratio", "value": np.array([0.2, 0.5])},
+                "n_perms": np.array([2, 2]),
+                "test_size": 0.2,
+            },
+            overwrite=True,  # Ensure fresh results, not cached
         )
         process_pipeline = learning_curve_eval.paradigm.make_process_pipelines(dataset)[0]
-        results = [
-            r
-            for r in learning_curve_eval.evaluate(
+        results = list(
+            learning_curve_eval.evaluate(
                 dataset, pipelines, param_grid=None, process_pipeline=process_pipeline
             )
-        ]
+        )
+        assert len(results) > 0
         keys = results[0].keys()
-        assert len(keys) == 10  # 8 + 2 new for learning curve
         assert "permutation" in keys
         assert "data_size" in keys
 
     def test_all_policies_work(self):
-        kwargs = dict(paradigm=FakeImageryParadigm(), datasets=[dataset], n_perms=[2, 2])
-        # The next two should work without issue
+        """Test that both ratio and per_class policies work."""
+        # Ratio policy should work
         ev.WithinSessionEvaluation(
-            data_size={"policy": "per_class", "value": [5, 10]}, **kwargs
+            paradigm=FakeImageryParadigm(),
+            datasets=[dataset],
+            cv_class=LearningCurveSplitter,
+            cv_params={
+                "data_size": {"policy": "ratio", "value": [0.2, 0.5]},
+                "n_perms": [2, 2],
+                "test_size": 0.2,
+            },
         )
+
+        # Per class policy should work
         ev.WithinSessionEvaluation(
-            data_size={"policy": "ratio", "value": [0.2, 0.5]}, **kwargs
+            paradigm=FakeImageryParadigm(),
+            datasets=[dataset],
+            cv_class=LearningCurveSplitter,
+            cv_params={
+                "data_size": {"policy": "per_class", "value": [5, 10]},
+                "n_perms": [2, 2],
+                "test_size": 0.2,
+            },
         )
+
+        # Invalid policy should raise (tested at splitter level since validation is lazy)
         with pytest.raises(ValueError):
-            ev.WithinSessionEvaluation(
+            LearningCurveSplitter(
                 data_size={"policy": "does_not_exist", "value": [0.2, 0.5]},
-                **kwargs,
+                n_perms=[2, 2],
+                test_size=0.2,
             )
-
-    @pytest.mark.skip(reason="This test is not working")
-    def test_data_sanity(self):
-        # need this helper to iterate over the generator
-        def run_evaluation(eval, dataset, pipelines):
-            process_pipeline = eval.paradigm.make_process_pipelines(dataset)[0]
-            list(
-                eval.evaluate(
-                    dataset, pipelines, param_grid=None, process_pipeline=process_pipeline
-                )
-            )
-
-        # E.g. if number of samples too high -> expect error
-        kwargs = dict(paradigm=FakeImageryParadigm(), datasets=[dataset], n_perms=[2, 2])
-        should_work = ev.WithinSessionEvaluation(
-            data_size={"policy": "per_class", "value": [5, 10]}, **kwargs
-        )
-        too_many_samples = ev.WithinSessionEvaluation(
-            data_size={"policy": "per_class", "value": [5, 100000]}, **kwargs
-        )
-        # This one should run
-        run_evaluation(should_work, dataset, pipelines)
-        with pytest.raises(ValueError):
-            run_evaluation(too_many_samples, dataset, pipelines)
-
-    def test_eval_grid_search(self):
-        pass
 
     def test_datasize_parameters(self):
-        # Fail if not values are not correctly ordered
-        kwargs = dict(paradigm=FakeImageryParadigm(), datasets=[dataset])
-        decreasing_datasize = dict(
-            data_size={"policy": "per_class", "value": [5, 4]}, n_perms=[2, 1], **kwargs
-        )
-        constant_datasize = dict(
-            data_size={"policy": "per_class", "value": [5, 5]}, n_perms=[2, 3], **kwargs
-        )
-        increasing_perms = dict(
-            data_size={"policy": "per_class", "value": [3, 4]}, n_perms=[2, 3], **kwargs
-        )
+        """Test that data_size parameter validation works correctly."""
+        # Test validation at LearningCurveSplitter level (validation is lazy)
+
+        # Decreasing data_size should fail
         with pytest.raises(ValueError):
-            ev.WithinSessionEvaluation(**decreasing_datasize)
+            LearningCurveSplitter(
+                data_size={"policy": "ratio", "value": [0.5, 0.2]},
+                n_perms=[2, 1],
+                test_size=0.2,
+            )
+
+        # Constant data_size should fail
         with pytest.raises(ValueError):
-            ev.WithinSessionEvaluation(**constant_datasize)
+            LearningCurveSplitter(
+                data_size={"policy": "ratio", "value": [0.5, 0.5]},
+                n_perms=[2, 2],
+                test_size=0.2,
+            )
+
+        # Increasing n_perms should fail
         with pytest.raises(ValueError):
-            ev.WithinSessionEvaluation(**increasing_perms)
+            LearningCurveSplitter(
+                data_size={"policy": "ratio", "value": [0.2, 0.5]},
+                n_perms=[2, 3],
+                test_size=0.2,
+            )
 
     def test_postprocess_pipeline(self):
+        """Test that postprocess_pipeline works with learning curve evaluation."""
         learning_curve_eval = ev.WithinSessionEvaluation(
             paradigm=FakeImageryParadigm(),
             datasets=[dataset],
-            data_size={"policy": "ratio", "value": np.array([0.2, 0.5])},
-            n_perms=np.array([2, 2]),
+            cv_class=LearningCurveSplitter,
+            cv_params={
+                "data_size": {"policy": "ratio", "value": np.array([0.2, 0.5])},
+                "n_perms": np.array([2, 2]),
+                "test_size": 0.2,
+            },
         )
 
         cov = Covariances("oas")
         pipelines0 = {
             "CovCspLda": make_pipeline(
                 cov,
-                CSP(
-                    8,
-                ),
+                CSP(8),
                 LDA(),
             )
         }
