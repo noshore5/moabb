@@ -1,7 +1,7 @@
 import logging
 from copy import deepcopy
 from time import perf_counter
-from typing import Optional, Union
+from typing import Optional
 from uuid import uuid4
 
 import numpy as np
@@ -11,7 +11,6 @@ from sklearn.model_selection import (
     GroupKFold,
     LeaveOneGroupOut,
     StratifiedKFold,
-    StratifiedShuffleSplit,
 )
 from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
@@ -20,6 +19,7 @@ from moabb.evaluations.base import BaseEvaluation
 from moabb.evaluations.splitters import (
     CrossSessionSplitter,
     CrossSubjectSplitter,
+    LearningCurveSplitter,
     WithinSessionSplitter,
 )
 from moabb.evaluations.utils import (
@@ -56,35 +56,28 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
-# Numpy ArrayLike is only available starting from Numpy 1.20 and Python 3.8
-Vector = Union[list, tuple, np.ndarray]
-
 
 class WithinSessionEvaluation(BaseEvaluation):
     """Performance evaluation within session (k-fold cross-validation)
 
     Within-session evaluation uses k-fold cross_validation to determine train
-    and test sets on separate session for each subject, it is possible to
-    estimate the performance on a subset of training examples to obtain
-    learning curves.
+    and test sets on separate session for each subject. You can customize the
+    cross-validation strategy.
 
     Parameters
     ----------
-    n_perms :
-        Number of permutations to perform. If an array
-        is passed it has to be equal in size to the data_size array.
-        Values in this array must be monotonically decreasing (performing
-        more permutations for more data is not useful to reduce standard
-        error of the mean).
-        Default: None
-    data_size :
-        If None is passed, it performs conventional WithinSession evaluation.
-        Contains the policy to pick the datasizes to
-        evaluate, as well as the actual values. The dict has the
-        key 'policy' with either 'ratio' or 'per_class', and the key
-        'value' with the actual values as an numpy array. This array should be
-        sorted, such that values in data_size are strictly monotonically increasing.
-        Default: None
+    n_splits : int, default=5
+        Number of splits/folds for cross-validation.
+    cv_class : sklearn cross-validator class, default=StratifiedKFold
+        The cross-validation class to use. Examples: StratifiedKFold,
+        StratifiedShuffleSplit, TimeSeriesSplit, etc.
+    cv_params : dict, optional
+        Additional parameters to pass to the cv_class constructor.
+        Example: {'test_size': 0.2} for StratifiedShuffleSplit.
+    return_fold_results : bool, default=False
+        If True, return results for each fold separately instead of averaging.
+        Useful for learning curves (with TimeSeriesSplit) or when you need
+        per-fold statistics.
     paradigm : Paradigm instance
         The paradigm to use.
     datasets : List of Dataset instance
@@ -97,8 +90,7 @@ class WithinSessionEvaluation(BaseEvaluation):
     overwrite: bool, default=False
         If true, overwrite the results.
     error_score: "raise" or numeric, default="raise"
-        Value to assign to the score if an error occurs in estimator fitting. If set to
-        'raise', the error is raised.
+        Value to assign to the score if an error occurs in estimator fitting.
     suffix: str
         Suffix for the results file.
     hdf5_path: str
@@ -111,52 +103,68 @@ class WithinSessionEvaluation(BaseEvaluation):
         use MNE raw to train pipelines.
     mne_labels: bool, default=False
         if returning MNE epoch, use original dataset label if True
-    """
 
-    VALID_POLICIES = ["per_class", "ratio"]
+    Examples
+    --------
+    Standard 5-fold cross-validation (default):
+
+    >>> evaluation = WithinSessionEvaluation(paradigm=paradigm, datasets=[dataset])
+
+    Using TimeSeriesSplit for learning curves:
+
+    >>> from sklearn.model_selection import TimeSeriesSplit
+    >>> evaluation = WithinSessionEvaluation(
+    ...     paradigm=paradigm,
+    ...     datasets=[dataset],
+    ...     cv_class=TimeSeriesSplit,
+    ...     n_splits=5,
+    ...     return_fold_results=True,
+    ... )
+
+    Using StratifiedShuffleSplit with multiple permutations:
+
+    >>> from sklearn.model_selection import StratifiedShuffleSplit
+    >>> evaluation = WithinSessionEvaluation(
+    ...     paradigm=paradigm,
+    ...     datasets=[dataset],
+    ...     cv_class=StratifiedShuffleSplit,
+    ...     n_splits=10,
+    ...     cv_params={'test_size': 0.2},
+    ...     return_fold_results=True,
+    ... )
+    """
 
     def __init__(
         self,
-        n_perms: Optional[Union[int, Vector]] = None,
-        data_size: Optional[dict] = None,
+        n_splits: int = 5,
+        cv_class: type = None,
+        cv_params: Optional[dict] = None,
+        return_fold_results: bool = False,
         **kwargs,
     ):
-        self.data_size = data_size
-        self.n_perms = n_perms
-        self.calculate_learning_curve = self.data_size is not None
-        if self.calculate_learning_curve:
-            # Check correct n_perms parameter
-            if self.n_perms is None:
-                raise ValueError(
-                    "When passing data_size, please also indicate number of permutations"
-                )
-            if isinstance(n_perms, int):
-                self.n_perms = np.full_like(self.data_size["value"], n_perms, dtype=int)
-            elif len(self.n_perms) != len(self.data_size["value"]):
-                raise ValueError(
-                    "Number of elements in n_perms must be equal "
-                    "to number of elements in data_size['value']"
-                )
-            elif not np.all(np.diff(n_perms) <= 0):
-                raise ValueError(
-                    "If n_perms is passed as an array, it has to be monotonically decreasing"
-                )
-            # Check correct data size parameter
-            if not np.all(np.diff(self.data_size["value"]) > 0):
-                raise ValueError(
-                    "data_size['value'] must be sorted in strictly monotonically increasing order."
-                )
-            if data_size["policy"] not in WithinSessionEvaluation.VALID_POLICIES:
-                raise ValueError(
-                    f"{data_size['policy']} is not valid. Please use one of"
-                    f"{WithinSessionEvaluation.VALID_POLICIES}"
-                )
-            self.test_size = 0.2  # Roughly similar to 5-fold CV
+        # Store values before calling super().__init__ which may overwrite them
+        _n_splits = n_splits
+        self.cv_class = cv_class if cv_class is not None else StratifiedKFold
+        self.cv_params = cv_params if cv_params is not None else {}
+        self.return_fold_results = return_fold_results
+
+        # Check if using LearningCurveSplitter
+        self._is_learning_curve = self.cv_class is LearningCurveSplitter
+
+        # Determine additional columns
+        if self._is_learning_curve:
+            # Learning curve mode - always return fold results with data_size and permutation
+            self.return_fold_results = True
             add_cols = ["data_size", "permutation"]
             super().__init__(additional_columns=add_cols, **kwargs)
+        elif self.return_fold_results:
+            add_cols = ["fold"]
+            super().__init__(additional_columns=add_cols, **kwargs)
         else:
-            # Perform default within session evaluation
             super().__init__(**kwargs)
+
+        # Set n_splits after super().__init__ to avoid being overwritten
+        self.n_splits = _n_splits
 
     # flake8: noqa: C901
     def _evaluate(
@@ -194,67 +202,179 @@ class WithinSessionEvaluation(BaseEvaluation):
                 postprocess_pipeline=postprocess_pipeline,
                 process_pipelines=None if requires_epochs else [process_pipeline],
             )
-            for name, clf in run_pipes.items():
-                # Create splitter ONCE - handles all sessions internally
-                self.cv = WithinSessionSplitter(
-                    n_folds=5,
-                    shuffle=True,
-                    random_state=self.random_state,
-                )
-                inner_cv = StratifiedKFold(
-                    3, shuffle=True, random_state=self.random_state
-                )
+            # iterate over sessions
+            for session in np.unique(metadata.session):
+                ix = metadata.session == session
 
-                # Implement Grid Search
-                grid_clf = clone(clf)
-                grid_clf = self._grid_search(
-                    param_grid=param_grid,
-                    name=name,
-                    grid_clf=grid_clf,
-                    inner_cv=inner_cv,
-                )
+                for name, clf in run_pipes.items():
+                    # Create WithinSessionSplitter with configurable cv_class
+                    # Determine if we need shuffle based on cv_class
+                    shuffle = self.random_state is not None
 
-                le = LabelEncoder()
-                y_cv = le.fit_transform(y)
-                y_ = y if self.mne_labels else y_cv
+                    # Prepare cv_params for inner cv_class, filtering out random_state
+                    # since it's handled separately
+                    cv_params = {
+                        k: v for k, v in self.cv_params.items() if k != "random_state"
+                    }
 
-                # Create scorer once before CV loop
-                scorer = _create_scorer(grid_clf, self.paradigm.scoring)
+                    if self._is_learning_curve:
+                        # For LearningCurveSplitter, pass random_state to control the
+                        # StratifiedShuffleSplit randomness
+                        lc_random_state = self.cv_params.get(
+                            "random_state", self.random_state
+                        )
+                        cv_params["random_state"] = lc_random_state
+                        # Don't shuffle subjects/sessions for learning curve
+                        # (we want deterministic session order)
+                        self.cv = WithinSessionSplitter(
+                            n_folds=self.n_splits,
+                            shuffle=False,
+                            cv_class=self.cv_class,
+                            **cv_params,
+                        )
+                    else:
+                        self.cv = WithinSessionSplitter(
+                            n_folds=self.n_splits,
+                            shuffle=shuffle,
+                            random_state=self.random_state,
+                            cv_class=self.cv_class,
+                            **cv_params,
+                        )
+                    inner_cv = StratifiedKFold(
+                        3, shuffle=True, random_state=self.random_state
+                    )
 
-                # Track session and accumulate scores per session
-                prev_session = None
-                acc = []
-                cv_ind = 0
-                n_samples_session = 0
-                duration = 0.0
-                emissions = np.nan
-                task_name = ""
+                    # Implement Grid Search
+                    grid_clf = clone(clf)
+                    grid_clf = self._grid_search(
+                        param_grid=param_grid,
+                        name=name,
+                        grid_clf=grid_clf,
+                        inner_cv=inner_cv,
+                    )
 
-                if _carbonfootprint:
-                    # Initialise CodeCarbon per cross-validation
-                    tracker = EmissionsTracker(**self.codecarbon_config)
-                    tracker.start()
+                    le = LabelEncoder()
+                    y_cv = le.fit_transform(y[ix])
+                    X_ = X[ix]
+                    y_ = y[ix] if self.mne_labels else y_cv
+                    meta_ = metadata[ix].reset_index(drop=True)
+                    acc = list()
 
-                for train, test in self.cv.split(y_, metadata):
-                    session = metadata.iloc[test[0]]["session"]
+                    # Initialize carbon tracking for this session
+                    duration = 0.0
+                    emissions = np.nan
+                    task_name = ""
+                    if _carbonfootprint:
+                        tracker = EmissionsTracker(**self.codecarbon_config)
+                        tracker.start()
 
-                    # When session changes, yield accumulated results and reset
-                    if session != prev_session and prev_session is not None:
-                        if _carbonfootprint:
-                            tracker.stop()
+                    # Create scorer once before CV loop
+                    scorer = _create_scorer(grid_clf, self.paradigm.scoring)
 
+                    for cv_ind, (train, test) in enumerate(self.cv.split(y_, meta_)):
+                        cvclf = clone(grid_clf)
+
+                        # For learning curve: check if training data has enough classes
+                        not_enough_data = False
+                        if self._is_learning_curve and len(np.unique(y_[train])) < 2:
+                            log.warning(
+                                "For current data size, only one class would remain."
+                            )
+                            not_enough_data = True
+
+                        if not_enough_data:
+                            # Skip training and scoring, return NaN
+                            duration = 0.0
+                            score = {"score": np.nan}
+                            if _carbonfootprint:
+                                emissions = np.nan
+                                task_name = ""
+                        else:
+                            # Fit classifier with tracking
+                            if _carbonfootprint:
+                                task_name = str(uuid4())
+                                tracker.start_task(task_name)
+                            t_start = perf_counter()
+                            cvclf.fit(X_[train], y_[train])
+                            duration = perf_counter() - t_start
+                            if _carbonfootprint:
+                                emissions_data = tracker.stop_task()
+                                emissions = (
+                                    emissions_data.emissions if emissions_data else np.nan
+                                )
+
+                            if self.hdf5_path is not None and self.save_model:
+                                model_save_path = _create_save_path(
+                                    self.hdf5_path,
+                                    dataset.code,
+                                    subject,
+                                    session,
+                                    name,
+                                    grid=self.search,
+                                    eval_type="WithinSession",
+                                )
+                                _save_model_cv(
+                                    model=cvclf,
+                                    save_path=model_save_path,
+                                    cv_index=cv_ind,
+                                )
+
+                            _ensure_fitted(cvclf)
+                            # scorer always returns dict
+                            score = scorer(cvclf, X_[test], y_[test])
+
+                        if self.return_fold_results:
+                            # Return each fold separately
+                            nchan = (
+                                X_.info["nchan"]
+                                if isinstance(X_, BaseEpochs)
+                                else X_.shape[1]
+                            )
+                            res = {
+                                "time": duration,
+                                "dataset": dataset,
+                                "subject": subject,
+                                "session": session,
+                                "n_samples": len(train),
+                                "n_channels": nchan,
+                                "pipeline": name,
+                            }
+
+                            # Add learning curve metadata if available
+                            if self._is_learning_curve:
+                                lc_metadata = self.cv.get_inner_splitter_metadata()
+                                if lc_metadata:
+                                    res["data_size"] = lc_metadata["data_size"]
+                                    res["permutation"] = lc_metadata["permutation"]
+                            else:
+                                res["fold"] = cv_ind
+
+                            _update_result_with_scores(res, score)
+                            if _carbonfootprint:
+                                res["carbon_emission"] = (1000 * emissions,)
+                                res["codecarbon_task_name"] = task_name
+                            yield res
+                        else:
+                            acc.append(score)
+
+                    if _carbonfootprint:
+                        tracker.stop()
+
+                    # For standard evaluation (not return_fold_results), yield averaged result
+                    if not self.return_fold_results:
                         nchan = (
                             X.info["nchan"] if isinstance(X, BaseEpochs) else X.shape[1]
                         )
                         res = {
-                            "time": duration / 5,  # 5 fold CV
+                            "time": duration / self.n_splits,
                             "dataset": dataset,
                             "subject": subject,
-                            "session": prev_session,
-                            "n_samples": n_samples_session,
+                            "session": session,
+                            "n_samples": len(y_cv),
                             "n_channels": nchan,
                             "pipeline": name,
                         }
+
                         mean_scores = _average_scores(acc)
                         _update_result_with_scores(res, mean_scores)
 
@@ -263,276 +383,13 @@ class WithinSessionEvaluation(BaseEvaluation):
                             res["codecarbon_task_name"] = task_name
 
                         yield res
-                        acc = []
-                        cv_ind = 0
-                        n_samples_session = 0
-
-                        if _carbonfootprint:
-                            tracker = EmissionsTracker(**self.codecarbon_config)
-                            tracker.start()
-
-                    prev_session = session
-
-                    # Get session-specific sample count on first fold
-                    if cv_ind == 0:
-                        session_mask = metadata["session"] == session
-                        n_samples_session = session_mask.sum()
-
-                    cvclf = clone(grid_clf)
-
-                    # Fit classifier with tracking
-                    if _carbonfootprint:
-                        task_name = str(uuid4())
-                        tracker.start_task(task_name)
-                    t_start = perf_counter()
-                    cvclf.fit(X[train], y_[train])
-                    duration = perf_counter() - t_start
-                    if _carbonfootprint:
-                        emissions_data = tracker.stop_task()
-                        emissions = emissions_data.emissions if emissions_data else np.nan
-
-                    if self.hdf5_path is not None and self.save_model:
-                        model_save_path = _create_save_path(
-                            self.hdf5_path,
-                            dataset.code,
-                            subject,
-                            session,
-                            name,
-                            grid=self.search,
-                            eval_type="WithinSession",
-                        )
-                        _save_model_cv(
-                            model=cvclf,
-                            save_path=model_save_path,
-                            cv_index=cv_ind,
-                        )
-
-                    _ensure_fitted(cvclf)
-                    # scorer always returns dict
-                    score = scorer(cvclf, X[test], y_[test])
-                    acc.append(score)
-                    cv_ind += 1
-
-                # Yield the last session
-                if acc:
-                    if _carbonfootprint:
-                        tracker.stop()
-
-                    nchan = X.info["nchan"] if isinstance(X, BaseEpochs) else X.shape[1]
-                    res = {
-                        "time": duration / 5,  # 5 fold CV
-                        "dataset": dataset,
-                        "subject": subject,
-                        "session": prev_session,
-                        "n_samples": n_samples_session,
-                        "n_channels": nchan,
-                        "pipeline": name,
-                    }
-                    mean_scores = _average_scores(acc)
-                    _update_result_with_scores(res, mean_scores)
-
-                    if _carbonfootprint:
-                        res["carbon_emission"] = (1000 * emissions,)
-                        res["codecarbon_task_name"] = task_name
-
-                    yield res
-
-    def get_data_size_subsets(self, y):
-        if self.data_size is None:
-            raise ValueError(
-                "Cannot create data subsets without valid policy for data_size."
-            )
-        if self.data_size["policy"] == "ratio":
-            vals = np.array(self.data_size["value"])
-            if np.any(vals < 0) or np.any(vals > 1):
-                raise ValueError("Data subset ratios must be in range [0, 1]")
-            upto = np.ceil(vals * len(y)).astype(int)
-            indices = [np.array(range(i)) for i in upto]
-        elif self.data_size["policy"] == "per_class":
-            classwise_indices = dict()
-            n_smallest_class = np.inf
-            for cl in np.unique(y):
-                cl_i = np.where(cl == y)[0]
-                classwise_indices[cl] = cl_i
-                n_smallest_class = (
-                    len(cl_i) if len(cl_i) < n_smallest_class else n_smallest_class
-                )
-            indices = []
-            for ds in self.data_size["value"]:
-                if ds > n_smallest_class:
-                    raise ValueError(
-                        f"Smallest class has {n_smallest_class} samples. "
-                        f"Desired samples per class {ds} is too large."
-                    )
-                indices.append(
-                    np.concatenate(
-                        [classwise_indices[cl][:ds] for cl in classwise_indices]
-                    )
-                )
-        else:
-            raise ValueError(f"Unknown policy {self.data_size['policy']}")
-        return indices
-
-    def score_explicit(self, res, clf, X_train, y_train, X_test, y_test):
-        """Fit model and update result dict with scores and duration."""
-        if not self.mne_labels:
-            # convert labels if array, keep them if epochs and mne_labels is set
-            le = LabelEncoder()
-            y_train = le.fit_transform(y_train)
-            y_test = le.transform(y_test)
-        t_start = perf_counter()
-        try:
-            model = clf.fit(X_train, y_train)
-            _ensure_fitted(model)
-            scorer = _create_scorer(model, self.paradigm.scoring)
-            _score_and_update(res, scorer, model, X_test, y_test)
-        except ValueError as e:
-            if self.error_score == "raise":
-                raise e
-            res["score"] = self.error_score
-        res["time"] = perf_counter() - t_start
-
-    def _evaluate_learning_curve(
-        self, dataset, pipelines, process_pipeline, postprocess_pipeline
-    ):
-        # Progressbar at subject level
-        for subject in tqdm(dataset.subject_list, desc=f"{dataset.code}-WithinSession"):
-            # check if we already have result for this subject/pipeline
-            # we might need a better granularity, if we query the DB
-            run_pipes = self.results.not_yet_computed(
-                pipelines, dataset, subject, process_pipeline
-            )
-            if len(run_pipes) == 0:
-                continue
-
-            # get the data
-            X_all, y_all, metadata_all = self.paradigm.get_data(
-                dataset=dataset,
-                subjects=[subject],
-                return_epochs=self.return_epochs,
-                return_raws=self.return_raws,
-                postprocess_pipeline=postprocess_pipeline,
-                process_pipelines=[process_pipeline],
-            )
-
-            # Use WithinSessionSplitter with StratifiedShuffleSplit as inner CV
-            splitter = WithinSessionSplitter(
-                n_folds=self.n_perms[0],
-                shuffle=True,
-                random_state=self.random_state,
-                cv_class=StratifiedShuffleSplit,
-                test_size=self.test_size,
-            )
-
-            prev_session = None
-            perm_i = 0
-            tracker = None
-
-            for train_idx, test_idx in splitter.split(y_all, metadata_all):
-                session = metadata_all.iloc[test_idx[0]]["session"]
-
-                # Reset permutation counter when session changes
-                if session != prev_session:
-                    perm_i = 0
-                    if _carbonfootprint:
-                        # Stop previous tracker if exists
-                        if tracker is not None:
-                            try:
-                                tracker.stop()
-                            except Exception:
-                                pass
-                        tracker = EmissionsTracker(**self.codecarbon_config)
-                        tracker.start()
-                    prev_session = session
-
-                X_train_all = X_all[train_idx]
-                y_train_all = y_all[train_idx]
-                X_test = X_all[test_idx]
-                y_test = y_all[test_idx]
-
-                # Data subsetting logic stays here (not in splitter)
-                data_size_steps = self.get_data_size_subsets(y_train_all)
-                for di, subset_indices in enumerate(data_size_steps):
-                    if perm_i >= self.n_perms[di]:
-                        continue
-                    not_enough_data = False
-                    log.info(
-                        f"Permutation: {perm_i + 1},"
-                        f" Training samples: {len(subset_indices)}"
-                    )
-
-                    if self.return_epochs:
-                        X_train = X_train_all[subset_indices]
-                    else:
-                        X_train = X_train_all[subset_indices, :]
-                    y_train = y_train_all[subset_indices]
-
-                    if len(np.unique(y_train)) < 2:
-                        log.warning(
-                            "For current data size, only one class" "would remain."
-                        )
-                        not_enough_data = True
-                    nchan = (
-                        X_train.info["nchan"]
-                        if isinstance(X_train, BaseEpochs)
-                        else X_train.shape[1]
-                    )
-                    for name, clf in run_pipes.items():
-                        res = {
-                            "dataset": dataset,
-                            "subject": subject,
-                            "session": session,
-                            "n_samples": len(y_train),
-                            "n_channels": nchan,
-                            "pipeline": name,
-                            # Additional columns
-                            "data_size": len(subset_indices),
-                            "permutation": perm_i + 1,
-                        }
-                        if not_enough_data:
-                            res["time"] = 0
-                            res["score"] = np.nan
-                            if _carbonfootprint:
-                                res["carbon_emission"] = (np.nan,)
-                                res["codecarbon_task_name"] = ""
-                        else:
-                            if _carbonfootprint:
-                                task_name = str(uuid4())
-                                tracker.start_task(task_name)
-
-                            self.score_explicit(
-                                res, deepcopy(clf), X_train, y_train, X_test, y_test
-                            )
-
-                            if _carbonfootprint:
-                                emissions_data = tracker.stop_task()
-                                emissions = (
-                                    emissions_data.emissions if emissions_data else np.nan
-                                )
-                                res["carbon_emission"] = (1000 * emissions,)
-                                res["codecarbon_task_name"] = task_name
-                        yield res
-
-                perm_i += 1
-
-            # Stop tracker after all sessions complete
-            if _carbonfootprint:
-                try:
-                    tracker.stop()
-                except Exception:
-                    pass
 
     def evaluate(
         self, dataset, pipelines, param_grid, process_pipeline, postprocess_pipeline=None
     ):
-        if self.calculate_learning_curve:
-            yield from self._evaluate_learning_curve(
-                dataset, pipelines, process_pipeline, postprocess_pipeline
-            )
-        else:
-            yield from self._evaluate(
-                dataset, pipelines, param_grid, process_pipeline, postprocess_pipeline
-            )
+        yield from self._evaluate(
+            dataset, pipelines, param_grid, process_pipeline, postprocess_pipeline
+        )
 
     def is_valid(self, dataset):
         return True
