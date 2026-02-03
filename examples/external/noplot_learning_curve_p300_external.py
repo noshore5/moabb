@@ -15,11 +15,6 @@ We will compare three pipelines :
 - Time-Decoupled Linear Discriminant Analysis
 
 We will use the P300 paradigm, which uses the AUC as metric.
-
-The learning curve shows how model performance changes with different
-amounts of training data. We use LearningCurveSplitter which creates
-train/test splits where the test set is fixed for each permutation while
-the training set is subsampled to different sizes.
 """
 
 # Authors: Jan Sosulski
@@ -41,7 +36,6 @@ from tdlda import Vectorizer as JumpingMeansVectorizer
 import moabb
 from moabb.datasets import BNCI2014_009
 from moabb.evaluations import WithinSessionEvaluation
-from moabb.evaluations.splitters import LearningCurveSplitter
 from moabb.paradigms import P300
 
 
@@ -102,13 +96,8 @@ pipelines["JM+TD-LDA"] = make_pipeline(jmv, c)
 # ----------
 #
 # We define the paradigm (P300) and use the BNCI 2014-009 dataset for it.
-# The evaluation will return a DataFrame containing AUCs for each permutation
-# and data size.
-#
-# LearningCurveSplitter creates train/test splits where:
-# - The test set is fixed for each permutation (using StratifiedShuffleSplit)
-# - The training set is subsampled according to the data_size policy
-# - Multiple permutations are run for each data size
+# The evaluation will return a dataframe containing AUCs for each permutation
+# and dataset size.
 
 paradigm = P300(resample=processing_sampling_rate)
 dataset = BNCI2014_009()
@@ -116,24 +105,20 @@ dataset = BNCI2014_009()
 dataset.subject_list = dataset.subject_list[0:1]
 datasets = [dataset]
 overwrite = True  # set to True if we want to overwrite cached results
-
-# Define learning curve parameters
-data_size = {"policy": "ratio", "value": np.geomspace(0.02, 1, 4)}
-# When the training data is sparse, perform more permutations than when we have a lot of data
+data_size = dict(policy="ratio", value=np.geomspace(0.02, 1, 6))
+# When the training data is sparse, perform more permutations than when we have
+# a lot of data
 n_perms = np.floor(np.geomspace(20, 2, len(data_size["value"]))).astype(int)
-
+print(n_perms)
+# Guarantee reproducibility
+np.random.seed(7536298)
 evaluation = WithinSessionEvaluation(
     paradigm=paradigm,
     datasets=datasets,
-    cv_class=LearningCurveSplitter,
-    cv_params={
-        "data_size": data_size,
-        "n_perms": n_perms,
-        "test_size": 0.2,
-    },
+    data_size=data_size,
+    n_perms=n_perms,
     suffix="examples_lr",
     overwrite=overwrite,
-    random_state=7536298,  # For reproducibility
 )
 
 results = evaluation.process(pipelines)
@@ -142,8 +127,7 @@ results = evaluation.process(pipelines)
 # Plot Results
 # ------------
 #
-# Here we plot the results. The 'data_size' column contains the training set
-# size for each fold.
+# Here we plot the results.
 
 fig, ax = plt.subplots(facecolor="white", figsize=[8, 4])
 
@@ -157,8 +141,8 @@ else:
 sns.pointplot(data=r, x="data_size", y="score", hue="pipeline", ax=ax, palette="Set1")
 
 errbar_meaning = "subjects" if n_subs > 1 else "permutations"
-title_str = f"Learning Curve (errorbar: Mean-CI across {errbar_meaning})"
-ax.set_xlabel("Number of training samples")
+title_str = f"Errorbar shows Mean-CI across {errbar_meaning}"
+ax.set_xlabel("Amount of training samples")
 ax.set_ylabel("ROC AUC")
 ax.set_title(title_str)
 fig.tight_layout()

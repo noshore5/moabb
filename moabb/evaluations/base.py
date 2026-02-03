@@ -62,6 +62,11 @@ class BaseEvaluation(ABC):
     n_splits: int, default=None
         Number of splits for cross-validation. If None, the number of splits
         is equal to the number of subjects.
+    cv_class: type, default=None
+        Optional cross-validation class to override the evaluation's default
+        splitter behavior.
+    cv_kwargs: dict, default=None
+        Keyword arguments passed to cv_class when constructing the splitter.
     save_model: bool, default=False
         Save model after training, for each fold of cross-validation if needed
     cache_config: bool, default=None
@@ -109,6 +114,8 @@ class BaseEvaluation(ABC):
         return_raws=False,
         mne_labels=False,
         n_splits=None,
+        cv_class=None,
+        cv_kwargs=None,
         save_model=False,
         cache_config=None,
         optuna=False,
@@ -124,6 +131,8 @@ class BaseEvaluation(ABC):
         self.return_raws = return_raws
         self.mne_labels = mne_labels
         self.n_splits = n_splits
+        self.cv_class = cv_class
+        self.cv_kwargs = {} if cv_kwargs is None else cv_kwargs
         self.save_model = save_model
         self.cache_config = cache_config
         self.optuna = optuna

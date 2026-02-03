@@ -4,7 +4,7 @@ Within Session Motor Imagery with Learning Curve
 ================================================
 
 This example shows how to perform a within session motor imagery analysis on the
-very popular dataset 2a from the BCI competition IV while creating learning curves.
+very popular dataset 2a from the BCI competition IV.
 
 We will compare two pipelines :
 
@@ -13,11 +13,6 @@ We will compare two pipelines :
 
 We will use the LeftRightImagery paradigm. This will restrict the analysis
 to two classes (left- vs right-hand) and use AUC as metric.
-
-The learning curve shows how model performance changes with different
-amounts of training data. We use LearningCurveSplitter which creates
-train/test splits where the test set is fixed for each permutation while
-the training set is subsampled to different sizes.
 """
 
 # Original author: Alexandre Barachant <alexandre.barachant@gmail.com>
@@ -38,7 +33,6 @@ from sklearn.pipeline import make_pipeline
 import moabb
 from moabb.datasets import BNCI2014_001
 from moabb.evaluations import WithinSessionEvaluation
-from moabb.evaluations.splitters import LearningCurveSplitter
 from moabb.paradigms import LeftRightImagery
 
 
@@ -71,13 +65,8 @@ pipelines["RG+LR"] = make_pipeline(
 # ----------
 #
 # We define the paradigm (LeftRightImagery) and the dataset (BNCI2014_001).
-# The evaluation will return a DataFrame containing AUCs for each permutation
-# and data size.
-#
-# LearningCurveSplitter creates train/test splits where:
-# - The test set is fixed for each permutation (using StratifiedShuffleSplit)
-# - The training set is subsampled according to the data_size policy
-# - Multiple permutations are run for each data size
+# The evaluation will return a DataFrame containing a single AUC score for
+# each subject / session of the dataset, and for each pipeline.
 #
 # Results are saved into the database, so that if you add a new pipeline, it
 # will not run again the evaluation unless a parameter has changed. Results can
@@ -88,24 +77,17 @@ dataset = BNCI2014_001()
 dataset.subject_list = dataset.subject_list[:1]
 datasets = [dataset]
 overwrite = True  # set to True if we want to overwrite cached results
-
-# Define learning curve parameters
-data_size = {"policy": "ratio", "value": np.geomspace(0.1, 1, 5)}
+# Evaluate for a specific number of training samples per class
+data_size = dict(policy="per_class", value=np.array([5, 10, 30, 50]))
 # When the training data is sparse, perform more permutations than when we have a lot of data
-n_perms = np.floor(np.geomspace(10, 2, len(data_size["value"]))).astype(int)
-
+n_perms = np.floor(np.geomspace(20, 2, len(data_size["value"]))).astype(int)
 evaluation = WithinSessionEvaluation(
     paradigm=paradigm,
     datasets=datasets,
-    cv_class=LearningCurveSplitter,
-    cv_params={
-        "data_size": data_size,
-        "n_perms": n_perms,
-        "test_size": 0.2,
-    },
     suffix="examples",
     overwrite=overwrite,
-    random_state=42,  # For reproducibility
+    data_size=data_size,
+    n_perms=n_perms,
 )
 
 results = evaluation.process(pipelines)
@@ -117,8 +99,7 @@ print(results.head())
 # ------------
 #
 # We plot the accuracy as a function of the number of training samples, for
-# each pipeline. The 'data_size' column contains the training set size for
-# each fold.
+# each pipeline
 
 fig, ax = plt.subplots(facecolor="white", figsize=[8, 4])
 
@@ -132,8 +113,8 @@ else:
 sns.pointplot(data=r, x="data_size", y="score", hue="pipeline", ax=ax, palette="Set1")
 
 errbar_meaning = "subjects" if n_subs > 1 else "permutations"
-title_str = f"Learning Curve (errorbar: Mean-CI across {errbar_meaning})"
-ax.set_xlabel("Number of training samples")
+title_str = f"Errorbar shows Mean-CI across {errbar_meaning}"
+ax.set_xlabel("Amount of training samples")
 ax.set_ylabel("ROC AUC")
 ax.set_title(title_str)
 fig.tight_layout()
