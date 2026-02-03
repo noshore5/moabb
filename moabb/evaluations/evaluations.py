@@ -20,6 +20,7 @@ from moabb.evaluations.base import BaseEvaluation
 from moabb.evaluations.splitters import (
     CrossSessionSplitter,
     CrossSubjectSplitter,
+    LearningCurveSplitter,
     WithinSessionSplitter,
 )
 from moabb.evaluations.utils import (
@@ -270,30 +271,57 @@ class WithinSessionEvaluation(BaseEvaluation):
                         _ensure_fitted(cvclf)
                         # scorer always returns dict
                         score = scorer(cvclf, X_[test], y_[test])
-                        acc.append(score)
+
+                        if self.cv_class is LearningCurveSplitter:
+                            nchan = (
+                                X_.info["nchan"]
+                                if isinstance(X_, BaseEpochs)
+                                else X_.shape[1]
+                            )
+                            res = {
+                                "time": duration,
+                                "dataset": dataset,
+                                "subject": subject,
+                                "session": session,
+                                "n_samples": len(train),
+                                "n_channels": nchan,
+                                "pipeline": name,
+                            }
+                            _update_result_with_scores(res, score)
+                            if _carbonfootprint:
+                                res["carbon_emission"] = (1000 * emissions,)
+                                res["codecarbon_task_name"] = task_name
+                            self._add_cv_metadata(res)
+                            yield res
+                        else:
+                            acc.append(score)
 
                     if _carbonfootprint:
                         tracker.stop()
 
-                    nchan = X.info["nchan"] if isinstance(X, BaseEpochs) else X.shape[1]
-                    res = {
-                        "time": duration / self.cv.n_folds,  # 5 fold CV
-                        "dataset": dataset,
-                        "subject": subject,
-                        "session": session,
-                        "n_samples": len(y_cv),  # not training sample
-                        "n_channels": nchan,
-                        "pipeline": name,
-                    }
+                    if self.cv_class is not LearningCurveSplitter:
+                        nchan = (
+                            X.info["nchan"] if isinstance(X, BaseEpochs) else X.shape[1]
+                        )
+                        res = {
+                            "time": duration / self.cv.n_folds,  # 5 fold CV
+                            "dataset": dataset,
+                            "subject": subject,
+                            "session": session,
+                            "n_samples": len(y_cv),  # not training sample
+                            "n_channels": nchan,
+                            "pipeline": name,
+                        }
 
-                    mean_scores = _average_scores(acc)
-                    _update_result_with_scores(res, mean_scores)
+                        mean_scores = _average_scores(acc)
+                        _update_result_with_scores(res, mean_scores)
 
-                    if _carbonfootprint:
-                        res["carbon_emission"] = (1000 * emissions,)
-                        res["codecarbon_task_name"] = task_name
+                        if _carbonfootprint:
+                            res["carbon_emission"] = (1000 * emissions,)
+                            res["codecarbon_task_name"] = task_name
 
-                    yield res
+                        self._add_cv_metadata(res)
+                        yield res
 
     def get_data_size_subsets(self, y):
         if self.data_size is None:
@@ -639,6 +667,7 @@ class CrossSessionEvaluation(BaseEvaluation):
                         res["carbon_emission"] = (1000 * emissions,)
                         res["codecarbon_task_name"] = task_name
 
+                    self._add_cv_metadata(res)
                     yield res
 
                 if _carbonfootprint:
@@ -848,6 +877,7 @@ class CrossSubjectEvaluation(BaseEvaluation):
                         res["carbon_emission"] = (1000 * emissions,)
                         res["codecarbon_task_name"] = task_name
 
+                    self._add_cv_metadata(res)
                     yield res
 
         if _carbonfootprint:
