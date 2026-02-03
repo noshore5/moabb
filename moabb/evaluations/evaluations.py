@@ -47,7 +47,7 @@ def _pipeline_requires_epochs(pipeline):
 
 
 try:
-    from codecarbon import EmissionsTracker
+    from codecarbon import EmissionsTracker  # noqa
 
     _carbonfootprint = True
 except ImportError:
@@ -265,7 +265,8 @@ class WithinSessionEvaluation(BaseEvaluation):
                     emissions = np.nan
                     task_name = ""
                     if _carbonfootprint:
-                        tracker = EmissionsTracker(**self.codecarbon_config)
+                        # Initialise CodeCarbon per cross-validation
+                        tracker = self.emissions.create_tracker()
                         tracker.start()
 
                     # Create scorer once before CV loop
@@ -366,11 +367,11 @@ class WithinSessionEvaluation(BaseEvaluation):
                             X.info["nchan"] if isinstance(X, BaseEpochs) else X.shape[1]
                         )
                         res = {
-                            "time": duration / self.n_splits,
+                            "time": duration / self.n_splits,  # 5 fold CV
                             "dataset": dataset,
                             "subject": subject,
                             "session": session,
-                            "n_samples": len(y_cv),
+                            "n_samples": len(y_cv),  # not training sample
                             "n_channels": nchan,
                             "pipeline": name,
                         }
@@ -383,6 +384,61 @@ class WithinSessionEvaluation(BaseEvaluation):
                             res["codecarbon_task_name"] = task_name
 
                         yield res
+
+    def get_data_size_subsets(self, y):
+        if self.data_size is None:
+            raise ValueError(
+                "Cannot create data subsets without valid policy for data_size."
+            )
+        if self.data_size["policy"] == "ratio":
+            vals = np.array(self.data_size["value"])
+            if np.any(vals < 0) or np.any(vals > 1):
+                raise ValueError("Data subset ratios must be in range [0, 1]")
+            upto = np.ceil(vals * len(y)).astype(int)
+            indices = [np.array(range(i)) for i in upto]
+        elif self.data_size["policy"] == "per_class":
+            classwise_indices = dict()
+            n_smallest_class = np.inf
+            for cl in np.unique(y):
+                cl_i = np.where(cl == y)[0]
+                classwise_indices[cl] = cl_i
+                n_smallest_class = (
+                    len(cl_i) if len(cl_i) < n_smallest_class else n_smallest_class
+                )
+            indices = []
+            for ds in self.data_size["value"]:
+                if ds > n_smallest_class:
+                    raise ValueError(
+                        f"Smallest class has {n_smallest_class} samples. "
+                        f"Desired samples per class {ds} is too large."
+                    )
+                indices.append(
+                    np.concatenate(
+                        [classwise_indices[cl][:ds] for cl in classwise_indices]
+                    )
+                )
+        else:
+            raise ValueError(f"Unknown policy {self.data_size['policy']}")
+        return indices
+
+    def score_explicit(self, res, clf, X_train, y_train, X_test, y_test):
+        """Fit model and update result dict with scores and duration."""
+        if not self.mne_labels:
+            # convert labels if array, keep them if epochs and mne_labels is set
+            le = LabelEncoder()
+            y_train = le.fit_transform(y_train)
+            y_test = le.transform(y_test)
+        t_start = perf_counter()
+        try:
+            model = clf.fit(X_train, y_train)
+            _ensure_fitted(model)
+            scorer = _create_scorer(model, self.paradigm.scoring)
+            _score_and_update(res, scorer, model, X_test, y_test)
+        except ValueError as e:
+            if self.error_score == "raise":
+                raise e
+            res["score"] = self.error_score
+        res["time"] = perf_counter() - t_start
 
     def evaluate(
         self, dataset, pipelines, param_grid, process_pipeline, postprocess_pipeline=None
@@ -497,7 +553,7 @@ class CrossSessionEvaluation(BaseEvaluation):
 
                 if _carbonfootprint:
                     # Initialise CodeCarbon per cross-validation
-                    tracker = EmissionsTracker(**self.codecarbon_config)
+                    tracker = self.emissions.create_tracker()
                     tracker.start()
 
                 # Create scorer once before CV loop
@@ -684,7 +740,7 @@ class CrossSubjectEvaluation(BaseEvaluation):
 
         if _carbonfootprint:
             # Initialise CodeCarbon per cross-validation
-            tracker = EmissionsTracker(**self.codecarbon_config)
+            tracker = self.emissions.create_tracker()
             tracker.start()
 
         # Progressbar at subject level

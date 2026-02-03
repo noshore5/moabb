@@ -9,6 +9,7 @@ from sklearn.base import BaseEstimator
 from moabb.analysis import Results
 from moabb.datasets.base import BaseDataset
 from moabb.evaluations.utils import (
+    Emissions,
     _convert_sklearn_params_to_optuna,
     _create_scorer,
     _DictScorer,
@@ -113,7 +114,7 @@ class BaseEvaluation(ABC):
         optuna=False,
         time_out=60 * 15,
         verbose=None,
-        codecarbon_config=dict(save_to_file=False, log_level="error"),
+        codecarbon_config=None,
     ):
         self.random_state = random_state
         self.n_jobs = n_jobs
@@ -128,7 +129,7 @@ class BaseEvaluation(ABC):
         self.optuna = optuna
         self.time_out = time_out
         self.verbose = verbose
-        self.codecarbon_config = codecarbon_config
+        self.emissions = Emissions(codecarbon_config=codecarbon_config)
 
         self.additional_columns = additional_columns
         if additional_columns is None:
