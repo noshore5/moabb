@@ -215,6 +215,16 @@ class BaseEvaluation(ABC):
             additional_columns=self.additional_columns,
         )
 
+    def _resolve_cv(self, default_class, default_kwargs=None):
+        """Resolve the cross-validation class and kwargs for a splitter."""
+        if self.cv_class is None:
+            cv_class = default_class
+            cv_kwargs = {} if default_kwargs is None else dict(default_kwargs)
+        else:
+            cv_class = self.cv_class
+            cv_kwargs = {} if self.cv_kwargs is None else dict(self.cv_kwargs)
+        return cv_class, cv_kwargs
+
     def process(self, pipelines, param_grid=None, postprocess_pipeline=None):
         """Runs all pipelines on all datasets.
 

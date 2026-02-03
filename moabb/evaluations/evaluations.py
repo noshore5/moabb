@@ -199,10 +199,7 @@ class WithinSessionEvaluation(BaseEvaluation):
                 ix = metadata.session == session
 
                 for name, clf in run_pipes.items():
-                    cv_class = (
-                        self.cv_class if self.cv_class is not None else StratifiedKFold
-                    )
-                    cv_kwargs = self.cv_kwargs or {}
+                    cv_class, cv_kwargs = self._resolve_cv(StratifiedKFold)
                     self.cv = WithinSessionSplitter(
                         n_folds=5,
                         shuffle=True,
@@ -569,10 +566,7 @@ class CrossSessionEvaluation(BaseEvaluation):
 
             for name, clf in run_pipes.items():
                 # we want to store a results per session
-                cv_class = (
-                    self.cv_class if self.cv_class is not None else LeaveOneGroupOut
-                )
-                cv_kwargs = self.cv_kwargs or {}
+                cv_class, cv_kwargs = self._resolve_cv(LeaveOneGroupOut)
                 self.cv = CrossSessionSplitter(
                     cv_class=cv_class, random_state=self.random_state, **cv_kwargs
                 )
@@ -759,17 +753,18 @@ class CrossSubjectEvaluation(BaseEvaluation):
         n_subjects = len(dataset.subject_list)
 
         # perform leave one subject out CV
-        if self.cv_class is None:
-            if self.n_splits is None:
-                cv_class = LeaveOneGroupOut
-                cv_kwargs = {}
-            else:
-                cv_class = GroupKFold
-                cv_kwargs = {"n_splits": self.n_splits}
-                n_subjects = self.n_splits
+        if self.n_splits is None:
+            default_class = LeaveOneGroupOut
+            default_kwargs = {}
+            adjust_subjects = False
         else:
-            cv_class = self.cv_class
-            cv_kwargs = self.cv_kwargs or {}
+            default_class = GroupKFold
+            default_kwargs = {"n_splits": self.n_splits}
+            adjust_subjects = True
+
+        cv_class, cv_kwargs = self._resolve_cv(default_class, default_kwargs)
+        if self.cv_class is None and adjust_subjects:
+            n_subjects = self.n_splits
 
         self.cv = CrossSubjectSplitter(
             cv_class=cv_class, random_state=self.random_state, **cv_kwargs
