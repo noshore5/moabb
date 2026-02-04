@@ -1,10 +1,12 @@
 import inspect
 import logging
 from typing import Optional, Union
+from warnings import warn
 
 import numpy as np
 from sklearn.model_selection import (
     BaseCrossValidator,
+    GroupShuffleSplit,
     LeaveOneGroupOut,
     StratifiedKFold,
     StratifiedShuffleSplit,
@@ -82,13 +84,27 @@ class WithinSessionSplitter(BaseCrossValidator):
 
     def get_n_splits(self, metadata):
         num_sessions_subjects = metadata.groupby(["subject", "session"]).ngroups
-        return self.n_folds * num_sessions_subjects
+        splitter = self.cv_class(**self._cv_kwargs)
+        inner_splits = None
+        try:
+            inner_splits = splitter.get_n_splits()
+        except TypeError:
+            try:
+                inner_splits = splitter.get_n_splits(None, None, None)
+            except (TypeError, ValueError):
+                inner_splits = None
+        except ValueError:
+            inner_splits = None
+        if inner_splits is None:
+            inner_splits = self.n_folds
+        return inner_splits * num_sessions_subjects
 
     def split(self, y, metadata):
         all_index = metadata.index.values
 
         # Shuffle subjects if required
-        subjects = metadata["subject"].unique()
+        # Convert to numpy array to avoid ArrowStringArray shuffle warning
+        subjects = np.array(metadata["subject"].unique())
         if self.shuffle:
             self._rng.shuffle(subjects)
 
@@ -99,7 +115,8 @@ class WithinSessionSplitter(BaseCrossValidator):
             y_subject = y[subject_mask]
 
             # Shuffle sessions if required
-            sessions = subject_metadata["session"].unique()
+            # Convert to numpy array to avoid ArrowStringArray shuffle warning
+            sessions = np.array(subject_metadata["session"].unique())
 
             if self.shuffle:
                 self._rng.shuffle(sessions)
@@ -119,20 +136,6 @@ class WithinSessionSplitter(BaseCrossValidator):
                 for train_ix, test_ix in splitter.split(indices, y_session):
 
                     yield indices[train_ix], indices[test_ix]
-
-    def get_inner_splitter_metadata(self):
-        """Get metadata from the current inner splitter if available.
-
-        Returns
-        -------
-        metadata : dict or None
-            Metadata dict if the inner splitter supports it, None otherwise.
-        """
-        if hasattr(self, "_current_splitter") and hasattr(
-            self._current_splitter, "get_metadata"
-        ):
-            return self._current_splitter.get_metadata()
-        return None
 
 
 class WithinSubjectSplitter(BaseCrossValidator):
@@ -215,13 +218,27 @@ class WithinSubjectSplitter(BaseCrossValidator):
             The number of splits for the cross-validation
         """
         num_subjects = metadata["subject"].nunique()
-        return self.n_folds * num_subjects
+        splitter = self.cv_class(**self._cv_kwargs)
+        inner_splits = None
+        try:
+            inner_splits = splitter.get_n_splits()
+        except TypeError:
+            try:
+                inner_splits = splitter.get_n_splits(None, None, None)
+            except (TypeError, ValueError):
+                inner_splits = None
+        except ValueError:
+            inner_splits = None
+        if inner_splits is None:
+            inner_splits = self.n_folds
+        return inner_splits * num_subjects
 
     def split(self, y, metadata):
         all_index = metadata.index.values
 
         # Shuffle subjects if required
-        subjects = metadata["subject"].unique()
+        # Convert to numpy array to avoid ArrowStringArray shuffle warning
+        subjects = np.array(metadata["subject"].unique())
         if self.shuffle:
             self._rng.shuffle(subjects)
 
@@ -232,6 +249,9 @@ class WithinSubjectSplitter(BaseCrossValidator):
 
             # Instantiate a new internal splitter for each subject
             splitter = self.cv_class(**self._cv_kwargs)
+
+            # Store reference to the current inner splitter for metadata access
+            self._current_splitter = splitter
 
             # Split using the cross-validation strategy across all sessions of the subject
             for train_ix, test_ix in splitter.split(subject_indices, y_subject):
@@ -389,6 +409,7 @@ class CrossSessionSplitter(BaseCrossValidator):
 
             # by default, I am using LeaveOneGroupOut
             splitter = self.cv_class(**cv_kwargs)
+            self._current_splitter = splitter
 
             # Yield the splits for a given subject
             for train_session_idx, test_session_idx in splitter.split(
@@ -484,6 +505,9 @@ class CrossSubjectSplitter(BaseCrossValidator):
 
         splitter = self.cv_class(**self._cv_kwargs)
 
+        # Store reference to the current inner splitter for metadata access
+        self._current_splitter = splitter
+
         # Yield the splits for the entire dataset
         for train_session_idx, test_session_idx in splitter.split(
             X=all_index, y=y, groups=metadata["subject"]
@@ -555,6 +579,7 @@ class LearningCurveSplitter(BaseCrossValidator):
     """
 
     VALID_POLICIES = ["per_class", "ratio"]
+    metadata_columns = ("data_size", "permutation")
 
     def __init__(
         self,
@@ -631,7 +656,8 @@ class LearningCurveSplitter(BaseCrossValidator):
         Returns
         -------
         n_splits : int
-            Total number of splits.
+            Total number of splits (upper bound; can be lower if some splits
+            are skipped due to single-class training sets).
         """
         return self.n_splits_
 
@@ -689,7 +715,8 @@ class LearningCurveSplitter(BaseCrossValidator):
         y : array-like of shape (n_samples,)
             Target labels.
         groups : array-like of shape (n_samples,), optional
-            Ignored.
+            Group labels. If provided, splits are made on groups (no group
+            appears in both train and test).
 
         Yields
         ------
@@ -699,18 +726,30 @@ class LearningCurveSplitter(BaseCrossValidator):
             The testing set indices for that split.
         """
         y = np.asarray(y)
+        if groups is not None:
+            groups = np.asarray(groups)
 
-        # Create StratifiedShuffleSplit for the base train/test splits
-        # Use the maximum number of permutations
+        # Create base train/test splits
+        # Use StratifiedShuffleSplit when no groups are provided, otherwise
+        # split by groups to avoid session/subject leakage.
         max_perms = int(np.max(self.n_perms))
-        sss = StratifiedShuffleSplit(
-            n_splits=max_perms,
-            test_size=self.test_size,
-            random_state=self.random_state,
-        )
+        if groups is None:
+            splitter = StratifiedShuffleSplit(
+                n_splits=max_perms,
+                test_size=self.test_size,
+                random_state=self.random_state,
+            )
+            base_splits = splitter.split(X, y)
+        else:
+            splitter = GroupShuffleSplit(
+                n_splits=max_perms,
+                test_size=self.test_size,
+                random_state=self.random_state,
+            )
+            base_splits = splitter.split(X, y, groups=groups)
 
         # Generate all permutations
-        for perm_i, (train_idx_full, test_idx) in enumerate(sss.split(X, y)):
+        for perm_i, (train_idx_full, test_idx) in enumerate(base_splits):
             # For this permutation, get the training data labels
             y_train_full = y[train_idx_full]
 
@@ -723,12 +762,23 @@ class LearningCurveSplitter(BaseCrossValidator):
                 if perm_i >= self.n_perms[di]:
                     continue
 
+                # Get the actual training indices (subset of the full training set)
+                train_idx = train_idx_full[subset_indices]
+
+                # Skip splits where training set collapses to single class
+                # (can happen with small data_size values or imbalanced datasets)
+                if len(np.unique(y[train_idx])) < 2:
+                    warn(
+                        "Skipping split: training set has only one class "
+                        f"(data_size={len(subset_indices)}, perm={perm_i + 1})",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    continue
+
                 # Update current split metadata
                 self._current_perm = perm_i + 1  # 1-indexed for user display
                 self._current_data_size = len(subset_indices)
-
-                # Get the actual training indices (subset of the full training set)
-                train_idx = train_idx_full[subset_indices]
 
                 yield train_idx, test_idx
 
