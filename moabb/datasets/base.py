@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Dict, Union
 import mne_bids
 import numpy as np
 import pandas as pd
+from mne_bids import events_file_to_annotation_kwargs
 
 from moabb.datasets.bids_interface import StepType, _interface_map
 from moabb.datasets.preprocessing import FixedPipeline, SetRawAnnotations
@@ -777,6 +778,34 @@ class BaseDataset(metaclass=MetaclassDataset):
         """  # noqa: E501
         pass
 
+    def get_additional_metadata(
+        self, subject: str, session: str, run: str
+    ) -> None | pd.DataFrame:
+        """
+        Load additional metadata for a specific subject, session, and run.
+
+        This method is intended to be overridden by subclasses to provide
+        additional metadata specific to the dataset. The metadata is typically
+        loaded from an `events.tsv` file or similar data source.
+
+        Parameters
+        ----------
+        subject : str
+            The identifier for the subject.
+        session : str
+            The identifier for the session.
+        run : str
+            The identifier for the run.
+
+        Returns
+        -------
+        None | pd.DataFrame
+            A DataFrame containing the additional metadata if available,
+            otherwise None.
+        """
+
+        return None
+
 
 class BaseBIDSDataset(BaseDataset):
     """Abstract BIDS dataset class.
@@ -866,6 +895,73 @@ class BaseBIDSDataset(BaseDataset):
                 run = bids_path.run
             data.setdefault(session, {})[run] = raw
         return data
+
+    def get_additional_metadata(
+        self, subject: str, session: str, run: str
+    ) -> None | pd.DataFrame:
+        """
+        Load additional metadata for a specific subject, session, and run.
+
+        Parameters
+        ----------
+        subject : str
+            The identifier for the subject.
+        session : str
+            The identifier for the session.
+        run : str
+            The identifier for the run.
+
+        Returns
+        -------
+        None | pd.DataFrame
+            A DataFrame containing the additional metadata if available,
+            otherwise None.
+        """
+        bids_paths = self.bids_paths(subject)
+
+        # select only with matching session and run
+        bids_path_selected = [
+            pth
+            for pth in bids_paths
+            if f"ses-{session}" in pth.basename and f"run-{run}" in pth.basename
+        ]
+
+        if len(bids_path_selected) > 1:
+            raise ValueError("More than one matching BIDS path found.")
+        bids_path = bids_path_selected[0]
+
+        events_fname = bids_path.find_matching_sidecar(
+            suffix="events", extension=".tsv", on_error="warn"
+        )
+        if events_fname is None:
+            return None
+
+        # Use official mne-bids API — handles n/a filtering, stim_type compat, etc.
+        annot_kwargs = events_file_to_annotation_kwargs(events_fname)
+
+        # Build DataFrame from API output
+        dm = pd.DataFrame(
+            {
+                "onset": annot_kwargs["onset"],
+                "duration": annot_kwargs["duration"],
+                "trial_type": annot_kwargs["description"],
+            }
+        )
+
+        # Reconstruct 'value' from event_id mapping (description -> integer)
+        dm["value"] = dm["trial_type"].map(annot_kwargs["event_id"])
+
+        # Add extras (custom columns beyond standard BIDS columns)
+        extras = annot_kwargs.get("extras")
+        if extras and len(extras) > 0:
+            extras_df = pd.DataFrame(extras)
+            dm = pd.concat([dm, extras_df], axis=1)
+
+        # Filter by dataset's event_id
+        dm = dm[dm["trial_type"].isin(self.event_id.keys())]
+
+        dm = dm.assign(subject=subject, session=session, run=run)
+        return dm
 
 
 class LocalBIDSDataset(BaseBIDSDataset):
