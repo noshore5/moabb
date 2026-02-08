@@ -13,7 +13,7 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.dummy import DummyClassifier as Dummy
 from sklearn.pipeline import FunctionTransformer, Pipeline, make_pipeline
 
-from moabb.analysis.results import get_string_rep
+from moabb.analysis.results import get_digest, get_string_rep
 from moabb.datasets.compound_dataset import compound
 from moabb.datasets.fake import FakeDataset
 from moabb.evaluations import evaluations as ev
@@ -205,6 +205,9 @@ class TestWithinSess:
         with warnings.catch_warnings(record=True) as w:
             get_string_rep(c3)
             assert len(w) == 0
+
+    def test_digest_distinguishes_strings_with_spaces(self):
+        assert get_digest({"x": "a b"}) != get_digest({"x": "ab"})
 
     def test_postprocess_pipeline(self):
         cov = Covariances("oas")

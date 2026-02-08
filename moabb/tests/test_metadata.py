@@ -1,7 +1,16 @@
 """Tests for the metadata schema module."""
 
+import dataclasses
+import typing
+
 import pytest
 
+# Module-level imports used as monkeypatch targets (setattr requires the module object)
+import moabb.datasets as datasets_module  # noqa: F401
+import moabb.datasets.metadata as metadata_module  # noqa: F401
+import moabb.datasets.utils as dataset_utils  # noqa: F401
+
+# Named imports for direct use in test assertions and setup
 from moabb.datasets.metadata import (
     DATASET_METADATA_CATALOG,
     AcquisitionMetadata,
@@ -11,6 +20,7 @@ from moabb.datasets.metadata import (
     ParticipantMetadata,
     get_dataset_metadata,
 )
+from moabb.datasets.utils import _init_dataset, dataset_dict
 
 
 class TestAcquisitionMetadata:
@@ -593,3 +603,144 @@ class TestMetadataCatalog:
         assert (
             count == expected_count
         ), f"Expected {expected_count} {paradigm} datasets, found {count}"
+
+    def test_detected_paradigm_matches_experiment(self):
+        """Test that detected_paradigm agrees with experiment.paradigm."""
+        expected_by_paradigm = {
+            "imagery": "motor_imagery",
+            "p300": "p300",
+            "ssvep": "ssvep",
+            "cvep": "cvep",
+            "rstate": "resting_state",
+        }
+        for name, metadata in DATASET_METADATA_CATALOG.items():
+            if (
+                metadata.paradigm_specific
+                and metadata.paradigm_specific.detected_paradigm
+            ):
+                assert (
+                    metadata.paradigm_specific.detected_paradigm
+                    == expected_by_paradigm.get(
+                        metadata.experiment.paradigm, metadata.experiment.paradigm
+                    )
+                ), (
+                    f"{name}: detected_paradigm="
+                    f"'{metadata.paradigm_specific.detected_paradigm}' "
+                    f"!= experiment.paradigm='{metadata.experiment.paradigm}'"
+                )
+
+    def test_catalog_supports_get(self):
+        """Test dict-style get support on lazy catalog wrapper."""
+        assert DATASET_METADATA_CATALOG.get("BNCI2014_001") is not None
+        assert DATASET_METADATA_CATALOG.get("DoesNotExist") is None
+
+    def test_class_level_metadata_core_fields_match_dataset(self):
+        """Ensure class-level METADATA is authoritative for core runtime fields."""
+        _init_dataset()
+        for name, dataset_cls in dataset_dict.items():
+            if "Fake" in name:
+                continue
+
+            metadata = getattr(dataset_cls, "METADATA", None)
+            if not isinstance(metadata, DatasetMetadata):
+                continue
+
+            dataset = dataset_cls()
+            assert metadata.experiment.paradigm == dataset.paradigm
+            assert metadata.participants.n_subjects == len(dataset.subject_list)
+            assert metadata.experiment.n_classes == len(dataset.event_id)
+            assert metadata.experiment.class_labels == list(dataset.event_id.keys())
+            assert metadata.sessions_per_subject == dataset.n_sessions
+
+    def test_catalog_fallback_for_uninstantiable_dataset(self, monkeypatch):
+        """Catalog should include a fallback entry when class init fails."""
+
+        class BrokenDataset:
+            def __init__(self):
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(
+            dataset_utils, "dataset_dict", {"BrokenDataset": BrokenDataset}
+        )
+        monkeypatch.setattr(dataset_utils, "_init_dataset", lambda: None)
+
+        with pytest.warns(RuntimeWarning, match="BrokenDataset"):
+            catalog = metadata_module._build_dataset_metadata_catalog()
+
+        assert "BrokenDataset" in catalog
+        fallback = catalog["BrokenDataset"]
+        assert fallback.participants.n_subjects == 1
+        assert fallback.experiment.paradigm == "imagery"
+
+    def test_removed_dataset_error_is_explicit(self):
+        with pytest.raises(AttributeError, match="DemonsP300 has been removed"):
+            _ = datasets_module.DemonsP300
+
+    def test_metadata_type_consistency(self):
+        """Test that all METADATA values match their declared types."""
+
+        def _check_type(value, expected_type, path):
+            errors = []
+            if value is None:
+                return errors
+            origin = getattr(expected_type, "__origin__", None)
+            if origin is typing.Union:
+                args = [
+                    a
+                    for a in getattr(expected_type, "__args__", ())
+                    if a is not type(None)
+                ]
+                if len(args) == 1:
+                    return _check_type(value, args[0], path)
+                return errors
+            if origin is list:
+                if not isinstance(value, list):
+                    return [f"{path}: expected list, got {type(value).__name__}"]
+                inner = getattr(expected_type, "__args__", ())
+                if inner:
+                    for i, item in enumerate(value):
+                        errors.extend(_check_type(item, inner[0], f"{path}[{i}]"))
+                return errors
+            if origin is dict:
+                if not isinstance(value, dict):
+                    return [f"{path}: expected dict, got {type(value).__name__}"]
+                args = getattr(expected_type, "__args__", ())
+                if args and len(args) == 2:
+                    for k, v in value.items():
+                        errors.extend(_check_type(k, args[0], f"{path}.key"))
+                        errors.extend(_check_type(v, args[1], f"{path}[{k!r}]"))
+                return errors
+            if expected_type is float:
+                if not isinstance(value, (int, float)):
+                    errors.append(f"{path}: expected float, got {type(value).__name__}")
+            elif expected_type is int:
+                if not isinstance(value, int) or isinstance(value, bool):
+                    errors.append(f"{path}: expected int, got {type(value).__name__}")
+            elif expected_type is str:
+                if not isinstance(value, str):
+                    errors.append(f"{path}: expected str, got {type(value).__name__}")
+            elif expected_type is bool:
+                if not isinstance(value, bool):
+                    errors.append(f"{path}: expected bool, got {type(value).__name__}")
+            elif dataclasses.is_dataclass(expected_type):
+                if not isinstance(value, expected_type):
+                    errors.append(
+                        f"{path}: expected {expected_type.__name__}, "
+                        f"got {type(value).__name__}"
+                    )
+                else:
+                    for f in dataclasses.fields(value):
+                        v = getattr(value, f.name)
+                        if v is not None:
+                            errors.extend(_check_type(v, f.type, f"{path}.{f.name}"))
+            return errors
+
+        all_errors = []
+        for name, metadata in DATASET_METADATA_CATALOG.items():
+            for f in dataclasses.fields(metadata):
+                v = getattr(metadata, f.name)
+                if v is not None:
+                    all_errors.extend(_check_type(v, f.type, f"{name}.{f.name}"))
+        assert (
+            all_errors == []
+        ), f"Found {len(all_errors)} type violations:\n" + "\n".join(all_errors[:20])

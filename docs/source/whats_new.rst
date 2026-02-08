@@ -34,6 +34,7 @@ Enhancements
 - Implement :class:`moabb.evaluations.WithinSubjectSplitter` for k-fold cross-validation within each subject across all sessions (by `Bruno Aristimunha`_)
 - Add ``cv_class`` and ``cv_kwargs`` parameters to all evaluation classes (WithinSessionEvaluation, CrossSessionEvaluation, CrossSubjectEvaluation) for custom cross-validation strategies (:gh:`963` by `Bruno Aristimunha`_)
 - Implement :class:`moabb.evaluations.splitters.LearningCurveSplitter` as a dedicated sklearn-compatible cross-validator for learning curves, enabling learning curve analysis with any evaluation type (:gh:`963` by `Bruno Aristimunha`_)
+- Auto-generate dataset documentation admonitions (Participants, Equipment, Preprocessing, Data Access, Experimental Protocol) from class-level ``METADATA`` when missing, while preserving manually written sections (:gh:`960` by `Bruno Aristimunha`_)
 - Add ``additional_metadata`` parameter to ``paradigm.get_data()`` to fetch additional metadata columns from BIDS ``events.tsv`` files. Supports ``"all"`` to load all columns or a list of specific column names (:gh:`744` by `Matthias Dold`_)
 - Add ``get_additional_metadata()`` method to :class:`moabb.datasets.base.BaseDataset` allowing datasets to provide additional metadata for epochs. Implemented for BIDS datasets in :class:`moabb.datasets.base.BaseBIDSDataset` (:gh:`744` by `Matthias Dold`_)
 
@@ -88,6 +89,7 @@ Code health
 - Extract ``_get_nchan()`` helper into ``BaseEvaluation`` to replace repeated channel count extraction (``X.info["nchan"] if isinstance(X, BaseEpochs) else X.shape[1]``) in all evaluation classes (:gh:`963` by `Bruno Aristimunha`_)
 - Move ``_pipeline_requires_epochs()`` from ``evaluations.py`` to ``utils.py`` for shared access by ``BaseEvaluation._load_data()`` (:gh:`963` by `Bruno Aristimunha`_)
 - Move ``WithinSessionSplitter`` creation outside the per-session loop in ``WithinSessionEvaluation``, since splitter parameters do not change per session (:gh:`963` by `Bruno Aristimunha`_)
+- Add a compile smoke test (``moabb/tests/test_compilation.py``) that validates syntax for all Python files under ``moabb/`` using ``py_compile`` (:gh:`960` by `Bruno Aristimunha`_)
 
 Version 1.4.3 (Stable - PyPi)
 -------------------------------

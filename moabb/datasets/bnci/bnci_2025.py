@@ -11,6 +11,23 @@ from mne.utils import verbose
 from scipy.io import loadmat
 
 from moabb.datasets import download as dl
+from moabb.datasets.metadata.schema import (
+    AcquisitionMetadata,
+    AuxiliaryChannelsMetadata,
+    BCIApplicationMetadata,
+    CrossValidationMetadata,
+    DatasetMetadata,
+    DataStructureMetadata,
+    DocumentationMetadata,
+    ExperimentMetadata,
+    FilterDetails,
+    ParadigmSpecificMetadata,
+    ParticipantMetadata,
+    PerformanceMetadata,
+    PreprocessingMetadata,
+    SignalProcessingMetadata,
+    Tags,
+)
 
 from .base import BNCIBaseDataset
 from .utils import (
@@ -247,6 +264,149 @@ class BNCI2025_001(BNCIBaseDataset):
     The data is compatible with the MOABB motor imagery paradigm for
     processing purposes, though the underlying task is movement execution.
     """
+
+    METADATA = DatasetMetadata(
+        acquisition=AcquisitionMetadata(
+            sampling_rate=500.0,
+            n_channels=60,
+            channel_types={"eeg": 60},
+            montage="af7 af3 afz af4 af8 f7 f5 f3 f1 fz f2 f4 f6 f8 ft7 fc5 fc3 fc1 fcz fc2 fc4 fc6 ft8 t7 c5 c3 c1 cz c2 c4 c6 t8 tp7 cp5 cp3 cp1 cpz cp2 cp4 cp6 tp8 p7 p5 p3 p1 pz p2 p4 p6 p8 ppo1h ppo2h po7 po3 poz po4 po8 o1 oz o2",
+            hardware="BrainAmp",
+            reference="right mastoid",
+            software="EEGLAB",
+            filters="50 Hz notch",
+            sensors=[
+                "Fp1",
+                "Fpz",
+                "Fp2",
+                "AF7",
+                "AF3",
+                "AFz",
+                "AF4",
+                "AF8",
+                "F7",
+                "F5",
+                "F3",
+                "F1",
+                "Fz",
+                "F2",
+                "F4",
+                "F6",
+                "F8",
+                "FT7",
+                "FC5",
+                "FC3",
+                "FC1",
+                "FCz",
+                "FC2",
+                "FC4",
+                "FC6",
+                "FT8",
+                "T7",
+                "C5",
+                "C3",
+                "C1",
+                "Cz",
+                "C2",
+                "C4",
+                "C6",
+                "T8",
+                "TP7",
+                "CP5",
+                "CP3",
+                "CP1",
+                "CPz",
+                "CP2",
+                "CP4",
+                "CP6",
+                "TP8",
+                "P7",
+                "P5",
+                "P3",
+                "P1",
+                "Pz",
+                "P2",
+                "P4",
+                "P6",
+                "P8",
+                "PO7",
+                "PO3",
+                "POz",
+                "PO4",
+                "PO8",
+                "O1",
+                "Oz",
+            ],
+            line_freq=50.0,
+            auxiliary_channels=AuxiliaryChannelsMetadata(
+                has_eog=True,
+                eog_type=["horizontal", "vertical"],
+            ),
+        ),
+        participants=ParticipantMetadata(
+            n_subjects=20,
+            gender={"male": 12, "female": 8},
+            age_mean=26.1,
+            handedness={"right": 17, "left": 3},
+        ),
+        experiment=ExperimentMetadata(
+            paradigm="imagery",
+            n_classes=2,
+            class_labels=["rest", "right_hand"],
+            trial_duration=5.0,
+            study_design="Discrete reaching movements in four directions (up, down, left, right) with varying speeds (quick/slow) and distances (near/far) following visual cue, self-paced execution",
+            feedback_type="visual (cue color: green for correct, red for incorrect direction)",
+            stimulus_type="avatar",
+            stimulus_modalities=["visual"],
+            primary_modality="visual",
+            mode="both",
+        ),
+        documentation=DocumentationMetadata(
+            doi="10.1088/1741-2552/ada0ea",
+            repository="GitHub",
+            data_url="https://github.com/rkobler/eyeartifactcorrection",
+        ),
+        tags=Tags(
+            pathology=["Healthy"],
+            modality=["Visual"],
+            type=["Perception"],
+        ),
+        preprocessing=PreprocessingMetadata(
+            data_state="raw with eye artifact correction model available",
+            preprocessing_applied=True,
+            preprocessing_steps=["eye artifact correction"],
+            filter_details=FilterDetails(
+                highpass_hz=0.3,
+                lowpass_hz=100.0,
+                bandpass={"low_cutoff_hz": 0.3, "high_cutoff_hz": 80.0},
+                notch_hz=[50],
+                filter_type="Butterworth",
+                filter_order=2,
+            ),
+            artifact_methods=["ICA"],
+            re_reference="common average",
+            downsampled_to_hz=200,
+        ),
+        signal_processing=SignalProcessingMetadata(
+            classifiers=["LDA", "Shrinkage LDA"],
+            feature_extraction=["Bandpower", "Covariance/Riemannian", "ICA"],
+        ),
+        cross_validation=CrossValidationMetadata(
+            cv_method="stratified k-fold",
+            evaluation_type=["cross_session", "transfer_learning"],
+        ),
+        performance=PerformanceMetadata(
+            accuracy_percent=55.9,
+        ),
+        bci_application=BCIApplicationMetadata(
+            applications=["smart_home", "vr_ar"],
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials=30,
+            trials_context="per_class",
+        ),
+        data_processed=True,
+    )
 
     def __init__(self):
         super().__init__(
@@ -496,11 +656,11 @@ def _load_data_002_2025(
     sessions : dict
         Dictionary containing sessions with raw data for each run.
     """
-    validate_subject(subject, 2, "BNCI2025-002")
+    validate_subject(subject, 10, "BNCI2025-002")
 
     # Subject IDs available on the BNCI server
-    # Note: Only 2 of the original 20 subjects' data is currently available
-    subject_ids = ["fe3", "fg4"]
+    # Note: 10 of the original 20 subjects' data is currently available
+    subject_ids = ["fe3", "fe4", "fe5", "fe6", "fe7", "fe8", "fg1", "fg2", "fg3", "fg4"]
 
     subj_id = subject_ids[subject - 1]
 
@@ -711,8 +871,8 @@ class BNCI2025_002(BNCIBaseDataset):
 
     **Participants**
 
-    - 2 subjects available (from original 20 able-bodied subjects)
-    - Original study: 10 male, mean age 24 +/- 5 years, all right-handed
+    - 10 able-bodied subjects (5 male, 5 female)
+    - Mean age 24 +/- 5 years, all right-handed
     - 4 had prior EEG experience
     - Location: Institute of Neural Engineering, Graz University of
       Technology, Austria
@@ -777,9 +937,163 @@ class BNCI2025_002(BNCIBaseDataset):
     BNCI2014_004 : 2-class motor imagery dataset
     """
 
+    METADATA = DatasetMetadata(
+        acquisition=AcquisitionMetadata(
+            sampling_rate=200.0,
+            n_channels=60,
+            channel_types={"eeg": 60},
+            montage="channels_fyrxyz",
+            hardware="BrainVision",
+            sensor_type="active electrodes (actiCAP)",
+            reference="Car",
+            software="EEGLAB",
+            sensors=[
+                "Fp1",
+                "Fpz",
+                "Fp2",
+                "AF7",
+                "AF3",
+                "AFz",
+                "AF4",
+                "AF8",
+                "F7",
+                "F5",
+                "F3",
+                "F1",
+                "Fz",
+                "F2",
+                "F4",
+                "F6",
+                "F8",
+                "FT7",
+                "FC5",
+                "FC3",
+                "FC1",
+                "FCz",
+                "FC2",
+                "FC4",
+                "FC6",
+                "FT8",
+                "T7",
+                "C5",
+                "C3",
+                "C1",
+                "Cz",
+                "C2",
+                "C4",
+                "C6",
+                "T8",
+                "TP7",
+                "CP5",
+                "CP3",
+                "CP1",
+                "CPz",
+                "CP2",
+                "CP4",
+                "CP6",
+                "TP8",
+                "P7",
+                "P5",
+                "P3",
+                "P1",
+                "Pz",
+                "P2",
+                "P4",
+                "P6",
+                "P8",
+                "PO7",
+                "PO3",
+                "POz",
+                "PO4",
+                "PO8",
+                "O1",
+                "Oz",
+            ],
+            line_freq=50.0,
+            auxiliary_channels=AuxiliaryChannelsMetadata(
+                has_eog=True,
+                eog_channels=4,
+                eog_type=["horizontal", "vertical"],
+                has_emg=True,
+                other_physiological=["gsr"],
+            ),
+        ),
+        participants=ParticipantMetadata(
+            n_subjects=10,
+            health_status="healthy",
+            gender={"male": 5, "female": 5},
+            age_mean=24,
+            handedness="right-handed (Edinburgh Handedness Inventory)",
+            bci_experience="naive BCI users in terms of motor decoding (4 had previous EEG experience)",
+        ),
+        experiment=ExperimentMetadata(
+            paradigm="imagery",
+            n_classes=2,
+            class_labels=["right_arm", "feet"],
+            trial_duration=23.0,
+            study_design="Participants attempt movement while viewing trajectory feedback that is a mixture of decoded brain signals and predefined target trajectory",
+            feedback_type="none",
+            stimulus_type="avatar",
+            stimulus_modalities=["visual"],
+            primary_modality="visual",
+            mode="both",
+            has_training_test_split=True,
+        ),
+        documentation=DocumentationMetadata(
+            doi="10.1088/1741-2552/ac689f",
+            repository="GitHub",
+            data_url="https://github.com/sccn/labstreaminglayer",
+            funding=["European Research Council"],
+        ),
+        tags=Tags(
+            pathology=["Healthy"],
+            modality=["Motor"],
+            type=["Motor"],
+        ),
+        preprocessing=PreprocessingMetadata(
+            data_state="continuous signals with synchronized decoded control signals, paradigm targets, visual feedback trajectories, and error metrics",
+            preprocessing_applied=True,
+            preprocessing_steps=[
+                "resampling and alignment to EEG timeline",
+                "GND channel removal",
+                "channel location assignment",
+            ],
+            filter_details=FilterDetails(
+                highpass_hz=0.18,
+                lowpass_hz=3,
+                notch_hz=50,
+            ),
+            artifact_methods=["ICA"],
+            re_reference="common average",
+            downsampled_to_hz=20,
+        ),
+        signal_processing=SignalProcessingMetadata(
+            feature_extraction=["ERD", "ERS", "Covariance/Riemannian", "ICA"],
+        ),
+        cross_validation=CrossValidationMetadata(
+            evaluation_type=["cross_session", "transfer_learning"],
+        ),
+        bci_application=BCIApplicationMetadata(
+            applications=["prosthetic", "robotic_arm", "smart_home", "vr_ar"],
+            environment="outdoor",
+        ),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="imagery",
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials={
+                "eyeruns": 38,
+                "calibration_snakeruns": 48,
+                "50_percent_feedback_snakeruns": 36,
+            },
+        ),
+        file_format="MAT",
+        data_processed=True,
+    )
+
     def __init__(self):
         super().__init__(
-            subjects=list(range(1, 3)),
+            subjects=list(range(1, 11)),
             sessions_per_subject=3,
             events=EVENT_ID_002,
             code="BNCI2025-002",

@@ -7,6 +7,21 @@ import mne
 
 from moabb.datasets import download as dl
 from moabb.datasets.base import BaseDataset
+from moabb.datasets.metadata.schema import (
+    AcquisitionMetadata,
+    AuxiliaryChannelsMetadata,
+    BCIApplicationMetadata,
+    CrossValidationMetadata,
+    DatasetMetadata,
+    DocumentationMetadata,
+    ExperimentMetadata,
+    FilterDetails,
+    ParadigmSpecificMetadata,
+    ParticipantMetadata,
+    PreprocessingMetadata,
+    SignalProcessingMetadata,
+    Tags,
+)
 from moabb.datasets.utils import stim_channels_with_selected_ids
 
 
@@ -72,6 +87,122 @@ class Sosulski2019(BaseDataset):
 
     .. versionadded:: 0.4.5
     """
+
+    METADATA = DatasetMetadata(
+        acquisition=AcquisitionMetadata(
+            sampling_rate=1000.0,
+            n_channels=31,
+            channel_types={"eeg": 31},
+            montage="10-10",
+            hardware="BrainAmp",
+            sensor_type="Ag/AgCl",
+            reference="nose",
+            software="Python",
+            sensors=[
+                "Fp1",
+                "Fp2",
+                "F7",
+                "F3",
+                "Fz",
+                "F4",
+                "F8",
+                "FC5",
+                "FC1",
+                "FC2",
+                "FC6",
+                "T7",
+                "C3",
+                "Cz",
+                "C4",
+                "T8",
+                "CP5",
+                "CP1",
+                "CP2",
+                "CP6",
+                "P7",
+                "P3",
+                "Pz",
+                "P4",
+                "P8",
+                "PO9",
+                "O1",
+                "Oz",
+                "O2",
+                "PO10",
+                "AF7",
+            ],
+            line_freq=50.0,
+            auxiliary_channels=AuxiliaryChannelsMetadata(
+                other_physiological=["gsr"],
+            ),
+        ),
+        participants=ParticipantMetadata(
+            n_subjects=13,
+            health_status="healthy",
+            gender={"male": 5, "female": 8},
+            age_mean=22.7,
+        ),
+        experiment=ExperimentMetadata(
+            paradigm="p300",
+            n_classes=1,
+            class_labels=["rest"],
+            trial_duration=5.0,
+            study_design="Subjects focused attention on target tones (1000 Hz) and ignored non-target tones (500 Hz) presented via speaker at 65 cm distance",
+            stimulus_type="oddball",
+            stimulus_modalities=["visual", "auditory"],
+            primary_modality="multisensory",
+            synchronicity="synchronous",
+            mode="both",
+        ),
+        documentation=DocumentationMetadata(
+            funding=[
+                "grant number EXC EXC",
+                "grant number\nINST INST",
+                "grant number TA TA",
+                "DFG project",
+            ],
+        ),
+        tags=Tags(
+            pathology=["Healthy"],
+            modality=["Visual"],
+            type=["Perception"],
+        ),
+        preprocessing=PreprocessingMetadata(
+            data_state="epoched",
+            preprocessing_applied=True,
+            preprocessing_steps=["bandpass filtering", "epoching", "baseline correction"],
+            filter_details=FilterDetails(
+                highpass_hz=1.5,
+                lowpass_hz=40,
+                bandpass=[1.5, 40],
+                filter_type="Chebyshev",
+                filter_order=4,
+            ),
+            artifact_methods=["ICA"],
+            re_reference="Car",
+        ),
+        signal_processing=SignalProcessingMetadata(
+            classifiers=["LDA", "Shrinkage LDA"],
+            feature_extraction=["Bandpower", "Covariance/Riemannian"],
+        ),
+        cross_validation=CrossValidationMetadata(
+            evaluation_type=["cross_subject"],
+        ),
+        bci_application=BCIApplicationMetadata(
+            applications=[
+                "speller",
+                "wheelchair/navigation",
+                "prosthetic",
+                "gaming",
+                "vr_ar",
+                "communication",
+            ],
+        ),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="p300",
+        ),
+        data_processed=True,
+    )
 
     def __init__(
         self,

@@ -293,24 +293,225 @@ def format_row(row: pd.Series, horizontal: bool = True):
     return out, row
 
 
+def _has_nonempty(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) > 0
+    return True
+
+
+def _format_metadata_value(value: Any) -> str:
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else f"{value:g}"
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(_format_metadata_value(v) for v in value)
+    return str(value)
+
+
+def _metadata_admonition_block(
+    title: str, items: list[tuple[str, Any]], existing_doc: str
+) -> str | None:
+    if f".. admonition:: {title}" in existing_doc:
+        return None
+
+    lines = []
+    for label, value in items:
+        if not _has_nonempty(value):
+            continue
+        lines.append(f"        - **{label}**: {_format_metadata_value(value)}")
+
+    if not lines:
+        return None
+    return "\n".join([f"    .. admonition:: {title}", "", *lines])
+
+
+def _format_age(participants) -> str | None:
+    age_mean = getattr(participants, "age_mean", None)
+    age_min = getattr(participants, "age_min", None)
+    age_max = getattr(participants, "age_max", None)
+    if age_mean is None:
+        return None
+    age_text = _format_metadata_value(age_mean)
+    if age_min is not None and age_max is not None:
+        age_text += f" (range: {_format_metadata_value(age_min)}-{_format_metadata_value(age_max)})"
+    return f"{age_text} years"
+
+
+def _format_bandpass(preprocessing) -> str | None:
+    filter_details = getattr(preprocessing, "filter_details", None)
+    if filter_details is None:
+        return None
+
+    bandpass = getattr(filter_details, "bandpass", None)
+    if isinstance(bandpass, dict):
+        low = bandpass.get(
+            "low",
+            bandpass.get(
+                "highpass", bandpass.get("low_cutoff_hz", bandpass.get("highpass_hz"))
+            ),
+        )
+        high = bandpass.get(
+            "high",
+            bandpass.get(
+                "lowpass", bandpass.get("high_cutoff_hz", bandpass.get("lowpass_hz"))
+            ),
+        )
+        if low is not None and high is not None:
+            return f"{_format_metadata_value(low)}-{_format_metadata_value(high)} Hz"
+    elif isinstance(bandpass, (list, tuple)) and len(bandpass) >= 2:
+        return (
+            f"{_format_metadata_value(bandpass[0])}"
+            f"-{_format_metadata_value(bandpass[1])} Hz"
+        )
+
+    highpass = getattr(filter_details, "highpass_hz", None)
+    lowpass = getattr(filter_details, "lowpass_hz", None)
+    if highpass is not None and lowpass is not None:
+        return f"{_format_metadata_value(highpass)}-{_format_metadata_value(lowpass)} Hz"
+    return None
+
+
+def _metadata_doc_sections(metadata: Any, existing_doc: str) -> str:
+    if metadata is None:
+        return ""
+
+    participants = getattr(metadata, "participants", None)
+    acquisition = getattr(metadata, "acquisition", None)
+    experiment = getattr(metadata, "experiment", None)
+    documentation = getattr(metadata, "documentation", None)
+    preprocessing = getattr(metadata, "preprocessing", None)
+    external_links = getattr(metadata, "external_links", None)
+
+    blocks = []
+
+    if participants is not None:
+        blocks.append(
+            _metadata_admonition_block(
+                "Participants",
+                [
+                    ("Population", getattr(participants, "health_status", None)),
+                    (
+                        "Clinical population",
+                        getattr(participants, "clinical_population", None),
+                    ),
+                    ("Age", _format_age(participants)),
+                    ("Handedness", getattr(participants, "handedness", None)),
+                    ("BCI experience", getattr(participants, "bci_experience", None)),
+                ],
+                existing_doc,
+            )
+        )
+
+    if acquisition is not None:
+        blocks.append(
+            _metadata_admonition_block(
+                "Equipment",
+                [
+                    ("Amplifier", getattr(acquisition, "hardware", None)),
+                    ("Electrodes", getattr(acquisition, "sensor_type", None)),
+                    ("Montage", getattr(acquisition, "montage", None)),
+                    ("Reference", getattr(acquisition, "reference", None)),
+                ],
+                existing_doc,
+            )
+        )
+
+    if preprocessing is not None:
+        steps = getattr(preprocessing, "preprocessing_steps", None)
+        steps_text = ", ".join(steps) if isinstance(steps, list) else steps
+        blocks.append(
+            _metadata_admonition_block(
+                "Preprocessing",
+                [
+                    ("Data state", getattr(preprocessing, "data_state", None)),
+                    ("Bandpass filter", _format_bandpass(preprocessing)),
+                    ("Steps", steps_text),
+                    ("Re-reference", getattr(preprocessing, "re_reference", None)),
+                    ("Notes", getattr(preprocessing, "notes", None)),
+                ],
+                existing_doc,
+            )
+        )
+
+    data_url = None
+    if documentation is not None:
+        data_url = getattr(documentation, "data_url", None)
+    if data_url is None and external_links is not None:
+        data_url = getattr(external_links, "source_url", None)
+
+    if documentation is not None or _has_nonempty(data_url):
+        blocks.append(
+            _metadata_admonition_block(
+                "Data Access",
+                [
+                    (
+                        "DOI",
+                        getattr(documentation, "doi", None) if documentation else None,
+                    ),
+                    ("Data URL", data_url),
+                    (
+                        "Repository",
+                        (
+                            getattr(documentation, "repository", None)
+                            if documentation
+                            else None
+                        ),
+                    ),
+                ],
+                existing_doc,
+            )
+        )
+
+    if experiment is not None:
+        blocks.append(
+            _metadata_admonition_block(
+                "Experimental Protocol",
+                [
+                    ("Paradigm", getattr(experiment, "paradigm", None)),
+                    ("Task type", getattr(experiment, "task_type", None)),
+                    ("Tasks", getattr(experiment, "tasks", None)),
+                    ("Feedback", getattr(experiment, "feedback_type", None)),
+                    ("Stimulus", getattr(experiment, "stimulus_type", None)),
+                ],
+                existing_doc,
+            )
+        )
+
+    blocks = [block for block in blocks if block is not None]
+    return "\n\n".join(blocks)
+
+
 class MetaclassDataset(abc.ABCMeta):
     def __new__(cls, name, bases, attrs):
-        doc = attrs.get("__doc__", "")
+        doc = attrs.get("__doc__", "") or ""
+        insert_blocks = []
+
         try:
             row = _summary_table.loc[name]
             row_str, row = format_row(row, horizontal=False)
-            doc_list = doc.split("\n\n")
-            if len(doc_list) >= 2:
-                doc_list = [doc_list[0], row_str] + doc_list[1:]
-            else:
-                doc_list.append(row_str)
-            attrs["__doc__"] = "\n\n".join(doc_list)
+            insert_blocks.append(row_str)
             attrs["_summary_table"] = row.to_dict()
         except KeyError:
             log.debug(
                 f"No description found for dataset {name}. "
                 f"Complete the appropriate moabb/datasets/summary_*.csv file"
             )
+
+        metadata_sections = _metadata_doc_sections(attrs.get("METADATA"), doc)
+        if metadata_sections:
+            insert_blocks.append(metadata_sections)
+
+        if insert_blocks:
+            if doc.strip():
+                doc_list = doc.split("\n\n")
+                doc_list = [doc_list[0], *insert_blocks, *doc_list[1:]]
+                attrs["__doc__"] = "\n\n".join(doc_list)
+            else:
+                attrs["__doc__"] = "\n\n".join(insert_blocks)
+
         return super().__new__(cls, name, bases, attrs)
 
 

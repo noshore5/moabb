@@ -2,6 +2,23 @@
 
 from mne.utils import verbose
 
+from moabb.datasets.metadata.schema import (
+    AcquisitionMetadata,
+    AuxiliaryChannelsMetadata,
+    BCIApplicationMetadata,
+    CrossValidationMetadata,
+    DatasetMetadata,
+    DataStructureMetadata,
+    ExperimentMetadata,
+    FilterDetails,
+    FrequencyBands,
+    ParadigmSpecificMetadata,
+    ParticipantMetadata,
+    PreprocessingMetadata,
+    SignalProcessingMetadata,
+    Tags,
+)
+
 from .base import MNEBNCI, _convert_bbci2003, _finalize_raw, data_path
 from .utils import validate_subject
 
@@ -101,6 +118,152 @@ class BNCI2003_004(MNEBNCI):
     BNCI2014_001 : BCI Competition IV 4-class motor imagery dataset
     BNCI2014_004 : BCI Competition 2008 2-class motor imagery dataset
     """
+
+    METADATA = DatasetMetadata(
+        acquisition=AcquisitionMetadata(
+            sampling_rate=1000.0,
+            n_channels=64,
+            channel_types={"eeg": 64},
+            hardware="multichannel EEG amplifiers",
+            reference="Car",
+            filters={"bandpass": [0.05, 200]},
+            sensors=[
+                "Fp1",
+                "Fpz",
+                "Fp2",
+                "AF7",
+                "AF3",
+                "AFz",
+                "AF4",
+                "AF8",
+                "F7",
+                "F5",
+                "F3",
+                "F1",
+                "Fz",
+                "F2",
+                "F4",
+                "F6",
+                "F8",
+                "FT7",
+                "FC5",
+                "FC3",
+                "FC1",
+                "FCz",
+                "FC2",
+                "FC4",
+                "FC6",
+                "FT8",
+                "T7",
+                "C5",
+                "C3",
+                "C1",
+                "Cz",
+                "C2",
+                "C4",
+                "C6",
+                "T8",
+                "TP7",
+                "CP5",
+                "CP3",
+                "CP1",
+                "CPz",
+                "CP2",
+                "CP4",
+                "CP6",
+                "TP8",
+                "P7",
+                "P5",
+                "P3",
+                "P1",
+                "Pz",
+                "P2",
+                "P4",
+                "P6",
+                "P8",
+                "PO7",
+                "PO3",
+                "POz",
+                "PO4",
+                "PO8",
+                "O1",
+                "Oz",
+                "O2",
+                "Iz",
+            ],
+            line_freq=50.0,
+            auxiliary_channels=AuxiliaryChannelsMetadata(
+                has_eog=True,
+                eog_type=["horizontal", "vertical"],
+                has_emg=True,
+                other_physiological=["gsr"],
+            ),
+        ),
+        participants=ParticipantMetadata(
+            n_subjects=10,
+            health_status="healthy",
+        ),
+        experiment=ExperimentMetadata(
+            paradigm="imagery",
+            n_classes=3,
+            class_labels=["right_hand", "left_hand", "feet"],
+            trial_duration=4.5,
+            stimulus_type="cursor_feedback",
+            mode="both",
+        ),
+        tags=Tags(
+            pathology=["Healthy"],
+            modality=["Motor"],
+            type=["Motor"],
+        ),
+        preprocessing=PreprocessingMetadata(
+            data_state="downsampled to 100 Hz for offline analysis",
+            preprocessing_applied=True,
+            preprocessing_steps=[
+                "downsampling",
+                "baseline correction",
+                "spatial Laplacian filtering",
+                "bandpass filtering",
+            ],
+            filter_details=FilterDetails(
+                highpass_hz=4.0,
+                lowpass_hz=2.5,
+                bandpass={"low_cutoff_hz": 0.05, "high_cutoff_hz": 200.0},
+                filter_type="causal elliptic IIR",
+            ),
+            artifact_methods=["ICA"],
+            re_reference="car",
+            downsampled_to_hz=100,
+        ),
+        signal_processing=SignalProcessingMetadata(
+            classifiers=["LDA", "SVM", "Shrinkage LDA"],
+            feature_extraction=["CSP", "ERD", "Covariance/Riemannian", "AR"],
+            frequency_bands=FrequencyBands(
+                alpha=[8, 13],
+            ),
+        ),
+        cross_validation=CrossValidationMetadata(
+            cv_method="leave-one-out",
+        ),
+        bci_application=BCIApplicationMetadata(
+            applications=[
+                "speller",
+                "wheelchair/navigation",
+                "prosthetic",
+                "vr_ar",
+                "communication",
+            ],
+            environment="outdoor",
+        ),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="imagery",
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials=200,
+            trials_context="total",
+        ),
+        data_processed=True,
+    )
 
     def __init__(self):
         super().__init__(

@@ -3,6 +3,24 @@
 from mne.utils import verbose
 from scipy.io import loadmat
 
+from moabb.datasets.metadata.schema import (
+    AcquisitionMetadata,
+    AuxiliaryChannelsMetadata,
+    BCIApplicationMetadata,
+    CrossValidationMetadata,
+    DatasetMetadata,
+    DataStructureMetadata,
+    DocumentationMetadata,
+    ExperimentMetadata,
+    FilterDetails,
+    FrequencyBands,
+    ParadigmSpecificMetadata,
+    ParticipantMetadata,
+    PerformanceMetadata,
+    PreprocessingMetadata,
+    SignalProcessingMetadata,
+    Tags,
+)
 from moabb.utils import depreciated_alias
 
 from .base import (
@@ -269,6 +287,142 @@ class BNCI2014_001(MNEBNCI):
     [1, 2, 3, 4, 5, 6, 7, 8, 9]
     """
 
+    METADATA = DatasetMetadata(
+        acquisition=AcquisitionMetadata(
+            sampling_rate=250.0,
+            n_channels=22,
+            channel_types={"eeg": 22},
+            montage="10-20",
+            hardware="BrainAmp",
+            sensor_type="Ag/AgCl",
+            reference="Car",
+            ground="mastoid",
+            software="BCI2000",
+            filters="50 Hz notch",
+            sensors=[
+                "Fz",
+                "FC3",
+                "FC1",
+                "FCz",
+                "FC2",
+                "FC4",
+                "C5",
+                "C3",
+                "C1",
+                "Cz",
+                "C2",
+                "C4",
+                "C6",
+                "CP3",
+                "CP1",
+                "CPz",
+                "CP2",
+                "CP4",
+                "P1",
+                "Pz",
+                "P2",
+                "POz",
+            ],
+            line_freq=50.0,
+            auxiliary_channels=AuxiliaryChannelsMetadata(
+                has_eog=True,
+                eog_channels=3,
+                eog_type=["horizontal", "vertical"],
+                has_emg=True,
+                other_physiological=["gsr"],
+            ),
+        ),
+        participants=ParticipantMetadata(
+            n_subjects=9,
+            health_status="healthy",
+        ),
+        experiment=ExperimentMetadata(
+            paradigm="imagery",
+            n_classes=4,
+            class_labels=["right_hand", "tongue", "left_hand", "feet"],
+            trial_duration=5.0,
+            study_design="Four-class motor imagery: left hand, right hand, both feet, tongue",
+            feedback_type="none",
+            stimulus_type="cursor_feedback",
+            stimulus_modalities=["visual", "auditory"],
+            primary_modality="multisensory",
+            synchronicity="synchronous",
+            mode="online",
+        ),
+        documentation=DocumentationMetadata(
+            doi="10.3389/fnins.2012.00055",
+            funding=["Grant R31- R31-"],
+        ),
+        tags=Tags(
+            pathology=["Healthy"],
+            modality=["Motor"],
+            type=["Motor"],
+        ),
+        preprocessing=PreprocessingMetadata(
+            data_state="minimally preprocessed (online filtered)",
+            preprocessing_applied=True,
+            preprocessing_steps=["bandpass filtering", "notch filtering"],
+            filter_details=FilterDetails(
+                highpass_hz=0.5,
+                lowpass_hz=100,
+                bandpass={"low_cutoff_hz": 0.5, "high_cutoff_hz": 100.0},
+                notch_hz=[50],
+                filter_type="Chebyshev",
+                filter_order=10,
+            ),
+            artifact_methods=["trial rejection", "ICA"],
+            re_reference="car",
+        ),
+        signal_processing=SignalProcessingMetadata(
+            classifiers=[
+                "LDA",
+                "SVM",
+                "Neural Network",
+                "Shrinkage LDA",
+                "Naive Bayes",
+                "CCA",
+            ],
+            feature_extraction=[
+                "CSP",
+                "FBCSP",
+                "Bandpower",
+                "ERD",
+                "ERS",
+                "PSD",
+                "Wavelet",
+                "Time-Frequency",
+                "AR",
+                "ICA",
+            ],
+            frequency_bands=FrequencyBands(
+                alpha=[8, 13],
+                mu=[8, 12],
+            ),
+        ),
+        cross_validation=CrossValidationMetadata(
+            cv_method="5-fold",
+            cv_folds=5,
+            evaluation_type=["cross_subject"],
+        ),
+        performance=PerformanceMetadata(
+            accuracy_percent=62.0,
+        ),
+        bci_application=BCIApplicationMetadata(
+            applications=["prosthetic", "vr_ar", "communication"],
+            environment="outdoor",
+        ),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="imagery",
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials=288,
+            n_blocks=3,
+            trials_context="total",
+        ),
+        file_format="MAT",
+        data_processed=True,
+    )
+
     def __init__(self):
         super().__init__(
             subjects=list(range(1, 10)),
@@ -330,6 +484,131 @@ class BNCI2014_002(MNEBNCI):
     BNCI2014_001 : 4-class motor imagery (BCI Competition IV Dataset 2a)
     BNCI2014_004 : 2-class motor imagery (Dataset B)
     """
+
+    METADATA = DatasetMetadata(
+        acquisition=AcquisitionMetadata(
+            sampling_rate=1000.0,
+            n_channels=32,
+            channel_types={"eeg": 32},
+            montage="laplacian",
+            hardware="g.tec",
+            sensor_type="Ag/AgCl",
+            reference="left mastoid",
+            ground="right mastoid",
+            filters="50 Hz notch",
+            sensors=[
+                "Fp1",
+                "Fp2",
+                "F7",
+                "F3",
+                "Fz",
+                "F4",
+                "F8",
+                "FC5",
+                "FC1",
+                "FC2",
+                "FC6",
+                "T7",
+                "C3",
+                "Cz",
+                "C4",
+                "T8",
+                "CP5",
+                "CP1",
+                "CP2",
+                "CP6",
+                "P7",
+                "P3",
+                "Pz",
+                "P4",
+                "P8",
+                "PO9",
+                "O1",
+                "Oz",
+                "O2",
+                "PO10",
+                "AF7",
+                "AF8",
+            ],
+            line_freq=50.0,
+            auxiliary_channels=AuxiliaryChannelsMetadata(
+                other_physiological=["gsr"],
+            ),
+        ),
+        participants=ParticipantMetadata(
+            n_subjects=14,
+            health_status="healthy",
+            gender={"female": 5, "male": 9},
+            bci_experience="naive",
+        ),
+        experiment=ExperimentMetadata(
+            paradigm="imagery",
+            n_classes=3,
+            class_labels=["right_hand", "left_hand", "feet"],
+            trial_duration=8.0,
+            study_design="MI",
+            feedback_type="none",
+            stimulus_type="cursor_feedback",
+            stimulus_modalities=["auditory"],
+            primary_modality="auditory",
+            mode="both",
+        ),
+        documentation=DocumentationMetadata(
+            doi="10.1515/bmt-2014-0117",
+        ),
+        tags=Tags(
+            pathology=["Healthy"],
+            modality=["Motor"],
+            type=["Motor"],
+        ),
+        preprocessing=PreprocessingMetadata(
+            data_state="raw with online filtering applied",
+            preprocessing_applied=True,
+            preprocessing_steps=[
+                "Bandpass filtering",
+                "Notch filtering",
+                "Automated outlier rejection",
+                "Laplacian spatial filtering",
+                "DFT for PSD estimation",
+            ],
+            filter_details=FilterDetails(
+                highpass_hz=0.1,
+                lowpass_hz=200,
+                bandpass="0.1-200 Hz",
+                notch_hz=[50],
+                filter_type="Butterworth",
+                filter_order=8,
+            ),
+            artifact_methods=["ICA"],
+            re_reference="car",
+        ),
+        signal_processing=SignalProcessingMetadata(
+            classifiers=["LDA", "SVM", "Random Forest", "Shrinkage LDA"],
+            feature_extraction=["CSP", "FBCSP", "ERD", "PSD"],
+            frequency_bands=FrequencyBands(
+                alpha=[8, 13],
+                analyzed_range=[1.0, 40.0],
+            ),
+        ),
+        cross_validation=CrossValidationMetadata(
+            cv_method="10-fold",
+            cv_folds=10,
+        ),
+        performance=PerformanceMetadata(
+            accuracy_percent=68.9,
+        ),
+        bci_application=BCIApplicationMetadata(
+            applications=["speller", "prosthetic", "vr_ar", "communication"],
+        ),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="imagery",
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials=80,
+            trials_context="per_class",
+        ),
+        data_processed=True,
+    )
 
     def __init__(self):
         super().__init__(
@@ -394,6 +673,123 @@ class BNCI2014_004(MNEBNCI):
     BNCI2014_002 : 2-class motor imagery with Laplacian derivations
     """
 
+    METADATA = DatasetMetadata(
+        acquisition=AcquisitionMetadata(
+            sampling_rate=250.0,
+            n_channels=22,
+            channel_types={"eeg": 22},
+            montage="10-20",
+            hardware="g.tec Guger Technologies OEG (two 16-channel biosignal amplifiers)",
+            sensor_type="Ag/AgCl",
+            reference="Car",
+            ground="right mastoid",
+            filters="50 Hz notch",
+            sensors=[
+                "Fz",
+                "FC3",
+                "FC1",
+                "FCz",
+                "FC2",
+                "FC4",
+                "C5",
+                "C3",
+                "C1",
+                "Cz",
+                "C2",
+                "C4",
+                "C6",
+                "CP3",
+                "CP1",
+                "CPz",
+                "CP2",
+                "CP4",
+                "P1",
+                "Pz",
+                "P2",
+                "POz",
+            ],
+            line_freq=50.0,
+            auxiliary_channels=AuxiliaryChannelsMetadata(
+                has_eog=True,
+                eog_channels=3,
+                eog_type=["horizontal", "vertical"],
+                has_emg=True,
+                emg_channels=4,
+            ),
+        ),
+        participants=ParticipantMetadata(
+            n_subjects=9,
+            health_status="paralysis",
+            gender={"male": 6, "female": 4},
+            age_mean=24.6,
+            handedness="right",
+            bci_experience="naive",
+        ),
+        experiment=ExperimentMetadata(
+            paradigm="imagery",
+            n_classes=4,
+            class_labels=["right_hand", "right_arm", "left_hand", "feet"],
+            study_design="motor\nimagery",
+            feedback_type="none",
+            stimulus_type="avatar",
+            stimulus_modalities=["visual", "auditory"],
+            primary_modality="multisensory",
+            synchronicity="asynchronous",
+            mode="both",
+        ),
+        documentation=DocumentationMetadata(),
+        tags=Tags(
+            pathology=["Healthy"],
+            modality=["Motor"],
+            type=["Motor"],
+        ),
+        preprocessing=PreprocessingMetadata(
+            data_state="preprocessed",
+            preprocessing_applied=True,
+            preprocessing_steps=[
+                "EOG regression artifact reduction",
+                "bandpass filtering",
+                "notch filtering",
+            ],
+            filter_details=FilterDetails(
+                highpass_hz=0.5,
+                lowpass_hz=100,
+                bandpass=[0.5, 100],
+                notch_hz=[50],
+                filter_type="Butterworth",
+                filter_order=5,
+            ),
+            artifact_methods=["EOG correction", "ICA"],
+            re_reference="car",
+        ),
+        signal_processing=SignalProcessingMetadata(
+            classifiers=["LDA"],
+            feature_extraction=["Bandpower", "ERD"],
+            frequency_bands=FrequencyBands(
+                mu=[8, 12],
+            ),
+        ),
+        bci_application=BCIApplicationMetadata(
+            applications=[
+                "wheelchair/navigation",
+                "prosthetic",
+                "vr_ar",
+                "communication",
+                "neurofeedback",
+            ],
+            environment="laboratory",
+        ),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="imagery",
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials=20,
+            n_blocks=1,
+            trials_context="per_run",
+        ),
+        data_processed=True,
+    )
+
     def __init__(self):
         super().__init__(
             subjects=list(range(1, 10)),
@@ -443,6 +839,93 @@ class BNCI2014_008(MNEBNCI):
     .. versionadded:: 0.4.0
     """
 
+    METADATA = DatasetMetadata(
+        acquisition=AcquisitionMetadata(
+            sampling_rate=256.0,
+            n_channels=8,
+            channel_types={"eeg": 8},
+            montage="10-10",
+            hardware="BCI2000",
+            sensor_type="active electrodes",
+            reference="right earlobe",
+            ground="left mastoid",
+            software="BCI2000",
+            filters={"bandpass": [0.1, 30], "highpass_hz": 0.1, "lowpass_hz": 30},
+            sensors=["Fz", "Cz", "Pz", "Oz", "P3", "P4", "PO7", "PO8"],
+            line_freq=50.0,
+            auxiliary_channels=AuxiliaryChannelsMetadata(
+                other_physiological=["ecg", "respiration", "gsr"],
+            ),
+        ),
+        participants=ParticipantMetadata(
+            n_subjects=8,
+            health_status="healthy",
+            gender={"male": 6, "female": 2},
+            age_mean=58,
+            bci_experience="naive",
+        ),
+        experiment=ExperimentMetadata(
+            paradigm="p300",
+            n_classes=1,
+            class_labels=["rest"],
+            trial_duration=0.8,
+            study_design="report if the orientation of the rectangles in the test array was\nidentical to the ones in the memory array.",
+            feedback_type="none",
+            stimulus_type="rsvp",
+            stimulus_modalities=["visual", "auditory"],
+            primary_modality="multisensory",
+            mode="both",
+        ),
+        documentation=DocumentationMetadata(
+            doi="10.3389/fnhum.2013.00732",
+        ),
+        tags=Tags(
+            pathology=["Healthy"],
+            modality=["Visual"],
+            type=["Perception"],
+        ),
+        preprocessing=PreprocessingMetadata(
+            data_state="epoched",
+            preprocessing_applied=True,
+            preprocessing_steps=[
+                "bandpass filtering",
+                "notch filtering",
+                "epoching",
+                "artifact rejection",
+                "baseline correction",
+                "decimation",
+            ],
+            filter_details=FilterDetails(
+                highpass_hz=0.1,
+                lowpass_hz=10,
+                bandpass=[0.1, 10],
+                notch_hz=50,
+                filter_type="Butterworth",
+                filter_order=4,
+            ),
+            artifact_methods=["ICA"],
+        ),
+        signal_processing=SignalProcessingMetadata(
+            classifiers=["LDA"],
+            frequency_bands=FrequencyBands(
+                theta=[4, 8],
+            ),
+        ),
+        bci_application=BCIApplicationMetadata(
+            applications=["speller", "prosthetic", "vr_ar", "communication"],
+            environment="outdoor",
+        ),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="p300",
+            n_repetitions=12,
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials=80,
+            trials_context="total",
+        ),
+        data_processed=True,
+    )
+
     def __init__(self):
         super().__init__(
             subjects=list(range(1, 9)),
@@ -489,6 +972,116 @@ class BNCI2014_009(MNEBNCI):
     -----
     .. versionadded:: 0.4.0
     """
+
+    METADATA = DatasetMetadata(
+        acquisition=AcquisitionMetadata(
+            sampling_rate=256.0,
+            n_channels=16,
+            channel_types={"eeg": 16},
+            montage="10-10",
+            hardware="g.tec",
+            sensor_type="Ag/AgCl",
+            reference="earlobe",
+            ground="right mastoid",
+            software="BCI2000",
+            filters={"highpass_hz": 0.1, "lowpass_hz": 20},
+            impedance_threshold_kohm=10,
+            sensors=[
+                "FC5",
+                "FC3",
+                "FC1",
+                "FCz",
+                "FC2",
+                "FC4",
+                "FC6",
+                "C3",
+                "C1",
+                "Cz",
+                "C2",
+                "C4",
+                "CP3",
+                "CPz",
+                "CP4",
+                "Pz",
+            ],
+            line_freq=50.0,
+            auxiliary_channels=AuxiliaryChannelsMetadata(
+                other_physiological=["gsr"],
+            ),
+        ),
+        participants=ParticipantMetadata(
+            n_subjects=15,
+            health_status="healthy",
+            gender={"male": 6, "female": 4},
+            age_mean=26.82,
+            bci_experience="previous experience with P300-based BCIs",
+        ),
+        experiment=ExperimentMetadata(
+            paradigm="p300",
+            n_classes=1,
+            class_labels=["rest"],
+            trial_duration=0.8,
+            study_design="Subjects focused on one of 36 characters using two paradigms: P300 Speller (overt attention with 6x6 matrix) and GeoSpell (covert attention with hexagonal presentation)",
+            feedback_type="none",
+            stimulus_type="oddball",
+            stimulus_modalities=["visual", "auditory"],
+            primary_modality="multisensory",
+            synchronicity="asynchronous",
+            mode="both",
+            has_training_test_split=True,
+        ),
+        documentation=DocumentationMetadata(
+            doi="10.1080/00140139.2012.661084",
+            funding=["EU grant FP7-", "grant FP7- FP7-"],
+        ),
+        tags=Tags(
+            pathology=["Healthy"],
+            modality=["Visual"],
+            type=["Perception"],
+        ),
+        preprocessing=PreprocessingMetadata(
+            data_state="filtered",
+            preprocessing_applied=True,
+            preprocessing_steps=["bandpass filtering"],
+            filter_details=FilterDetails(
+                highpass_hz=0.1,
+                lowpass_hz=20,
+                bandpass={"low_cutoff_hz": 0.1, "high_cutoff_hz": 20.0},
+                filter_type="Butterworth",
+                filter_order=8,
+            ),
+            artifact_methods=["ICA"],
+            re_reference="car",
+        ),
+        signal_processing=SignalProcessingMetadata(
+            classifiers=["LDA"],
+            feature_extraction=["Wavelet", "Time-Frequency"],
+            frequency_bands=FrequencyBands(
+                analyzed_range=[1.0, 20.0],
+            ),
+        ),
+        cross_validation=CrossValidationMetadata(
+            cv_method="3-fold",
+            cv_folds=3,
+            evaluation_type=["cross_subject"],
+        ),
+        performance=PerformanceMetadata(
+            accuracy_percent=91.6,
+        ),
+        bci_application=BCIApplicationMetadata(
+            applications=["speller", "prosthetic", "vr_ar", "communication"],
+            environment="outdoor",
+        ),
+        paradigm_specific=ParadigmSpecificMetadata(
+            detected_paradigm="p300",
+            n_repetitions=16,
+        ),
+        data_structure=DataStructureMetadata(
+            n_trials="6 trials per run",
+            trials_context="per run",
+        ),
+        data_processed=True,
+    )
 
     def __init__(self):
         super().__init__(

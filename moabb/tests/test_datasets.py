@@ -28,7 +28,16 @@ from moabb.datasets.compound_dataset import CompoundDataset
 from moabb.datasets.compound_dataset.utils import compound_dataset_list
 from moabb.datasets.fake import FakeDataset, FakeVirtualRealityDataset
 from moabb.datasets.kojima2024b import EVENTS
-from moabb.datasets.metadata import DatasetMetadata, get_dataset_metadata
+from moabb.datasets.metadata import (
+    AcquisitionMetadata,
+    DatasetMetadata,
+    DocumentationMetadata,
+    ExperimentMetadata,
+    FilterDetails,
+    ParticipantMetadata,
+    PreprocessingMetadata,
+    get_dataset_metadata,
+)
 from moabb.datasets.utils import bids_metainfo, block_rep, dataset_list
 from moabb.paradigms import P300
 from moabb.utils import aliases_list
@@ -267,6 +276,122 @@ class Test_Datasets:
             if ds.__name__ in depreciated_names:
                 continue
             assert ".. admonition:: Dataset summary" in ds.__doc__
+
+    def test_metadata_docstring_sections_auto_generated(self):
+        class AutoDocMetadataDataset(BaseDataset):
+            """Dataset doc for auto metadata generation."""
+
+            METADATA = DatasetMetadata(
+                acquisition=AcquisitionMetadata(
+                    sampling_rate=256.0,
+                    n_channels=8,
+                    channel_types={"eeg": 8},
+                    hardware="BrainAmp",
+                    sensor_type="Ag/AgCl",
+                    montage="10-20",
+                ),
+                participants=ParticipantMetadata(
+                    n_subjects=4,
+                    health_status="healthy",
+                    age_mean=29.5,
+                    age_min=24,
+                    age_max=35,
+                    handedness={"right": 4},
+                    bci_experience="experienced",
+                ),
+                experiment=ExperimentMetadata(
+                    paradigm="imagery",
+                    task_type="left_right_hand",
+                    feedback_type="visual",
+                ),
+                documentation=DocumentationMetadata(doi="10.1093/gigascience/giz002"),
+                preprocessing=PreprocessingMetadata(
+                    filter_details=FilterDetails(bandpass=[0.5, 40.0]),
+                    preprocessing_steps=["common average reference"],
+                ),
+            )
+
+            def __init__(self):
+                super().__init__(
+                    subjects=[1],
+                    sessions_per_subject=1,
+                    events={"left_hand": 1, "right_hand": 2},
+                    code="AutoDocMetadataDataset",
+                    interval=[0, 1],
+                    paradigm="imagery",
+                )
+
+            def _get_single_subject_data(self, subject):
+                return {}
+
+            def data_path(
+                self,
+                subject,
+                path=None,
+                force_update=False,
+                update_path=None,
+                verbose=None,
+            ):
+                return []
+
+        doc = AutoDocMetadataDataset.__doc__
+        assert ".. admonition:: Participants" in doc
+        assert "- **Population**: healthy" in doc
+        assert "- **Age**: 29.5 (range: 24-35) years" in doc
+        assert ".. admonition:: Equipment" in doc
+        assert "- **Amplifier**: BrainAmp" in doc
+        assert ".. admonition:: Preprocessing" in doc
+        assert "- **Bandpass filter**: 0.5-40 Hz" in doc
+        assert ".. admonition:: Data Access" in doc
+        assert "- **DOI**: 10.1093/gigascience/giz002" in doc
+        assert ".. admonition:: Experimental Protocol" in doc
+        assert "- **Paradigm**: imagery" in doc
+
+    def test_metadata_docstring_sections_do_not_duplicate_manual_admonitions(self):
+        class ManualParticipantsDataset(BaseDataset):
+            """
+            Dataset doc with a manual participants section.
+
+            .. admonition:: Participants
+
+                - **Population**: healthy
+            """
+
+            METADATA = DatasetMetadata(
+                acquisition=AcquisitionMetadata(
+                    sampling_rate=256.0,
+                    n_channels=8,
+                    channel_types={"eeg": 8},
+                ),
+                participants=ParticipantMetadata(n_subjects=4, health_status="healthy"),
+                experiment=ExperimentMetadata(paradigm="imagery"),
+            )
+
+            def __init__(self):
+                super().__init__(
+                    subjects=[1],
+                    sessions_per_subject=1,
+                    events={"left_hand": 1, "right_hand": 2},
+                    code="ManualParticipantsDataset",
+                    interval=[0, 1],
+                    paradigm="imagery",
+                )
+
+            def _get_single_subject_data(self, subject):
+                return {}
+
+            def data_path(
+                self,
+                subject,
+                path=None,
+                force_update=False,
+                update_path=None,
+                verbose=None,
+            ):
+                return []
+
+        doc = ManualParticipantsDataset.__doc__
+        assert doc.count(".. admonition:: Participants") == 1
 
     def test_completeness_summary_table(self):
         # The dataset summary table will be automatically added to the docstring of
