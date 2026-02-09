@@ -114,7 +114,7 @@ class PhysionetMI(BaseDataset):
         ),
         participants=ParticipantMetadata(
             n_subjects=109,
-            health_status="paralysis",
+            health_status="healthy",
         ),
         experiment=ExperimentMetadata(
             paradigm="imagery",
