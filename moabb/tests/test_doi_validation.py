@@ -26,6 +26,7 @@ import pytest
 from moabb.datasets.metadata.schema import DatasetMetadata
 from moabb.datasets.utils import dataset_list
 
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -210,9 +211,7 @@ _REAL_DATASETS = [
 class TestDOIFormat:
     """Every DOI string should have valid ``10.xxxx/…`` format."""
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_all_dois_have_valid_format(self, dataset_class):
         dois = _collect_dois(dataset_class)
         invalid = []
@@ -224,17 +223,15 @@ class TestDOIFormat:
                 invalid.append(f"  {source} = {doi!r}")
         if not any(v for v in dois.values()):
             pytest.skip("No DOIs found")
-        assert not invalid, (
-            f"{dataset_class.__name__}: invalid DOI format:\n" + "\n".join(invalid)
-        )
+        assert (
+            not invalid
+        ), f"{dataset_class.__name__}: invalid DOI format:\n" + "\n".join(invalid)
 
 
 class TestDOIConsistency:
     """Docstring DOIs must be tracked in METADATA or class DOI."""
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_docstring_dois_tracked_in_metadata(self, dataset_class):
         """Every DOI in the docstring should appear in METADATA or init."""
         dois = _collect_dois(dataset_class)
@@ -300,9 +297,7 @@ class TestDOIConsistency:
 class TestDOIResolution:
     """Every DOI should resolve to a real publication via CrossRef/DataCite."""
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_all_dois_resolve(self, dataset_class):
         """All unique DOIs from class, METADATA, and docstring must resolve."""
         dois = _collect_dois(dataset_class)
@@ -318,13 +313,11 @@ class TestDOIResolution:
             elif not result.get("title"):
                 failures.append(f"{doi} (resolved but no title)")
 
-        assert not failures, (
-            f"{dataset_class.__name__}: DOIs failed to resolve: {failures}"
-        )
+        assert (
+            not failures
+        ), f"{dataset_class.__name__}: DOIs failed to resolve: {failures}"
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_class_doi_resolves(self, dataset_class):
         """The class DOI (ground truth) must resolve to a real publication."""
         dois = _collect_dois(dataset_class)
@@ -334,9 +327,9 @@ class TestDOIResolution:
             pytest.skip("No class DOI")
 
         result = _resolve_doi(init_doi)
-        assert result is not None, (
-            f"{dataset_class.__name__}: class DOI {init_doi!r} failed to resolve"
-        )
+        assert (
+            result is not None
+        ), f"{dataset_class.__name__}: class DOI {init_doi!r} failed to resolve"
         assert result.get("title"), (
             f"{dataset_class.__name__}: class DOI {init_doi!r} resolved but has "
             f"no title"
