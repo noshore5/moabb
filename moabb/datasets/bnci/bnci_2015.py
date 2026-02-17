@@ -719,7 +719,8 @@ class BNCI2015_003(MNEBNCI):
             mode="both",
         ),
         documentation=DocumentationMetadata(
-            doi="10.3389/fnins.2011.00112",
+            doi="10.1016/j.neulet.2009.06.045",
+            associated_paper_doi="10.3389/fnins.2011.00112",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -950,7 +951,7 @@ class BNCI2015_004(MNEBNCI):
             code="BNCI2015-004",
             interval=[0, 4],
             paradigm="imagery",
-            doi="10.1109/TCDS.2017.2688350",
+            doi="10.1371/journal.pone.0123727",
         )
 
 
