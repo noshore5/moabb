@@ -19,6 +19,7 @@ Run only offline checks::
 
 import re
 import time
+import unicodedata
 
 import httpx
 import pytest
@@ -136,6 +137,12 @@ def _resolve_doi(doi: str) -> dict | None:
         return None
 
 
+def _strip_accents(s: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn"
+    )
+
+
 def _extract_surnames(authors: list[str]) -> set[str]:
     out = set()
     for a in authors or []:
@@ -143,11 +150,13 @@ def _extract_surnames(authors: list[str]) -> set[str]:
         if not a:
             continue
         if ", " in a:
-            out.add(a.split(",")[0].strip().lower())
+            surname = a.split(",")[0].strip().lower()
         else:
             parts = a.split()
-            if parts:
-                out.add(parts[-1].strip(".").lower())
+            if not parts:
+                continue
+            surname = parts[-1].strip(".").lower()
+        out.add(_strip_accents(surname))
     return out
 
 
@@ -234,12 +243,6 @@ def test_class_and_metadata_dois_share_authors(dataset_class):
     init_doi = dois.get("init.doi")
     if not init_doi or not _is_doi(init_doi):
         pytest.skip("No class DOI")
-
-    all_meta = {
-        dois.get(k) for k in ("metadata.doi", "metadata.associated_paper") if dois.get(k)
-    }
-    if init_doi in all_meta:
-        pytest.skip("Class DOI matches a metadata DOI")
 
     meta_dois = {
         k: v
