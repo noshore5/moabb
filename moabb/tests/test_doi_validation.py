@@ -21,6 +21,7 @@ import pytest
 from moabb.datasets.metadata.schema import DatasetMetadata
 from moabb.datasets.utils import dataset_list
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -134,7 +135,8 @@ def _resolve_doi_datacite(doi: str) -> dict | None:
         attrs = data.get("data", {}).get("attributes", {})
         title = (attrs.get("titles") or [{}])[0].get("title")
         authors = [
-            c.get("name", "") or f"{c.get('givenName', '')} {c.get('familyName', '')}".strip()
+            c.get("name", "")
+            or f"{c.get('givenName', '')} {c.get('familyName', '')}".strip()
             for c in attrs.get("creators", [])
         ]
         year = attrs.get("publicationYear")
@@ -170,9 +172,7 @@ _REAL_DATASETS = [
 class TestDOIFormat:
     """Validate that DOI strings in metadata have correct format."""
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_metadata_doi_is_valid_format(self, dataset_class):
         """documentation.doi should be a valid DOI or None."""
         meta = dataset_class.METADATA
@@ -182,18 +182,14 @@ class TestDOIFormat:
         doi = getattr(doc, "doi", None)
         if doi is None:
             pytest.skip("No DOI set")
-        is_valid = _is_doi(doi) or any(
-            doi.startswith(p) for p in _NON_CROSSREF_PREFIXES
-        )
+        is_valid = _is_doi(doi) or any(doi.startswith(p) for p in _NON_CROSSREF_PREFIXES)
         assert is_valid, (
             f"{dataset_class.__name__}: documentation.doi={doi!r} "
             f"does not look like a valid DOI (expected 10.xxxx/...) "
             f"or recognized identifier (hal-/tel-/arXiv:)"
         )
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_associated_doi_is_valid_format(self, dataset_class):
         """associated_paper_doi should be a valid DOI, HAL ID, or None."""
         meta = dataset_class.METADATA
@@ -215,9 +211,7 @@ class TestDOIFormat:
 class TestDOIConsistency:
     """Check that DOIs in metadata match docstring references."""
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_metadata_doi_appears_in_docstring(self, dataset_class):
         """The primary DOI in metadata should also appear in the docstring."""
         meta = dataset_class.METADATA
@@ -241,9 +235,7 @@ class TestDOIConsistency:
             f"not found in docstring DOIs: {docstring_dois}"
         )
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_docstring_dois_are_known_in_metadata(self, dataset_class):
         """All DOIs in docstring should be either the primary DOI,
         associated DOI, or a recognized data repository DOI."""
@@ -313,9 +305,7 @@ class TestDOIConsistency:
 class TestDOIResolution:
     """Verify that every DOI in metadata resolves via CrossRef."""
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_primary_doi_resolves(self, dataset_class):
         """documentation.doi should resolve to a real publication."""
         meta = dataset_class.METADATA
@@ -329,16 +319,14 @@ class TestDOIResolution:
             pytest.skip(f"Not a standard DOI: {doi!r}")
 
         result = _resolve_doi(doi)
-        assert result is not None, (
-            f"{dataset_class.__name__}: DOI {doi!r} failed to resolve via CrossRef"
-        )
-        assert result["title"], (
-            f"{dataset_class.__name__}: DOI {doi!r} resolved but has no title"
-        )
+        assert (
+            result is not None
+        ), f"{dataset_class.__name__}: DOI {doi!r} failed to resolve via CrossRef"
+        assert result[
+            "title"
+        ], f"{dataset_class.__name__}: DOI {doi!r} resolved but has no title"
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_primary_doi_year_matches_metadata(self, dataset_class):
         """Publication year from CrossRef should match metadata."""
         meta = dataset_class.METADATA
@@ -378,9 +366,7 @@ class TestDOIResolution:
             f"  CrossRef title: {result['title']}"
         )
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_primary_doi_authors_overlap_metadata(self, dataset_class):
         """At least one CrossRef author should appear in metadata investigators."""
         meta = dataset_class.METADATA
@@ -439,9 +425,7 @@ class TestDOIResolution:
 class TestDocstringDOIContent:
     """Verify that DOIs referenced in docstrings resolve to related papers."""
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_docstring_reference_dois_resolve(self, dataset_class):
         """Every DOI in docstring References section should resolve."""
         doc = getattr(dataset_class, "__doc__", "") or ""
@@ -454,7 +438,15 @@ class TestDocstringDOIContent:
                 in_refs = True
                 continue
             if in_refs:
-                if stripped and not stripped.startswith("..") and not stripped.startswith("http") and not stripped.startswith("10.") and not stripped[0:1].isdigit() and stripped[0:1].isalpha() and not stripped.startswith("-"):
+                if (
+                    stripped
+                    and not stripped.startswith("..")
+                    and not stripped.startswith("http")
+                    and not stripped.startswith("10.")
+                    and not stripped[0:1].isdigit()
+                    and stripped[0:1].isalpha()
+                    and not stripped.startswith("-")
+                ):
                     # New section header
                     break
                 ref_section += line + "\n"
