@@ -227,6 +227,7 @@ class Hinss2021(BaseDataset):
             code="Hinss2021",
             interval=[0, 2],  # Epochs are 2-second long
             paradigm="rstate",
+            doi="10.1038/s41597-022-01898-y",
         )
 
     def _get_stim_channel(self, rs_epochs, easy_epochs, med_epochs, n_epochs, n_samples):
