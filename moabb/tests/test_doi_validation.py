@@ -157,7 +157,7 @@ def _resolve_doi(doi: str) -> dict | None:
 def _extract_surnames(authors: list[str]) -> set[str]:
     """Extract lowercase surnames from author name strings."""
     out = set()
-    for a in (authors or []):
+    for a in authors or []:
         a = a.strip()
         if not a:
             continue
@@ -316,9 +316,7 @@ class TestDOIResolution:
             f"no title"
         )
 
-    @pytest.mark.parametrize(
-        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
-    )
+    @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_class_and_metadata_dois_share_authors(self, dataset_class):
         """Class DOI must share authors with at least one metadata DOI.
 
@@ -333,7 +331,8 @@ class TestDOIResolution:
 
         # If init.doi exactly matches any metadata DOI, it's consistent
         all_meta = {
-            dois.get(k) for k in ("metadata.doi", "metadata.associated_paper")
+            dois.get(k)
+            for k in ("metadata.doi", "metadata.associated_paper")
             if dois.get(k)
         }
         if init_doi in all_meta:
@@ -341,7 +340,8 @@ class TestDOIResolution:
 
         # Collect metadata DOIs that differ from init for author comparison
         meta_dois = {
-            k: v for k, v in [
+            k: v
+            for k, v in [
                 ("metadata.doi", dois.get("metadata.doi")),
                 ("metadata.associated_paper", dois.get("metadata.associated_paper")),
             ]
@@ -367,12 +367,8 @@ class TestDOIResolution:
             meta_authors = _extract_surnames(meta_result.get("authors"))
             if init_authors & meta_authors:
                 return  # found overlap — test passes
-            report_lines.append(
-                f"  {key} {meta_doi}: {meta_result.get('title')}"
-            )
-            report_lines.append(
-                f"    authors: {meta_result.get('authors')}"
-            )
+            report_lines.append(f"  {key} {meta_doi}: {meta_result.get('title')}")
+            report_lines.append(f"    authors: {meta_result.get('authors')}")
 
         pytest.fail(
             f"{dataset_class.__name__}: class DOI shares no authors with "
