@@ -110,7 +110,12 @@ def _collect_dois(cls) -> dict[str, str | None]:
     return result
 
 
+_DOI_CACHE: dict[str, dict | None] = {}
+
+
 def _resolve_doi(doi: str) -> dict | None:
+    if doi in _DOI_CACHE:
+        return _DOI_CACHE[doi]
     try:
         time.sleep(_REQUEST_DELAY)
         r = requests.get(
@@ -126,14 +131,16 @@ def _resolve_doi(doi: str) -> dict | None:
         ]
         issued = data.get("issued", {}).get("date-parts", [[None]])
         year = issued[0][0] if issued and issued[0] and issued[0][0] else None
-        return {
+        result = {
             "title": data.get("title"),
             "authors": authors,
             "year": year,
             "doi": doi,
         }
     except Exception:
-        return None
+        result = None
+    _DOI_CACHE[doi] = result
+    return result
 
 
 def _strip_accents(s: str) -> str:
