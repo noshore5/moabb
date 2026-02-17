@@ -2228,7 +2228,7 @@ class BNCI2015_012(MNEBNCI):
             code="BNCI2015-012",
             interval=[0, 0.8],
             paradigm="p300",
-            doi="10.3389/fnins.2011.00112",
+            doi="10.3389/fnins.2011.00099",
         )
 
     def _get_single_subject_data(self, subject):

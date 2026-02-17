@@ -244,40 +244,29 @@ def test_class_and_metadata_dois_share_authors(dataset_class):
     if not init_doi or not _is_doi(init_doi):
         pytest.skip("No class DOI")
 
-    meta_dois = {
-        k: v
-        for k, v in [
-            ("metadata.doi", dois.get("metadata.doi")),
-            (
-                "metadata.associated_paper",
-                dois.get("metadata.associated_paper"),
-            ),
-        ]
-        if v and _is_doi(v) and v != init_doi
-    }
-    if not meta_dois:
-        pytest.skip("No differing metadata DOIs to compare")
+    meta_doi = dois.get("metadata.doi")
+    if not meta_doi or not _is_doi(meta_doi) or meta_doi == init_doi:
+        pytest.skip("No differing metadata.doi to compare")
 
     init_result = _resolve_doi(init_doi)
     if init_result is None:
         pytest.skip(f"Could not resolve init DOI {init_doi!r}")
 
     init_authors = _extract_surnames(init_result.get("authors"))
-    report = [
-        f"  class DOI {init_doi}: {init_result.get('title')}",
-        f"    authors: {init_result.get('authors')}",
-    ]
-    for key, meta_doi in meta_dois.items():
-        meta_result = _resolve_doi(meta_doi)
-        if meta_result is None:
-            continue
-        meta_authors = _extract_surnames(meta_result.get("authors"))
-        if init_authors & meta_authors:
-            return
-        report.append(f"  {key} {meta_doi}: {meta_result.get('title')}")
-        report.append(f"    authors: {meta_result.get('authors')}")
+
+    meta_result = _resolve_doi(meta_doi)
+    if meta_result is None:
+        pytest.skip(f"Could not resolve metadata DOI {meta_doi!r}")
+
+    meta_authors = _extract_surnames(meta_result.get("authors"))
+    if init_authors & meta_authors:
+        return
 
     pytest.fail(
         f"{dataset_class.__name__}: class DOI shares no authors with "
-        f"any metadata DOI.\n" + "\n".join(report)
+        f"metadata DOI.\n"
+        f"  class DOI {init_doi}: {init_result.get('title')}\n"
+        f"    authors: {init_result.get('authors')}\n"
+        f"  metadata.doi {meta_doi}: {meta_result.get('title')}\n"
+        f"    authors: {meta_result.get('authors')}"
     )
