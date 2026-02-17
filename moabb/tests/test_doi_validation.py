@@ -21,8 +21,8 @@ import re
 import time
 import unicodedata
 
-import httpx
 import pytest
+import requests
 
 from moabb.datasets.metadata.schema import DatasetMetadata
 from moabb.datasets.utils import dataset_list
@@ -113,10 +113,9 @@ def _collect_dois(cls) -> dict[str, str | None]:
 def _resolve_doi(doi: str) -> dict | None:
     try:
         time.sleep(_REQUEST_DELAY)
-        r = httpx.get(
+        r = requests.get(
             f"https://doi.org/{doi}",
             headers={"Accept": "application/citeproc+json"},
-            follow_redirects=True,
             timeout=15,
         )
         r.raise_for_status()
