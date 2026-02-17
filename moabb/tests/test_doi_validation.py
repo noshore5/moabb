@@ -4,8 +4,10 @@ Treats the DOI in each dataset class (``__init__``) as ground truth,
 then validates that:
 
 1. All DOIs (class, METADATA, docstring) have valid format.
-2. METADATA DOIs are consistent with the class DOI.
-3. Every DOI resolves via CrossRef or DataCite.
+2. Docstring DOIs are tracked in METADATA.
+3. Every DOI resolves via doi.org content negotiation (works for
+   CrossRef, DataCite, and Medra registries).
+4. When class DOI and metadata DOI differ, they share at least one author.
 
 Run all (including network tests)::
 
@@ -16,11 +18,10 @@ Run only offline checks::
     python -m pytest moabb/tests/test_doi_validation.py -k "not network" -v
 """
 
-import json
 import re
 import time
-import urllib.request
 
+import httpx
 import pytest
 
 from moabb.datasets.metadata.schema import DatasetMetadata
@@ -36,45 +37,29 @@ _SKIP_CLASSES = {"FakeDataset", "FakeVirtualRealityDataset"}
 # Non-standard identifiers (not resolvable as DOIs)
 _NON_DOI_PREFIXES = ("hal-", "tel-", "arXiv:")
 
-# DOI prefixes handled by DataCite instead of CrossRef
-_DATACITE_PREFIXES = (
-    "10.5281/zenodo.",
-    "10.6084/m9.figshare.",
-    "10.48550/arXiv.",
-    "10.7910/DVN/",
-    "10.6094/",
-    "10.5524/",
-    "10.34973/",
-    "10.18115/",
-    "10.35376/",
-    "10.3217/",
-)
-
-_REQUEST_DELAY = 0.15  # polite rate-limit for APIs
+_REQUEST_DELAY = 0.15  # polite rate-limit
 
 # ---------------------------------------------------------------------------
 # DOI helpers
 # ---------------------------------------------------------------------------
+
+_DOI_URL_PREFIXES = ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/")
+_DOI_RE = re.compile(r"^10\.\d{4,}/")
 
 
 def _normalize_doi(value: str | None) -> str | None:
     """Strip URL prefix from a DOI, returning the bare ``10.xxxx/…`` form."""
     if not value:
         return None
-    for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/"):
+    for prefix in _DOI_URL_PREFIXES:
         if value.startswith(prefix):
-            value = value[len(prefix) :]
-            break
+            return value[len(prefix) :]
     return value
 
 
 def _is_doi(value: str) -> bool:
     """Return True if *value* looks like a DOI (``10.xxxx/…``)."""
-    return bool(value and re.match(r"^10\.\d{4,}/", _normalize_doi(value) or ""))
-
-
-def _is_datacite_doi(doi: str) -> bool:
-    return any(doi.startswith(p) for p in _DATACITE_PREFIXES)
+    return bool(value and _DOI_RE.match(_normalize_doi(value) or ""))
 
 
 def _extract_docstring_dois(cls) -> list[str]:
@@ -135,60 +120,56 @@ def _collect_dois(cls) -> dict[str, str | None]:
 
 
 # ---------------------------------------------------------------------------
-# DOI resolution via CrossRef (habanero) and DataCite
+# DOI resolution via doi.org content negotiation
+# Uses citeproc+json — works for CrossRef, DataCite, and Medra DOIs.
 # ---------------------------------------------------------------------------
 
 
-def _resolve_crossref(doi: str) -> dict | None:
-    """Resolve *doi* via CrossRef. Returns ``{title, authors, year}`` or None."""
-    try:
-        from habanero import Crossref
+def _resolve_doi(doi: str) -> dict | None:
+    """Resolve *doi* via doi.org content negotiation.
 
-        cr = Crossref(mailto="moabb-test@example.com")
+    Returns ``{title, authors, year}`` or ``None`` on failure.
+    """
+    try:
         time.sleep(_REQUEST_DELAY)
-        msg = cr.works(ids=doi)["message"]
-        title = (msg.get("title") or [None])[0]
+        r = httpx.get(
+            f"https://doi.org/{doi}",
+            headers={"Accept": "application/citeproc+json"},
+            follow_redirects=True,
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        title = data.get("title")
         authors = [
             f"{a.get('given', '')} {a.get('family', '')}".strip()
-            for a in msg.get("author", [])
+            for a in data.get("author", [])
         ]
         year = None
-        for key in ("published-print", "published-online", "created"):
-            parts = msg.get(key, {}).get("date-parts", [[None]])
-            if parts and parts[0] and parts[0][0]:
-                year = parts[0][0]
-                break
+        issued = data.get("issued", {}).get("date-parts", [[None]])
+        if issued and issued[0] and issued[0][0]:
+            year = issued[0][0]
         return {"title": title, "authors": authors, "year": year, "doi": doi}
     except Exception:
         return None
 
 
-def _resolve_datacite(doi: str) -> dict | None:
-    """Resolve *doi* via DataCite. Returns ``{title, authors, year}`` or None."""
-    try:
-        time.sleep(_REQUEST_DELAY)
-        url = f"https://api.datacite.org/dois/{doi}"
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        attrs = data.get("data", {}).get("attributes", {})
-        title = (attrs.get("titles") or [{}])[0].get("title")
-        authors = [
-            c.get("name", "")
-            or f"{c.get('givenName', '')} {c.get('familyName', '')}".strip()
-            for c in attrs.get("creators", [])
-        ]
-        year = attrs.get("publicationYear")
-        return {"title": title, "authors": authors, "year": year, "doi": doi}
-    except Exception:
-        return None
-
-
-def _resolve_doi(doi: str) -> dict | None:
-    """Resolve *doi* via the appropriate registry."""
-    if _is_datacite_doi(doi):
-        return _resolve_datacite(doi)
-    return _resolve_crossref(doi)
+def _extract_surnames(authors: list[str]) -> set[str]:
+    """Extract lowercase surnames from author name strings."""
+    out = set()
+    for a in (authors or []):
+        a = a.strip()
+        if not a:
+            continue
+        if ", " in a:
+            # "Last, First" format (DataCite)
+            out.add(a.split(",")[0].strip().lower())
+        else:
+            # "First Last" format (CrossRef)
+            parts = a.split()
+            if parts:
+                out.add(parts[-1].strip(".").lower())
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -289,13 +270,13 @@ class TestDOIConsistency:
 
 
 # ---------------------------------------------------------------------------
-# NETWORK TESTS — resolve DOIs via CrossRef / DataCite
+# NETWORK TESTS — resolve DOIs via doi.org content negotiation
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.network
 class TestDOIResolution:
-    """Every DOI should resolve to a real publication via CrossRef/DataCite."""
+    """Every DOI should resolve via doi.org content negotiation."""
 
     @pytest.mark.parametrize("dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__)
     def test_all_dois_resolve(self, dataset_class):
@@ -333,4 +314,67 @@ class TestDOIResolution:
         assert result.get("title"), (
             f"{dataset_class.__name__}: class DOI {init_doi!r} resolved but has "
             f"no title"
+        )
+
+    @pytest.mark.parametrize(
+        "dataset_class", _REAL_DATASETS, ids=lambda c: c.__name__
+    )
+    def test_class_and_metadata_dois_share_authors(self, dataset_class):
+        """Class DOI must share authors with at least one metadata DOI.
+
+        Compares ``init.doi`` against ``metadata.doi`` and
+        ``metadata.associated_paper`` — at least one must have
+        overlapping author surnames.
+        """
+        dois = _collect_dois(dataset_class)
+        init_doi = dois.get("init.doi")
+        if not init_doi or not _is_doi(init_doi):
+            pytest.skip("No class DOI")
+
+        # If init.doi exactly matches any metadata DOI, it's consistent
+        all_meta = {
+            dois.get(k) for k in ("metadata.doi", "metadata.associated_paper")
+            if dois.get(k)
+        }
+        if init_doi in all_meta:
+            pytest.skip("Class DOI matches a metadata DOI — consistent")
+
+        # Collect metadata DOIs that differ from init for author comparison
+        meta_dois = {
+            k: v for k, v in [
+                ("metadata.doi", dois.get("metadata.doi")),
+                ("metadata.associated_paper", dois.get("metadata.associated_paper")),
+            ]
+            if v and _is_doi(v) and v != init_doi
+        }
+        if not meta_dois:
+            pytest.skip("No differing metadata DOIs to compare")
+
+        init_result = _resolve_doi(init_doi)
+        if init_result is None:
+            pytest.skip(f"Could not resolve init DOI {init_doi!r}")
+
+        init_authors = _extract_surnames(init_result.get("authors"))
+        report_lines = [
+            f"  class DOI {init_doi}: {init_result.get('title')}",
+            f"    authors: {init_result.get('authors')}",
+        ]
+
+        for key, meta_doi in meta_dois.items():
+            meta_result = _resolve_doi(meta_doi)
+            if meta_result is None:
+                continue
+            meta_authors = _extract_surnames(meta_result.get("authors"))
+            if init_authors & meta_authors:
+                return  # found overlap — test passes
+            report_lines.append(
+                f"  {key} {meta_doi}: {meta_result.get('title')}"
+            )
+            report_lines.append(
+                f"    authors: {meta_result.get('authors')}"
+            )
+
+        pytest.fail(
+            f"{dataset_class.__name__}: class DOI shares no authors with "
+            f"any metadata DOI.\n" + "\n".join(report_lines)
         )
