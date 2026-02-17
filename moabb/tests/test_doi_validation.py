@@ -26,6 +26,7 @@ import pytest
 from moabb.datasets.metadata.schema import DatasetMetadata
 from moabb.datasets.utils import dataset_list
 
+
 _SKIP_CLASSES = {"FakeDataset", "FakeVirtualRealityDataset"}
 _NON_DOI_PREFIXES = ("hal-", "tel-", "arXiv:")
 _DATA_REPO_PREFIXES = (
@@ -98,9 +99,7 @@ def _collect_dois(cls) -> dict[str, str | None]:
     if isinstance(meta, DatasetMetadata):
         doc = getattr(meta, "documentation", None)
         if doc:
-            result["metadata.doi"] = _normalize_doi(
-                getattr(doc, "doi", None)
-            )
+            result["metadata.doi"] = _normalize_doi(getattr(doc, "doi", None))
             result["metadata.associated_paper"] = _normalize_doi(
                 getattr(doc, "associated_paper_doi", None)
             )
@@ -169,8 +168,8 @@ def test_doi_format(dataset_class):
         and not _is_doi(doi)
         and not any(doi.startswith(p) for p in _NON_DOI_PREFIXES)
     ]
-    assert not invalid, (
-        f"{dataset_class.__name__}: invalid DOI format:\n" + "\n".join(invalid)
+    assert not invalid, f"{dataset_class.__name__}: invalid DOI format:\n" + "\n".join(
+        invalid
     )
 
 
@@ -191,11 +190,7 @@ def test_docstring_dois_tracked(dataset_class):
             if m:
                 known.add(m.group().rstrip(".,;:)"))
 
-    doc_dois = [
-        dois[k]
-        for k in sorted(dois)
-        if k.startswith("docstring.") and dois[k]
-    ]
+    doc_dois = [dois[k] for k in sorted(dois) if k.startswith("docstring.") and dois[k]]
     if not doc_dois:
         pytest.skip("No DOIs in docstring")
 
@@ -229,9 +224,7 @@ def test_dois_resolve(dataset_class):
             failures.append(doi)
         elif not result.get("title"):
             failures.append(f"{doi} (no title)")
-    assert not failures, (
-        f"{dataset_class.__name__}: DOIs failed to resolve: {failures}"
-    )
+    assert not failures, f"{dataset_class.__name__}: DOIs failed to resolve: {failures}"
 
 
 @pytest.mark.network
@@ -243,9 +236,7 @@ def test_class_and_metadata_dois_share_authors(dataset_class):
         pytest.skip("No class DOI")
 
     all_meta = {
-        dois.get(k)
-        for k in ("metadata.doi", "metadata.associated_paper")
-        if dois.get(k)
+        dois.get(k) for k in ("metadata.doi", "metadata.associated_paper") if dois.get(k)
     }
     if init_doi in all_meta:
         pytest.skip("Class DOI matches a metadata DOI")
