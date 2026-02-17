@@ -738,7 +738,9 @@ class BNCI2014_004(MNEBNCI):
             synchronicity="asynchronous",
             mode="both",
         ),
-        documentation=DocumentationMetadata(),
+        documentation=DocumentationMetadata(
+            doi="10.1109/TNSRE.2007.906956",
+        ),
         tags=Tags(
             pathology=["Healthy"],
             modality=["Motor"],
