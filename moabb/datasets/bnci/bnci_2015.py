@@ -536,6 +536,7 @@ class BNCI2015_001(MNEBNCI):
         ),
         documentation=DocumentationMetadata(
             doi="10.1109/tnsre.2012.2189584",
+            associated_paper_doi="10.1371/journal.pone.0101168",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -1349,6 +1350,7 @@ class BNCI2015_007(MNEBNCI):
         ),
         documentation=DocumentationMetadata(
             doi="10.1088/1741-2560/9/4/045006",
+            associated_paper_doi="10.1088/1741-2560/11/2/026009",
             funding=["DFG grant", "grant nos s", "BMBF grant", "grant no MU MU"],
         ),
         tags=Tags(
@@ -1775,6 +1777,7 @@ class BNCI2015_009(MNEBNCI):
         ),
         documentation=DocumentationMetadata(
             doi="10.1371/journal.pone.0009813",
+            associated_paper_doi="10.3389/fnins.2011.00112",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -2167,6 +2170,7 @@ class BNCI2015_012(MNEBNCI):
         ),
         documentation=DocumentationMetadata(
             doi="10.3389/fnins.2011.00099",
+            associated_paper_doi="10.3389/fnins.2011.00112",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -2246,9 +2250,10 @@ class BNCI2015_013(MNEBNCI):
 
     References
     ----------
-    .. [1] Ferrez, P. W., & Millan, J. D. R. (2008). Error-related EEG potentials
-           in brain-computer interfaces. Journal of Neural Engineering, 5(1), 62.
-           https://doi.org/10.1088/1741-2560/5/1/007
+    .. [1] Chavarriaga, R., & Millán, J. D. R. (2010). Learning from EEG
+           error-related potentials in noninvasive brain-computer interfaces.
+           IEEE Trans. Neural Syst. Rehabil. Eng., 18(4), 381-388.
+           https://doi.org/10.1109/TNSRE.2010.2053387
 
     Notes
     -----
