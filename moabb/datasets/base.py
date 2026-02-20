@@ -538,6 +538,14 @@ class MetaclassDataset(abc.ABCMeta):
         if metadata_sections:
             insert_blocks.append(metadata_sections)
 
+        # Add the feedback section for real (non-base, non-fake) dataset classes
+        if (
+            "Found an issue with this dataset?" not in doc
+            and name not in ("BaseDataset", "BaseBIDSDataset", "LocalBIDSDataset")
+            and not name.startswith("Fake")
+        ):
+            insert_blocks.append(_format_feedback_section(name))
+
         if insert_blocks:
             if doc.strip():
                 doc_list = doc.split("\n\n")
@@ -545,18 +553,6 @@ class MetaclassDataset(abc.ABCMeta):
                 attrs["__doc__"] = "\n\n".join(doc_list)
             else:
                 attrs["__doc__"] = "\n\n".join(insert_blocks)
-
-        # Append the feedback section to the docstring (skip base/fake classes)
-        current_doc = attrs.get("__doc__", "") or ""
-        if (
-            "Found an issue with this dataset?" not in current_doc
-            and name not in ("BaseDataset", "BaseBIDSDataset", "LocalBIDSDataset")
-            and not name.startswith("Fake")
-        ):
-            feedback = _format_feedback_section(name)
-            attrs["__doc__"] = (
-                (current_doc + "\n\n" + feedback) if current_doc.strip() else feedback
-            )
 
         return super().__new__(cls, name, bases, attrs)
 
