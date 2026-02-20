@@ -324,7 +324,7 @@ class MAMEM1(BaseMAMEM):
             doi="10.6084/m9.figshare.2068677.v1",
             repository="GitHub",
             data_url="https://github.com/MAMEM/ssvep-eeg-processing-toolbox",
-            license="CC BY 4.0",
+            license="ODC BY 1.0",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -505,7 +505,7 @@ class MAMEM2(BaseMAMEM):
             doi="10.6084/m9.figshare.2068677.v1",
             repository="GitHub",
             data_url="https://github.com/MAMEM/ssvep-eeg-processing-toolbox",
-            license="CC BY 4.0",
+            license="ODC BY 1.0",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -694,7 +694,7 @@ class MAMEM3(BaseMAMEM):
             doi="10.6084/m9.figshare.2068677.v1",
             repository="GitHub",
             data_url="https://github.com/MAMEM/ssvep-eeg-processing-toolbox",
-            license="CC BY 4.0",
+            license="ODC BY 1.0",
         ),
         tags=Tags(
             pathology=["Healthy"],

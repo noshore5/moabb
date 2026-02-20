@@ -520,6 +520,7 @@ class BNCI2022_001(BNCIBaseDataset):
             doi="10.1109/TAFFC.2021.3059688",
             associated_paper_doi="10.1109/THMS.2020.3038339",
             license="CC BY 4.0",
+            repository="BNCI Horizon",
         ),
         tags=Tags(
             pathology=["Other"],

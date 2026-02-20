@@ -692,7 +692,7 @@ class BI2013a(BaseDataset):
             doi="10.5281/zenodo.1494163",
             repository="Zenodo",
             data_url="https://doi.org/10.5281/zenodo.1494163",
-            license="CC BY 1.0",
+            license="CC 1.0 Generic",
         ),
         tags=Tags(
             pathology=["Healthy"],

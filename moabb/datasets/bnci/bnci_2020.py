@@ -819,6 +819,7 @@ class BNCI2020_002(BNCIBaseDataset):
             doi="10.3389/fnins.2020.591777",
             funding=["grant number number"],
             license="CC BY 4.0",
+            repository="BNCI Horizon",
         ),
         tags=Tags(
             pathology=["Healthy"],

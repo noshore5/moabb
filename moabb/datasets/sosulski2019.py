@@ -162,6 +162,7 @@ class Sosulski2019(BaseDataset):
                 "grant number TA TA",
                 "DFG project",
             ],
+            repository="FreiDok",
         ),
         tags=Tags(
             pathology=["Healthy"],
