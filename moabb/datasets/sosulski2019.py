@@ -155,7 +155,7 @@ class Sosulski2019(BaseDataset):
             mode="both",
         ),
         documentation=DocumentationMetadata(
-            license="CC BY-SA 4.0",
+            license="CC-BY-SA-4.0",
             funding=[
                 "grant number EXC EXC",
                 "grant number\nINST INST",

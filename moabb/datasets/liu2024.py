@@ -160,7 +160,7 @@ class Liu2024(BaseDataset):
         ),
         documentation=DocumentationMetadata(
             doi="10.1038/s41597-023-02787-8",
-            license="CC BY 4.0",
+            license="CC-BY-4.0",
             repository="Figshare",
         ),
         tags=Tags(

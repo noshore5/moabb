@@ -352,7 +352,7 @@ class BNCI2014_001(MNEBNCI):
         documentation=DocumentationMetadata(
             doi="10.3389/fnins.2012.00055",
             funding=["Grant R31- R31-"],
-            license="CC BY-ND 4.0",
+            license="CC-BY-ND-4.0",
             repository="BNCI Horizon",
         ),
         tags=Tags(
@@ -558,7 +558,7 @@ class BNCI2014_002(MNEBNCI):
         documentation=DocumentationMetadata(
             doi="10.1515/bmt-2014-0117",
             associated_paper_doi="10.1007/s00500-012-0895-4",
-            license="CC BY-ND 4.0",
+            license="CC-BY-ND-4.0",
             repository="BNCI Horizon",
         ),
         tags=Tags(
@@ -744,7 +744,7 @@ class BNCI2014_004(MNEBNCI):
         ),
         documentation=DocumentationMetadata(
             doi="10.1109/TNSRE.2007.906956",
-            license="CC BY-ND 4.0",
+            license="CC-BY-ND-4.0",
             repository="BNCI Horizon",
         ),
         tags=Tags(
@@ -887,7 +887,7 @@ class BNCI2014_008(MNEBNCI):
         ),
         documentation=DocumentationMetadata(
             doi="10.3389/fnhum.2013.00732",
-            license="CC BY-NC-ND 4.0",
+            license="CC-BY-NC-ND-4.0",
             repository="BNCI Horizon",
         ),
         tags=Tags(
@@ -1045,7 +1045,7 @@ class BNCI2014_009(MNEBNCI):
             doi="10.1080/00140139.2012.661084",
             associated_paper_doi="10.3389/fnhum.2013.00732",
             funding=["EU grant FP7-", "grant FP7- FP7-"],
-            license="CC BY-NC-ND 4.0",
+            license="CC-BY-NC-ND-4.0",
             repository="BNCI Horizon",
         ),
         tags=Tags(

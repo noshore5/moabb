@@ -256,7 +256,7 @@ class Huebner2017(_BaseVisualMatrixSpellerDataset):
                 "grant agreement agreement",
                 "grant INST INST",
             ],
-            license="CC BY 4.0",
+            license="CC-BY-4.0",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -418,7 +418,7 @@ class Huebner2018(_BaseVisualMatrixSpellerDataset):
                 "grant INST INST",
                 "DFG SPP",
             ],
-            license="CC BY 4.0",
+            license="CC-BY-4.0",
         ),
         tags=Tags(
             pathology=["Healthy"],

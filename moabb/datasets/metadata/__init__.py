@@ -127,68 +127,68 @@ _MANUAL_METADATA_OVERRIDES = {
     },
     # ERP CORE 2021 variants
     "ErpCore2021_ERN": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Osf"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Osf"},
     },
     "ErpCore2021_LRP": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Osf"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Osf"},
     },
     "ErpCore2021_MMN": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Osf"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Osf"},
     },
     "ErpCore2021_N170": {
         "participants": {"age_mean": 21.5},
-        "documentation": {"license": "CC BY 4.0", "repository": "Osf"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Osf"},
     },
     "ErpCore2021_N2pc": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Osf"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Osf"},
     },
     "ErpCore2021_N400": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Osf"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Osf"},
     },
     "ErpCore2021_P3": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Osf"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Osf"},
     },
     # cVEP datasets
     "CastillosBurstVEP40": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Zenodo"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Zenodo"},
     },
     "CastillosBurstVEP100": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Zenodo"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Zenodo"},
     },
     "CastillosCVEP40": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Zenodo"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Zenodo"},
     },
     "CastillosCVEP100": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Zenodo"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Zenodo"},
     },
     "MartinezCagigal2023Checker": {
         "sessions_per_subject": 8,
-        "documentation": {"license": "CC BY-NC-SA 4.0", "repository": "U Valladoid"},
+        "documentation": {"license": "CC-BY-NC-SA-4.0", "repository": "U Valladoid"},
     },
     "MartinezCagigal2023Pary": {
         "sessions_per_subject": 5,
-        "documentation": {"license": "CC BY-NC-SA 4.0", "repository": "U Valladoid"},
+        "documentation": {"license": "CC-BY-NC-SA-4.0", "repository": "U Valladoid"},
     },
     # Beetl datasets
     "Beetl2021_A": {
-        "documentation": {"license": "CC BY 4.0", "repository": "beetl.ai"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "beetl.ai"},
     },
     "Beetl2021_B": {
-        "documentation": {"license": "CC BY 4.0", "repository": "beetl.ai"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "beetl.ai"},
     },
     # Kojima datasets
     "Kojima2024A": {
-        "documentation": {"license": "CC0 1.0", "repository": "Harvard dataverse"},
+        "documentation": {"license": "CC0-1.0", "repository": "Harvard dataverse"},
     },
     "Kojima2024B": {
-        "documentation": {"license": "CC0 1.0", "repository": "Harvard dataverse"},
+        "documentation": {"license": "CC0-1.0", "repository": "Harvard dataverse"},
     },
     # Dreyer2023 variants without METADATA blocks
     "Dreyer2023B": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Osf"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Osf"},
     },
     "Dreyer2023C": {
-        "documentation": {"license": "CC BY 4.0", "repository": "Osf"},
+        "documentation": {"license": "CC-BY-4.0", "repository": "Osf"},
     },
 }
 
@@ -442,7 +442,7 @@ def _apply_dataset_family_defaults(
     if name.startswith("MartinezCagigal2023"):
         documentation = metadata.documentation or DocumentationMetadata()
         if not documentation.license:
-            documentation = replace(documentation, license="CC BY-NC-SA 4.0")
+            documentation = replace(documentation, license="CC-BY-NC-SA-4.0")
         participants = metadata.participants or ParticipantMetadata(n_subjects=16)
         participants = replace(participants, n_subjects=16)
         experiment = metadata.experiment or ExperimentMetadata(paradigm="cvep")
