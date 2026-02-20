@@ -556,7 +556,7 @@ class BNCI2014_002(MNEBNCI):
             mode="both",
         ),
         documentation=DocumentationMetadata(
-            doi="10.1515/bmt-2014-0117",
+            doi="10.1007/s00500-012-0895-4",
             associated_paper_doi="10.1007/s00500-012-0895-4",
             license="CC-BY-ND-4.0",
             repository="BNCI Horizon",
