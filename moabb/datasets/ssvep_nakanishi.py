@@ -84,6 +84,7 @@ class Nakanishi2015(BaseDataset):
         ),
         documentation=DocumentationMetadata(
             doi="10.1371/journal.pone.0140703",
+            license="Unknown",
             funding=["NIH\nGrant", "Grant Award Award"],
             repository="Github",
         ),
