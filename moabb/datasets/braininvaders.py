@@ -513,7 +513,7 @@ class BI2012(BaseDataset):
             doi="10.5281/zenodo.2649006",
             repository="Zenodo",
             data_url="https://doi.org/10.5281/zenodo.2649006",
-            license="CC BY 4.0",
+            license="CC-BY-4.0",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -692,7 +692,7 @@ class BI2013a(BaseDataset):
             doi="10.5281/zenodo.1494163",
             repository="Zenodo",
             data_url="https://doi.org/10.5281/zenodo.1494163",
-            license="CC BY 1.0",
+            license="CC-BY-1.0",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -837,7 +837,7 @@ class BI2014a(BaseDataset):
             doi="10.5281/zenodo.3266223",
             repository="Zenodo",
             data_url="https://doi.org/10.5281/zenodo.3266223",
-            license="CC BY 4.0",
+            license="CC-BY-4.0",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -988,7 +988,7 @@ class BI2014b(BaseDataset):
             doi="10.5281/zenodo.3267301",
             repository="Zenodo",
             data_url="https://doi.org/10.5281/zenodo.3267301",
-            license="CC BY 4.0",
+            license="CC-BY-4.0",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -1138,7 +1138,7 @@ class BI2015a(BaseDataset):
             doi="10.5281/zenodo.3266930",
             repository="Zenodo",
             data_url="https://doi.org/10.5281/zenodo.3266930",
-            license="CC BY 4.0",
+            license="CC-BY-4.0",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -1290,7 +1290,7 @@ class BI2015b(BaseDataset):
             doi="10.5281/zenodo.3266930",
             repository="Zenodo",
             data_url="https://doi.org/10.5281/zenodo.3266930",
-            license="CC BY 4.0",
+            license="CC-BY-4.0",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -1429,7 +1429,7 @@ class Cattan2019_VR(BaseDataset):
             doi="10.5281/zenodo.2605204",
             repository="Zenodo",
             data_url="https://doi.org/10.5281/zenodo.2605204",
-            license="CC BY 4.0",
+            license="CC-BY-4.0",
         ),
         tags=Tags(
             pathology=["Healthy"],

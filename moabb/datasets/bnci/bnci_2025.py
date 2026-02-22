@@ -365,7 +365,7 @@ class BNCI2025_001(BNCIBaseDataset):
             doi="10.1088/1741-2552/ada0ea",
             repository="GitHub",
             data_url="https://github.com/rkobler/eyeartifactcorrection",
-            license="CC BY 4.0",
+            license="CC-BY-4.0",
         ),
         tags=Tags(
             pathology=["Healthy"],
@@ -1045,7 +1045,7 @@ class BNCI2025_002(BNCIBaseDataset):
             repository="GitHub",
             data_url="https://github.com/sccn/labstreaminglayer",
             funding=["European Research Council"],
-            license="CC BY 4.0",
+            license="CC-BY-4.0",
         ),
         tags=Tags(
             pathology=["Healthy"],
