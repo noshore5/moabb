@@ -1,0 +1,24 @@
+name: Custom Pipeline
+
+paradigms:
+  - LeftRightImagery
+  - MotorImagery
+
+citations:
+  - https://doi.org/example
+
+pipeline:
+  - name: Covariances
+    from: pyriemann.estimation
+    parameters:
+      estimator: oas
+
+  - name: CSP
+    from: pyriemann.spatialfilters
+    parameters:
+      nfilter: 6
+
+  - name: LinearDiscriminantAnalysis
+    from: sklearn.discriminant_analysis
+    parameters:
+      solver: svd

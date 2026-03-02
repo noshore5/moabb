@@ -1,0 +1,3 @@
+[submodule "Coherent_Multiplex"]
+	path = Coherent_Multiplex
+	url = https://github.com/noshore5/CMPX_EEG
