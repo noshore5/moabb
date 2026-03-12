@@ -104,7 +104,7 @@ class EEGNetModel(nn.Module):
         return x
 
 
-class EEGNetClassifier(BaseEstimator, ClassifierMixin):
+class EEGNetClassifier(ClassifierMixin, BaseEstimator):
     """EEGNet classifier for EEG-based classification tasks.
 
     EEGNet is a compact convolutional neural network designed for EEG signals.

@@ -12,6 +12,7 @@ from pyriemann.spatialfilters import CSP
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.dummy import DummyClassifier as Dummy
 from sklearn.pipeline import FunctionTransformer, Pipeline, make_pipeline
+from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
 from moabb.analysis.results import get_digest, get_string_rep
 from moabb.datasets.compound_dataset import compound
@@ -620,3 +621,120 @@ class UtilEvaluation:
             hdf5_path, "Models_WithinSession", code, "1", "0", "evalu@tion#name"
         )
         assert save_path == expected_path
+
+
+
+@pytest.mark.parametrize(
+    "evaluation_cls, expected_eval_type",
+    [
+        (ev.WithinSessionEvaluation, "WithinSession"),
+        (ev.CrossSessionEvaluation, "CrossSession"),
+        (ev.CrossSubjectEvaluation, "CrossSubject"),
+        (ev.GlobalFutureSessionEvaluation, "GlobalFutureSession"),
+    ],
+)
+def test_inner_cv_results_can_be_saved_across_evaluations(
+    evaluation_cls,
+    expected_eval_type,
+):
+    evaluation = evaluation_cls(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        overwrite=True,
+        save_inner_cv_results=True,
+    )
+    param_grid = {"C": {"csp__metric": ["euclid", "riemann"]}}
+
+    results = evaluation.process(pipelines, param_grid=param_grid)
+    assert len(results) > 0
+
+    inner_df = evaluation.get_inner_cv_results()
+    assert not inner_df.empty
+    assert set(["dataset", "subject", "pipeline", "outer_fold", "eval_type"]).issubset(
+        inner_df.columns
+    )
+    assert (inner_df["eval_type"] == expected_eval_type).all()
+
+
+def test_cross_session_inner_cv_supports_groups_with_custom_inner_cv():
+    evaluation = ev.CrossSessionEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        overwrite=True,
+        inner_cv_class=StratifiedGroupKFold,
+        inner_cv_kwargs={"n_splits": 2, "shuffle": True, "random_state": 42},
+        inner_cv_groups="run",
+        save_inner_cv_results=True,
+    )
+    param_grid = {"C": {"csp__metric": ["euclid", "riemann"]}}
+
+    results = evaluation.process(pipelines, param_grid=param_grid)
+    assert len(results) > 0
+
+    inner_df = evaluation.get_inner_cv_results()
+    assert not inner_df.empty
+
+
+def test_global_future_session_aggregates_over_other_folds_only():
+    evaluation = ev.GlobalFutureSessionEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        overwrite=True,
+        random_state=42,
+        save_inner_cv_results=True,
+    )
+    param_grid = {"C": {"csp__metric": ["euclid", "riemann"]}}
+
+    results = evaluation.process(pipelines, param_grid=param_grid)
+    assert len(results) > 0
+
+    history = evaluation.global_selection_history_
+    assert len(history) == len(results)
+
+    assert len(dataset.subject_list) > 1
+    folds_per_subject = {}
+    for row in history:
+        subj = row["subject"]
+        folds_per_subject[subj] = folds_per_subject.get(subj, 0) + 1
+
+    for row in history:
+        expected = 1 + sum(
+            cnt for subj, cnt in folds_per_subject.items() if subj != row["subject"]
+        )
+        assert row["n_aggregation_folds"] == expected
+
+def test_inner_cv_kwargs_validation_raises_on_unknown_kwargs():
+    evaluation = ev.CrossSessionEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        overwrite=True,
+        inner_cv_class=StratifiedKFold,
+        inner_cv_kwargs={"unknown_parameter": 1},
+    )
+
+    with pytest.raises(ValueError):
+        evaluation.process(pipelines, param_grid={"C": {"csp__metric": ["euclid"]}})
+
+
+
+def test_cross_session_can_store_cv_split_indices():
+    evaluation = ev.CrossSessionEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        overwrite=True,
+        save_cv_split_indices=True,
+    )
+    param_grid = {"C": {"csp__metric": ["euclid", "riemann"]}}
+
+    results = evaluation.process(pipelines, param_grid=param_grid)
+    assert len(results) > 0
+
+    split_df = evaluation.get_cv_split_results()
+    assert not split_df.empty
+    assert set(["split_level", "train_indices", "test_indices"]).issubset(
+        split_df.columns
+    )
+    assert {"outer", "inner"}.issubset(set(split_df["split_level"]))
+
+    assert split_df["train_indices"].apply(len).gt(0).all()
+    assert split_df["test_indices"].apply(len).gt(0).all()

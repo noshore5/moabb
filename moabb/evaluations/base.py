@@ -1,5 +1,6 @@
 import logging
 import math
+import inspect
 from abc import ABC, abstractmethod
 from time import perf_counter
 from uuid import uuid4
@@ -32,6 +33,23 @@ search_methods, optuna_available = check_search_available()
 
 log = logging.getLogger(__name__)
 
+class _SplitLoggingCV:
+    """Wrap a CV object and log train/test indices for each split."""
+
+    def __init__(self, base_cv, on_split):
+        self.base_cv = base_cv
+        self.on_split = on_split
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return self.base_cv.get_n_splits(X, y, groups)
+
+    def split(self, X, y=None, groups=None):
+        for inner_fold, (train_ix, test_ix) in enumerate(
+            self.base_cv.split(X, y, groups)
+        ):
+            self.on_split(inner_fold, train_ix, test_ix)
+            yield train_ix, test_ix
+
 # Making the optuna soft dependency
 
 
@@ -55,7 +73,7 @@ class BaseEvaluation(ABC):
         If true, overwrite the results.
     error_score: "raise" or numeric, default="raise"
         Value to assign to the score if an error occurs in estimator fitting. If set to
-        ‘raise’, the error is raised.
+        â€raiseâ€™, the error is raised.
     suffix: str
         Suffix for the results file.
     hdf5_path: str
@@ -76,6 +94,21 @@ class BaseEvaluation(ABC):
         splitter behavior.
     cv_kwargs: dict, default=None
         Keyword arguments passed to cv_class when constructing the splitter.
+    inner_cv_class: type, default=None
+        Optional class used for the inner cross-validation of hyperparameter
+        search. If None, each evaluation uses its default inner strategy.
+    inner_cv_kwargs: dict, default=None
+        Keyword arguments passed to inner_cv_class.
+    inner_cv_groups: str, default=None
+        Optional metadata column name used as ``groups`` when fitting inner
+        hyperparameter search (e.g., ``GridSearchCV.fit(..., groups=...)``).
+        If None, groups are not forwarded.
+    save_inner_cv_results: bool, default=False
+        If True, store inner search ``cv_results_`` tables from each fitted
+        outer fold in-memory. Retrieve with :meth:`get_inner_cv_results`.
+    save_cv_split_indices: bool, default=False
+        If True, store outer and inner train/test indices in-memory.
+        Retrieve with :meth:`get_cv_split_results`.
     save_model: bool, default=False
         Save model after training, for each fold of cross-validation if needed
     cache_config: bool, default=None
@@ -125,12 +158,17 @@ class BaseEvaluation(ABC):
         n_splits=None,
         cv_class=None,
         cv_kwargs=None,
+        inner_cv_class=None,
+        inner_cv_kwargs=None,
+        inner_cv_groups=None,
+        save_inner_cv_results=False,
         save_model=False,
         cache_config=None,
         optuna=False,
         time_out=60 * 15,
         verbose=None,
         codecarbon_config=None,
+        save_cv_split_indices=False,
     ):
         self.random_state = random_state
         self.n_jobs = n_jobs
@@ -142,6 +180,13 @@ class BaseEvaluation(ABC):
         self.n_splits = n_splits
         self.cv_class = cv_class
         self.cv_kwargs = {} if cv_kwargs is None else cv_kwargs
+        self.inner_cv_class = inner_cv_class
+        self.inner_cv_kwargs = {} if inner_cv_kwargs is None else inner_cv_kwargs
+        self.inner_cv_groups = inner_cv_groups
+        self.save_inner_cv_results = save_inner_cv_results
+        self.inner_cv_results_ = []
+        self.save_cv_split_indices = save_cv_split_indices
+        self.cv_split_results_ = []
         self.save_model = save_model
         self.cache_config = cache_config
         self.optuna = optuna
@@ -335,7 +380,7 @@ class BaseEvaluation(ABC):
             res["score"] = self.error_score
             return res
 
-    def _fit_cv(self, model, X_train, y_train, tracker=None):
+    def _fit_cv(self, model, X_train, y_train, tracker=None, fit_kwargs=None):
         """Fit a model for a CV fold with optional CodeCarbon tracking."""
         task_name = None
         emissions = math.nan
@@ -343,7 +388,8 @@ class BaseEvaluation(ABC):
             task_name = str(uuid4())
             tracker.start_task(task_name)
         t_start = perf_counter()
-        model.fit(X_train, y_train)
+        fit_kwargs = {} if fit_kwargs is None else fit_kwargs
+        model.fit(X_train, y_train, **fit_kwargs)
         duration = perf_counter() - t_start
         if tracker is not None:
             emissions_data = tracker.stop_task()
@@ -595,3 +641,92 @@ class BaseEvaluation(ABC):
         else:
             self.search = False
             return grid_clf
+
+
+    def _resolve_inner_cv(self, default_class, default_kwargs=None):
+        """Resolve and instantiate the inner CV object used by search."""
+        default_kwargs = {} if default_kwargs is None else dict(default_kwargs)
+        if self.inner_cv_class is None:
+            cv_class = default_class
+            kwargs = default_kwargs
+        else:
+            cv_class = self.inner_cv_class
+            kwargs = default_kwargs
+            kwargs.update(self.inner_cv_kwargs)
+
+        if self.inner_cv_class is not None:
+            params = inspect.signature(cv_class).parameters
+            unknown = [k for k in self.inner_cv_kwargs if k not in params]
+            if unknown:
+                raise ValueError(
+                    f"Unsupported inner_cv_kwargs for {cv_class.__name__}: {unknown}"
+                )
+
+        params = inspect.signature(cv_class).parameters
+        kwargs = {k: v for k, v in kwargs.items() if k in params}
+        return cv_class(**kwargs)
+
+    def _inner_search_fit_kwargs(self, train_metadata):
+        """Build fit kwargs for inner search from training metadata."""
+        if self.inner_cv_groups is None:
+            return {}
+        if train_metadata is None:
+            raise ValueError(
+                "inner_cv_groups was set but no train metadata was provided."
+            )
+        if self.inner_cv_groups not in train_metadata.columns:
+            raise KeyError(
+                f"inner_cv_groups column '{self.inner_cv_groups}' not found in metadata."
+            )
+        return {"groups": train_metadata[self.inner_cv_groups].values}
+
+    def _record_cv_split(self, split_level, train_indices, test_indices, **context):
+        """Store outer/inner split indices with context when enabled."""
+        if not self.save_cv_split_indices:
+            return
+        row = {
+            "split_level": split_level,
+            "train_indices": [int(i) for i in train_indices],
+            "test_indices": [int(i) for i in test_indices],
+        }
+        row.update(context)
+        self.cv_split_results_.append(row)
+
+    def _wrap_inner_cv_for_split_logging(self, inner_cv, **context):
+        """Wrap inner CV to log split indices when enabled."""
+        if not self.save_cv_split_indices:
+            return inner_cv
+
+        def _on_split(inner_fold, train_ix, test_ix):
+            self._record_cv_split(
+                split_level="inner",
+                train_indices=train_ix,
+                test_indices=test_ix,
+                inner_fold=inner_fold,
+                **context,
+            )
+
+        return _SplitLoggingCV(base_cv=inner_cv, on_split=_on_split)
+
+    def _maybe_store_inner_cv_results(self, model, **context):
+        """Store cv_results_ with context when enabled."""
+        if not self.save_inner_cv_results:
+            return
+        if not hasattr(model, "cv_results_"):
+            return
+        cv_df = pd.DataFrame(model.cv_results_).copy()
+        for key, value in reversed(list(context.items())):
+            cv_df.insert(0, key, value)
+        self.inner_cv_results_.append(cv_df)
+
+    def get_inner_cv_results(self):
+        """Return concatenated inner search cv_results_ tables."""
+        if not self.inner_cv_results_:
+            return pd.DataFrame()
+        return pd.concat(self.inner_cv_results_, ignore_index=True)
+
+    def get_cv_split_results(self):
+        """Return recorded outer/inner CV split indices."""
+        if not self.cv_split_results_:
+            return pd.DataFrame()
+        return pd.DataFrame(self.cv_split_results_)
