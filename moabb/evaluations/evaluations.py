@@ -41,6 +41,28 @@ log = logging.getLogger(__name__)
 Vector = Union[list, tuple, np.ndarray]
 
 
+def _merge_best_params_column(results_df, records):
+    """Merge fold-level best params into process() results dataframe."""
+    out = results_df.copy()
+    if "best_params" in out.columns:
+        out = out.drop(columns=["best_params"])
+
+    if not records:
+        out["best_params"] = np.nan
+        return out
+
+    key_cols = ["dataset", "subject", "session", "pipeline"]
+    hist = pd.DataFrame(records)
+    hist = hist[key_cols + ["best_params"]].copy()
+
+    for col in key_cols:
+        out[col] = out[col].astype(str)
+        hist[col] = hist[col].astype(str)
+
+    hist = hist.drop_duplicates(subset=key_cols, keep="last")
+    return out.merge(hist, on=key_cols, how="left")
+
+
 class WithinSessionEvaluation(BaseEvaluation):
     """Performance evaluation within session (k-fold cross-validation)
 
@@ -319,6 +341,19 @@ class CrossSessionEvaluation(BaseEvaluation):
        Add save_model and cache_config parameters.
     """
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._best_params_records = []
+
+    def process(self, pipelines, param_grid=None, postprocess_pipeline=None):
+        self._best_params_records = []
+        results = super().process(
+            pipelines,
+            param_grid=param_grid,
+            postprocess_pipeline=postprocess_pipeline,
+        )
+        return _merge_best_params_column(results, self._best_params_records)
+
     # flake8: noqa: C901
     def evaluate(
         self, dataset, pipelines, param_grid, process_pipeline, postprocess_pipeline=None
@@ -453,6 +488,18 @@ class CrossSessionEvaluation(BaseEvaluation):
                     if _carbonfootprint:
                         self._attach_emissions(res, emissions, task_name)
 
+                    best_params = (
+                        deepcopy(cvclf.best_params_) if hasattr(cvclf, "best_params_") else None
+                    )
+                    self._best_params_records.append(
+                        {
+                            "dataset": dataset.code,
+                            "subject": str(subject),
+                            "session": str(test_session),
+                            "pipeline": name,
+                            "best_params": best_params,
+                        }
+                    )
                     yield res
 
                 if _carbonfootprint:
@@ -715,6 +762,17 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.global_selection_history_ = []
+        self._best_params_records = []
+
+    def process(self, pipelines, param_grid=None, postprocess_pipeline=None):
+        self.global_selection_history_ = []
+        self._best_params_records = []
+        results = super().process(
+            pipelines,
+            param_grid=param_grid,
+            postprocess_pipeline=postprocess_pipeline,
+        )
+        return _merge_best_params_column(results, self._best_params_records)
 
     @staticmethod
     def _params_to_key(params):
@@ -766,7 +824,6 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
                 f"Dataset '{dataset.code}' is not appropriate for {self.__class__.__name__}: {reason}"
             )
 
-        self.global_selection_history_ = []
         fold_records = []
 
         # Stage 1: run all inner searches and keep per-fold cv_results_.
@@ -942,6 +999,15 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
                     "n_aggregation_folds": n_aggregation_folds,
                     "selected_params": selected_params,
                     "aggregated_score": aggregated_score,
+                }
+            )
+            self._best_params_records.append(
+                {
+                    "dataset": fold["dataset"].code,
+                    "subject": str(fold["subject"]),
+                    "session": str(fold["session"]),
+                    "pipeline": fold["pipeline"],
+                    "best_params": deepcopy(selected_params),
                 }
             )
 

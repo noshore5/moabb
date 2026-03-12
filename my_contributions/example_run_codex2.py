@@ -132,7 +132,10 @@ def main():
     inner = pd.concat(inner_chunks, ignore_index=True) if inner_chunks else pd.DataFrame()
 
     print("\n=== Outer CV results ===")
-    print(results[["subject", "session", "pipeline", "score"]])
+    outer_cols = ["subject", "session", "pipeline", "score"]
+    if "best_params" in results.columns:
+        outer_cols.append("best_params")
+    print(results[outer_cols])
 
     print("\n=== Per subject/pipeline mean scores")
     per_subject_pipeline = (

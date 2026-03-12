@@ -738,3 +738,29 @@ def test_cross_session_can_store_cv_split_indices():
 
     assert split_df["train_indices"].apply(len).gt(0).all()
     assert split_df["test_indices"].apply(len).gt(0).all()
+
+def test_cross_session_results_include_best_params_column():
+    evaluation = ev.CrossSessionEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        overwrite=True,
+    )
+    param_grid = {"C": {"csp__metric": ["euclid", "riemann"]}}
+
+    results = evaluation.process(pipelines, param_grid=param_grid)
+    assert "best_params" in results.columns
+    assert results["best_params"].notna().all()
+
+
+def test_global_future_results_include_best_params_column():
+    evaluation = ev.GlobalFutureSessionEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        overwrite=True,
+        random_state=42,
+    )
+    param_grid = {"C": {"csp__metric": ["euclid", "riemann"]}}
+
+    results = evaluation.process(pipelines, param_grid=param_grid)
+    assert "best_params" in results.columns
+    assert results["best_params"].notna().all()
