@@ -5,7 +5,7 @@ from copy import deepcopy
 from mne.decoding import CSP
 import pandas as pd
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import ParameterGrid, StratifiedGroupKFold
 from sklearn.pipeline import make_pipeline
 
 import moabb
@@ -36,21 +36,21 @@ def _make_xwt_phase_gnn():
         lowest=8.0,
         highest=35.0,
         nfreqs=32,
-        cwt_resample_n_time=None,
+        cwt_resample_n_time=100,
         time_stride=1,
         theta_dead_deg=45.0,
         coi_mode="ignore",
         state_mode="per_node",
-        use_mag=True,
-        use_ang=True,
+        use_mag=False,
+        use_ang=False,
         use_raw=True,
         use_state_src=True,
-        use_state_dst=True,
-        hidden_dim=16,
+        use_state_dst=False,
+        hidden_dim=32,
         message_dim=16,
-        epochs=30,
-        batch_size=4,
-        learning_rate=1e-3,
+        epochs=10,
+        batch_size=8,
+        learning_rate=1e-2,
         device="auto",
         seed=42,
         readout_mode="trial",
@@ -62,7 +62,7 @@ def _make_eegnet():
     return EEGNetClassifier(
         n_channels=22,
         n_timepoints=1001,
-        epochs=100,
+        epochs=50,
         batch_size=32,
         learning_rate=0.001,
         dropout_rate=0.5,
@@ -155,6 +155,31 @@ def _build_pipeline_runs(
     return runs
 
 
+def _prepare_param_grid_for_run(pipelines, run_param_grid):
+    """Apply singleton grids directly and keep only multi-combo grids for search."""
+    effective_param_grid = {}
+    singleton_applied = {}
+
+    for label, estimator in pipelines.items():
+        if label not in run_param_grid:
+            continue
+
+        grid = run_param_grid[label]
+        combos = ParameterGrid(grid)
+        n_combos = len(combos)
+
+        if n_combos <= 1:
+            # Equivalent to GridSearchCV with one candidate + refit, but without inner CV.
+            params = next(iter(combos), {})
+            if params:
+                estimator.set_params(**params)
+            singleton_applied[label] = params
+        else:
+            effective_param_grid[label] = grid
+
+    return effective_param_grid, singleton_applied
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--subjects", nargs="+", type=int, default=[1])
@@ -232,10 +257,23 @@ def main():
             )
 
         pipelines = {cfg["label"]: PIPELINE_BUILDERS[cfg["base_name"]]() for cfg in run_cfgs}
-        param_grid = {
+        run_param_grid = {
             cfg["label"]: deepcopy(PIPELINE_PARAM_GRIDS[cfg["base_name"]])
             for cfg in run_cfgs
         }
+        param_grid, singleton_applied = _prepare_param_grid_for_run(
+            pipelines, run_param_grid
+        )
+
+        if singleton_applied:
+            for label, params in singleton_applied.items():
+                print(
+                    f"[Grid] singleton combo for '{label}' applied directly: {params}",
+                    flush=True,
+                )
+
+        if not param_grid:
+            param_grid = None
 
         if eval_mode == "global":
             evaluation = GlobalFutureSessionEvaluation(**eval_kwargs)
