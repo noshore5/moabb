@@ -17,17 +17,25 @@ from moabb.paradigms import LeftRightImagery
 def _make_csp_lda():
     return make_pipeline(
         CSP(n_components=None, log=True, norm_trace=False, reg=None),
-        LinearDiscriminantAnalysis(),
+        LinearDiscriminantAnalysis(solver="eigen"),
     )
 
 
 PIPELINE_BUILDERS = {"CSP+LDA": _make_csp_lda}
 PIPELINE_PARAM_GRIDS = {"CSP+LDA":
                             {
-                                "csp__n_components": [2, 3, 4, 5, 6, 7],
-                                "csp__log": [False, True],
+                                "csp__n_components": [5,6,7],
+                                "csp__log":
+                                    [
+                                    # False,
+                                    True,
+                                     ],
                                 # "csp__norm_trace": [False, True],
                                 # "csp__reg": [None, 0.001, 0.01, 0.1],
+                                "lineardiscriminantanalysis__shrinkage": [
+                                    None,
+                                    'auto',
+                                ],
                             }}
 
 
@@ -119,8 +127,8 @@ def main():
             for cfg in run_cfgs
         }
 
-        # evaluation = GlobalFutureSessionEvaluation(**eval_kwargs)
-        evaluation = CrossSessionEvaluation(**eval_kwargs)
+        evaluation = GlobalFutureSessionEvaluation(**eval_kwargs)
+        # evaluation = CrossSessionEvaluation(**eval_kwargs)
         group_results = evaluation.process(pipelines, param_grid=param_grid)
         results_chunks.append(group_results)
 
@@ -135,7 +143,7 @@ def main():
     outer_cols = ["subject", "session", "pipeline", "score"]
     if "best_params" in results.columns:
         outer_cols.append("best_params")
-    print(results[outer_cols])
+    print(results[outer_cols].to_string(index=False))
 
     print("\n=== Per subject/pipeline mean scores")
     per_subject_pipeline = (
