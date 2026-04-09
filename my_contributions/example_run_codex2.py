@@ -34,6 +34,7 @@ def _make_xwt_phase_gnn():
         lowest=8.0,
         highest=35.0,
         nfreqs=32,
+        cwt_resample_n_time=None,
         time_stride=1,
         theta_dead_deg=45.0,
         coi_mode="ignore",

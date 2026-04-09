@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
+from scipy.signal import resample
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -331,6 +332,7 @@ class XWTPhaseGNNClassifier(BaseEstimator, ClassifierMixin):
         lowest: float = 8.0,
         highest: float = 35.0,
         nfreqs: int = 48,
+        cwt_resample_n_time: int | None = None,
         time_stride: int = 1,
         theta_dead_deg: float = 45.0,
         coi_mode: str = "ignore",
@@ -355,6 +357,7 @@ class XWTPhaseGNNClassifier(BaseEstimator, ClassifierMixin):
         self.lowest = lowest
         self.highest = highest
         self.nfreqs = nfreqs
+        self.cwt_resample_n_time = cwt_resample_n_time
         self.time_stride = time_stride
         self.theta_dead_deg = theta_dead_deg
         self.coi_mode = coi_mode
@@ -400,7 +403,14 @@ class XWTPhaseGNNClassifier(BaseEstimator, ClassifierMixin):
         return np.asarray(X, dtype=np.float32)
 
     def _compute_cwt_tensors(self, X: np.ndarray) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        n_samples, n_channels, n_time = X.shape
+        n_samples, n_channels, n_time_orig = X.shape
+        if self.cwt_resample_n_time is None:
+            n_time = n_time_orig
+        else:
+            n_time = int(self.cwt_resample_n_time)
+            if n_time <= 0:
+                raise ValueError("cwt_resample_n_time must be a positive integer or None.")
+
         w_real = np.zeros((n_samples, n_channels, n_time, self.nfreqs), dtype=np.float32)
         w_imag = np.zeros((n_samples, n_channels, n_time, self.nfreqs), dtype=np.float32)
 
@@ -435,6 +445,9 @@ class XWTPhaseGNNClassifier(BaseEstimator, ClassifierMixin):
                     else:
                         coeffs_tf = coeffs
 
+                    if coeffs_tf.shape[0] != n_time and self.cwt_resample_n_time is not None:
+                        coeffs_tf = resample(coeffs_tf, n_time, axis=0)
+
                     if coeffs_tf.shape[0] != n_time or coeffs_tf.shape[1] != self.nfreqs:
                         raise ValueError(
                             "Unexpected CWT shape after transform. "
@@ -448,7 +461,14 @@ class XWTPhaseGNNClassifier(BaseEstimator, ClassifierMixin):
                     w_imag[sample_idx, ch_idx] = np.imag(coeffs_tf).astype(np.float32)
                     pbar.update(1)
 
-        x_tensor = torch.from_numpy(np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0))
+        if self.cwt_resample_n_time is not None and n_time != n_time_orig:
+            raw_x = resample(X, n_time, axis=2)
+        else:
+            raw_x = X
+
+        x_tensor = torch.from_numpy(
+            np.nan_to_num(raw_x, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        )
         w_real_tensor = torch.from_numpy(w_real)
         w_imag_tensor = torch.from_numpy(w_imag)
         return x_tensor.float(), w_real_tensor.float(), w_imag_tensor.float()

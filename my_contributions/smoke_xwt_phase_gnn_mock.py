@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nfreqs", type=int, default=16)
     parser.add_argument("--hidden-dim", type=int, default=16)
     parser.add_argument("--message-dim", type=int, default=16)
+    parser.add_argument("--cwt-resample-n-time", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--verbose", type=int, default=2)
     return parser.parse_args()
@@ -48,6 +49,7 @@ def main() -> None:
         lowest=8.0,
         highest=35.0,
         nfreqs=args.nfreqs,
+        cwt_resample_n_time=args.cwt_resample_n_time,
         hidden_dim=args.hidden_dim,
         message_dim=args.message_dim,
         epochs=args.epochs,
