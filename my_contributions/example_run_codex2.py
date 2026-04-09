@@ -12,6 +12,13 @@ import moabb
 from moabb.datasets import BNCI2014_001
 from moabb.evaluations import CrossSessionEvaluation, GlobalFutureSessionEvaluation
 from moabb.paradigms import LeftRightImagery
+try:
+    from my_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
+        XWTPhaseGNNClassifier,
+    )
+except ModuleNotFoundError:
+    # Support direct script execution from my_contributions/ directory.
+    from moabb_pipelines.xwt_phase_gnn_classifier import XWTPhaseGNNClassifier
 
 
 def _make_csp_lda():
@@ -21,27 +28,64 @@ def _make_csp_lda():
     )
 
 
-PIPELINE_BUILDERS = {"CSP+LDA": _make_csp_lda}
-PIPELINE_PARAM_GRIDS = {"CSP+LDA":
-                            {
-                                "csp__n_components": [5,6,7],
-                                "csp__log":
-                                    [
-                                    # False,
-                                    True,
-                                     ],
-                                # "csp__norm_trace": [False, True],
-                                # "csp__reg": [None, 0.001, 0.01, 0.1],
-                                "lineardiscriminantanalysis__shrinkage": [
-                                    None,
-                                    'auto',
-                                ],
-                            }}
+def _make_xwt_phase_gnn():
+    return XWTPhaseGNNClassifier(
+        sampling_rate=250,
+        lowest=8.0,
+        highest=35.0,
+        nfreqs=32,
+        time_stride=1,
+        theta_dead_deg=45.0,
+        coi_mode="ignore",
+        state_mode="per_node",
+        use_mag=True,
+        use_ang=True,
+        use_raw=True,
+        use_state_src=True,
+        use_state_dst=True,
+        hidden_dim=16,
+        message_dim=16,
+        epochs=30,
+        batch_size=4,
+        learning_rate=1e-3,
+        device="auto",
+        seed=42,
+        readout_mode="trial",
+        verbose=2,
+    )
+
+
+PIPELINE_BUILDERS = {
+    "CSP+LDA": _make_csp_lda,
+    "XWT-Phase-GNN": _make_xwt_phase_gnn,
+}
+PIPELINE_PARAM_GRIDS = {
+    "CSP+LDA": {
+        "csp__n_components": [5, 6, 7],
+        "csp__log": [
+            # False,
+            True,
+        ],
+        # "csp__norm_trace": [False, True],
+        # "csp__reg": [None, 0.001, 0.01, 0.1],
+        "lineardiscriminantanalysis__shrinkage": [
+            None,
+            "auto",
+        ],
+    },
+    "XWT-Phase-GNN": {
+        "hidden_dim": [16],
+        "message_dim": [16],
+        "theta_dead_deg": [45.0],
+        # "epochs": [30],
+        "batch_size": [4],
+    },
+}
 
 
 def _parse_pipeline_group_specs(parser, raw_specs):
     if not raw_specs:
-        raw_specs = ["CSP+LDA=None"]
+        raw_specs = ["XWT-Phase-GNN=None"]
 
     parsed = []
     for spec in raw_specs:
@@ -84,8 +128,8 @@ def main():
         metavar="PIPELINE=GROUP",
         help=(
             "Per-pipeline inner CV grouping. Repeat for multiple runs, e.g. "
-            "'--inner-group-column CSP+LDA=None --inner-group-column CSP+LDA=run'. "
-            "If omitted, defaults to 'CSP+LDA=None'."
+            "'--inner-group-column XWT-Phase-GNN=None --inner-group-column CSP+LDA=run'. "
+            "If omitted, defaults to 'XWT-Phase-GNN=None'."
         ),
     )
     args = parser.parse_args()
