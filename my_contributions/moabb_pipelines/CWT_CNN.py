@@ -14,9 +14,9 @@ import torch.optim as optim
 from scipy.signal import resample
 from sklearn.base import BaseEstimator, ClassifierMixin
 from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
 
-
-sys.path.insert(0, "/Users/noahshore/Documents/CoherIQs/moabb/Coherent_Multiplex")
+sys.path.insert(0, "../Coherent_Multiplex")
 from utils.coherence_utils import transform
 
 
@@ -213,7 +213,7 @@ class CWTCNNClassifier(BaseEstimator, ClassifierMixin):
         log.info("Computing all wavelet transforms...")
         wavelet_transforms = []
 
-        for sample_idx in range(n_samples):
+        for sample_idx in tqdm(range(n_samples)):
             sample_transforms = []
 
             for ch_idx in range(n_channels):

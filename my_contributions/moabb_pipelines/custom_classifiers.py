@@ -9,9 +9,9 @@ import sys
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.ensemble import RandomForestClassifier
+from tqdm import tqdm
 
-
-sys.path.insert(0, "/Users/noahshore/Documents/CoherIQs/moabb/Coherent_Multiplex")
+sys.path.insert(0, "../Coherent_Multiplex")
 from utils.coherence_utils import coherence, transform
 
 
@@ -113,7 +113,7 @@ class WaveletTransformClassifier(BaseEstimator, ClassifierMixin):
 
         log.info("Computing features from wavelet transforms and coherence...")
 
-        for sample_idx in range(n_samples):
+        for sample_idx in tqdm(range(n_samples)):
             sample_features = []
 
             # Extract features from individual channel wavelet transforms

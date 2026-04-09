@@ -14,9 +14,9 @@ import torch.optim as optim
 from scipy.signal import resample
 from sklearn.base import BaseEstimator, ClassifierMixin
 from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
 
-
-sys.path.insert(0, "/Users/noahshore/Documents/CoherIQs/moabb/Coherent_Multiplex")
+sys.path.insert(0, "../Coherent_Multiplex")
 from utils.coherence_utils import coherence, transform
 
 
@@ -211,7 +211,7 @@ class CoherenceCNNClassifier(BaseEstimator, ClassifierMixin):
         log.info("Pre-computing all wavelet transforms...")
         wavelet_coeffs = {}
 
-        for sample_idx in range(n_samples):
+        for sample_idx in tqdm(range(n_samples)):
             for ch_idx in range(n_channels):
                 signal = X[sample_idx, ch_idx, :]
 
@@ -252,7 +252,7 @@ class CoherenceCNNClassifier(BaseEstimator, ClassifierMixin):
         pair_count = 0
         total_pairs = n_samples * unique_pairs
 
-        for sample_idx in range(n_samples):
+        for sample_idx in tqdm(range(n_samples)):
             sample_coherences = []
 
             # Get coherence for each unique pair of channels

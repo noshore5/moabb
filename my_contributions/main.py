@@ -30,7 +30,7 @@ from moabb.paradigms import LeftRightImagery
 # Set to 'cnn' to use CoherenceCNNClassifier (PyTorch CNN)
 # set to 'cwtcnn' to use CWT CNN classifier (PyTorch CNN with CWT features)
 # Set to 'eegnet' to use EEGNetClassifier (EEG-specific compact CNN)
-CLASSIFIER_TYPE = "wavelet"  # Change this to switch classifiers
+CLASSIFIER_TYPE = "cwtcnn"  # Change this to switch classifiers
 # ============================================================================
 
 # Import custom classifiers (lazy load based on selection)
@@ -53,7 +53,7 @@ else:
     )
 
 # Also import wavelet transform function for visualization
-sys.path.insert(0, "/Users/noahshore/Documents/CoherIQs/moabb/Coherent_Multiplex")
+sys.path.insert(0, "../Coherent_Multiplex")
 from utils.coherence_utils import transform
 
 
