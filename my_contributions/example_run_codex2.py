@@ -13,11 +13,13 @@ from moabb.datasets import BNCI2014_001
 from moabb.evaluations import CrossSessionEvaluation, GlobalFutureSessionEvaluation
 from moabb.paradigms import LeftRightImagery
 try:
+    from my_contributions.moabb_pipelines.EEGNet import EEGNetClassifier
     from my_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
         XWTPhaseGNNClassifier,
     )
 except ModuleNotFoundError:
     # Support direct script execution from my_contributions/ directory.
+    from moabb_pipelines.EEGNet import EEGNetClassifier
     from moabb_pipelines.xwt_phase_gnn_classifier import XWTPhaseGNNClassifier
 
 
@@ -56,8 +58,22 @@ def _make_xwt_phase_gnn():
     )
 
 
+def _make_eegnet():
+    return EEGNetClassifier(
+        n_channels=22,
+        n_timepoints=1001,
+        epochs=100,
+        batch_size=32,
+        learning_rate=0.001,
+        dropout_rate=0.5,
+        device="cpu",
+        verbose=1,
+    )
+
+
 PIPELINE_BUILDERS = {
     "CSP+LDA": _make_csp_lda,
+    "EEGNet": _make_eegnet,
     "XWT-Phase-GNN": _make_xwt_phase_gnn,
 }
 PIPELINE_PARAM_GRIDS = {
@@ -74,6 +90,12 @@ PIPELINE_PARAM_GRIDS = {
             "auto",
         ],
     },
+    "EEGNet": {
+        "epochs": [100],
+        "batch_size": [32],
+        "learning_rate": [0.001],
+        "dropout_rate": [0.5],
+    },
     "XWT-Phase-GNN": {
         "hidden_dim": [16],
         "message_dim": [16],
@@ -84,57 +106,100 @@ PIPELINE_PARAM_GRIDS = {
 }
 
 
-def _parse_pipeline_group_specs(parser, raw_specs):
-    if not raw_specs:
-        raw_specs = ["XWT-Phase-GNN=None"]
+def _resolve_eval_modes(global_hyperparam_fit_mode):
+    mode = str(global_hyperparam_fit_mode).lower()
+    if mode == "false":
+        return ["cross"]
+    if mode == "true":
+        return ["global"]
+    if mode == "both":
+        return ["cross", "global"]
+    raise ValueError(
+        f"Unsupported global_hyperparam_fit='{global_hyperparam_fit_mode}'. "
+        "Expected one of: false, true, both."
+    )
 
-    parsed = []
-    for spec in raw_specs:
-        if "=" in spec:
-            name, group = spec.split("=", 1)
-        else:
-            name, group = spec, "None"
-        name = name.strip()
-        group = group.strip()
 
-        if not name:
-            parser.error("Invalid --inner-group-column entry: pipeline name is empty.")
-        if name not in PIPELINE_BUILDERS:
-            available = ", ".join(sorted(PIPELINE_BUILDERS))
-            parser.error(
-                f"Unknown pipeline '{name}' in --inner-group-column. Available: {available}."
-            )
-
-        parsed.append((name, None if group in {"", "None", "none"} else group))
-
-    label_counts = defaultdict(int)
-    configs = []
-    for name, inner_group in parsed:
-        base_label = f"{name} [inner_group={inner_group or 'None'}]"
-        label_counts[base_label] += 1
-        suffix = f" #{label_counts[base_label]}" if label_counts[base_label] > 1 else ""
-        configs.append(
-            {"base_name": name, "inner_group": inner_group, "label": f"{base_label}{suffix}"}
+def _build_pipeline_runs(
+    pipeline_names, inner_group_mode, global_hyperparam_fit_mode
+):
+    if inner_group_mode == "none":
+        inner_groups = [None]
+    elif inner_group_mode == "run":
+        inner_groups = ["run"]
+    elif inner_group_mode == "both":
+        inner_groups = [None, "run"]
+    else:
+        raise ValueError(
+            f"Unsupported inner_group_mode='{inner_group_mode}'. "
+            "Expected one of: none, run, both."
         )
-    return configs
+
+    eval_modes = _resolve_eval_modes(global_hyperparam_fit_mode)
+    deduped_pipelines = list(dict.fromkeys(pipeline_names))
+    runs = []
+    for name in deduped_pipelines:
+        for eval_mode in eval_modes:
+            for inner_group in inner_groups:
+                label = (
+                    f"{name} [eval={eval_mode}] [inner_group={inner_group or 'None'}]"
+                )
+                runs.append(
+                    {
+                        "base_name": name,
+                        "eval_mode": eval_mode,
+                        "inner_group": inner_group,
+                        "label": label,
+                    }
+                )
+    return runs
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--subjects", nargs="+", type=int, default=[1])
     parser.add_argument(
-        "--inner-group-column",
+        "--pipeline",
         action="append",
         default=[],
-        metavar="PIPELINE=GROUP",
+        choices=sorted(PIPELINE_BUILDERS.keys()),
+        metavar="PIPELINE",
         help=(
-            "Per-pipeline inner CV grouping. Repeat for multiple runs, e.g. "
-            "'--inner-group-column XWT-Phase-GNN=None --inner-group-column CSP+LDA=run'. "
-            "If omitted, defaults to 'XWT-Phase-GNN=None'."
+            "Pipeline/model to run. Repeat for multiple pipelines. "
+            "If omitted, defaults to XWT-Phase-GNN and EEGNet."
+        ),
+    )
+    parser.add_argument(
+        "--inner-group-mode",
+        default="none",
+        choices=["none", "run", "both"],
+        help=(
+            "Global inner-CV grouping applied to all selected pipelines: "
+            "none => inner_cv_groups disabled, "
+            "run => inner_cv_groups='run', "
+            "both => run each selected pipeline twice (none + run)."
+        ),
+    )
+    parser.add_argument(
+        "--global-hyperparam-fit",
+        default="true",
+        choices=["false", "true", "both"],
+        help=(
+            "Evaluation selector: "
+            "'false' => CrossSessionEvaluation, "
+            "'true' => GlobalFutureSessionEvaluation, "
+            "'both' => run both evaluation types."
         ),
     )
     args = parser.parse_args()
-    pipeline_runs = _parse_pipeline_group_specs(parser, args.inner_group_column)
+    selected_pipelines = (
+        args.pipeline if args.pipeline else ["XWT-Phase-GNN", "EEGNet"]
+    )
+    pipeline_runs = _build_pipeline_runs(
+        pipeline_names=selected_pipelines,
+        inner_group_mode=args.inner_group_mode,
+        global_hyperparam_fit_mode=args.global_hyperparam_fit,
+    )
 
     moabb.set_log_level("info")
 
@@ -153,11 +218,11 @@ def main():
 
     grouped_runs = defaultdict(list)
     for run_cfg in pipeline_runs:
-        grouped_runs[run_cfg["inner_group"]].append(run_cfg)
+        grouped_runs[(run_cfg["eval_mode"], run_cfg["inner_group"])].append(run_cfg)
 
     results_chunks = []
     inner_chunks = []
-    for inner_group, run_cfgs in grouped_runs.items():
+    for (eval_mode, inner_group), run_cfgs in grouped_runs.items():
         eval_kwargs = dict(base_eval_kwargs)
         if inner_group is not None:
             eval_kwargs.update(
@@ -172,8 +237,12 @@ def main():
             for cfg in run_cfgs
         }
 
-        evaluation = GlobalFutureSessionEvaluation(**eval_kwargs)
-        # evaluation = CrossSessionEvaluation(**eval_kwargs)
+        if eval_mode == "global":
+            evaluation = GlobalFutureSessionEvaluation(**eval_kwargs)
+        elif eval_mode == "cross":
+            evaluation = CrossSessionEvaluation(**eval_kwargs)
+        else:
+            raise ValueError(f"Unsupported eval_mode='{eval_mode}'.")
         group_results = evaluation.process(pipelines, param_grid=param_grid)
         results_chunks.append(group_results)
 
