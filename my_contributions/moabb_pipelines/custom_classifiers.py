@@ -7,6 +7,7 @@ import logging
 import sys
 
 import numpy as np
+from scipy.signal import resample
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.ensemble import RandomForestClassifier
 from tqdm import tqdm
@@ -104,6 +105,14 @@ class WaveletTransformClassifier(BaseEstimator, ClassifierMixin):
                         self.lowest,
                         nfreqs=self.nfreqs,
                     )
+                    # Downsample the wavelet coefficients to 100 timepoints
+                    if coeffs.ndim == 2:
+                        # Shape: (nfreqs, n_timepoints)
+                        coeffs = resample(coeffs, 100, axis=1)
+                    elif coeffs.ndim == 1:
+                        # Shape: (n_timepoints,)
+                        coeffs = resample(coeffs, 100)
+
                     wavelet_coeffs[(sample_idx, ch_idx)] = (coeffs, freqs)
                 except Exception as e:
                     log.debug(
