@@ -208,10 +208,12 @@ class WithinSessionEvaluation(BaseEvaluation):
                         )
 
                         fit_kwargs = {}
+                        train_meta = meta_.iloc[train].reset_index(drop=True)
                         if param_grid is not None and name in param_grid:
                             fit_kwargs = self._inner_search_fit_kwargs(
-                                meta_.iloc[train].reset_index(drop=True)
+                                train_meta
                             )
+                        fit_kwargs.update(self._validation_fit_kwargs(cvclf, train_meta))
 
                         duration, emissions, task_name = self._fit_cv(
                             cvclf,
@@ -437,10 +439,12 @@ class CrossSessionEvaluation(BaseEvaluation):
                     )
 
                     fit_kwargs = {}
+                    train_meta = metadata.iloc[train].reset_index(drop=True)
                     if param_grid is not None and name in param_grid:
                         fit_kwargs = self._inner_search_fit_kwargs(
-                            metadata.iloc[train].reset_index(drop=True)
+                            train_meta
                         )
+                    fit_kwargs.update(self._validation_fit_kwargs(cvclf, train_meta))
 
                     duration, emissions, task_name = self._fit_cv(
                         cvclf,
@@ -681,10 +685,12 @@ class CrossSubjectEvaluation(BaseEvaluation):
                 )
 
                 fit_kwargs = {}
+                train_meta = metadata.iloc[train].reset_index(drop=True)
                 if param_grid is not None and name in param_grid:
                     fit_kwargs = self._inner_search_fit_kwargs(
-                        metadata.iloc[train].reset_index(drop=True)
+                        train_meta
                     )
+                fit_kwargs.update(self._validation_fit_kwargs(cvclf, train_meta))
 
                 duration, emissions, task_name = self._fit_cv(
                     cvclf,
@@ -895,8 +901,10 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
                             inner_cv=inner_cv,
                         )
 
-                        fit_kwargs = self._inner_search_fit_kwargs(
-                            metadata.iloc[train].reset_index(drop=True)
+                        train_meta = metadata.iloc[train].reset_index(drop=True)
+                        fit_kwargs = self._inner_search_fit_kwargs(train_meta)
+                        fit_kwargs.update(
+                            self._validation_fit_kwargs(search_model, train_meta)
                         )
                         self._fit_cv(
                             search_model,
@@ -928,6 +936,7 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
                             "test": np.asarray(test, dtype=int),
                             "X": X,
                             "y": y,
+                            "metadata": metadata,
                             "nchan": nchan,
                             "estimator": clf,
                             "inner_cv_results": inner_cv_df,
@@ -960,6 +969,10 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
                 fold["X"][fold["train"]],
                 fold["y"][fold["train"]],
                 tracker if _carbonfootprint else None,
+                fit_kwargs=self._validation_fit_kwargs(
+                    final_model,
+                    fold["metadata"].iloc[fold["train"]].reset_index(drop=True),
+                ),
             )
 
             self._maybe_save_model_cv(

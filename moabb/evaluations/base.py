@@ -397,6 +397,41 @@ class BaseEvaluation(ABC):
         _ensure_fitted(model)
         return duration, emissions, task_name
 
+    def _estimator_requires_validation_metadata(self, model) -> tuple[bool, str | None]:
+        """Check whether estimator requests metadata-driven validation groups."""
+        estimator = getattr(model, "estimator", model)
+        col = getattr(estimator, "validation_group_column", None)
+        if col is None:
+            return False, None
+        return True, str(col)
+
+    @staticmethod
+    def _fit_accepts_param(model, param_name):
+        """Check whether model.fit accepts a named kwarg."""
+        params = inspect.signature(model.fit).parameters
+        if param_name in params:
+            return True
+        return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+    def _validation_fit_kwargs(self, model, train_metadata):
+        """Build fit kwargs for estimators that use metadata-driven validation groups."""
+        if train_metadata is None:
+            return {}
+        needed, col = self._estimator_requires_validation_metadata(model)
+        if not needed:
+            return {}
+        if col not in train_metadata.columns:
+            raise KeyError(
+                f"validation_group_column='{col}' not found in training metadata."
+            )
+
+        kwargs = {}
+        if self._fit_accepts_param(model, "validation_groups"):
+            kwargs["validation_groups"] = train_metadata[col].values
+        if self._fit_accepts_param(model, "metadata"):
+            kwargs["metadata"] = train_metadata.reset_index(drop=True)
+        return kwargs
+
     def _maybe_save_model_cv(
         self, model, dataset, subject, session, name, cv_ind, eval_type
     ):
