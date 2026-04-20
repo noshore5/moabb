@@ -16,11 +16,15 @@ try:
     from my_contributions.moabb_pipelines.EEGNet import EEGNetClassifier
     from my_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
         XWTPhaseGNNClassifier,
+        XWTPhaseGNNV2Classifier,
     )
 except ModuleNotFoundError:
     # Support direct script execution from my_contributions/ directory.
     from moabb_pipelines.EEGNet import EEGNetClassifier
-    from moabb_pipelines.xwt_phase_gnn_classifier import XWTPhaseGNNClassifier
+    from moabb_pipelines.xwt_phase_gnn_classifier import (
+        XWTPhaseGNNClassifier,
+        XWTPhaseGNNV2Classifier,
+    )
 
 
 def _make_csp_lda():
@@ -38,19 +42,25 @@ def _make_xwt_phase_gnn():
         nfreqs=32,
         cwt_resample_n_time=100,
         time_stride=1,
-        theta_dead_deg=45.0,
+        theta_dead_deg=30.0,
         coi_mode="ignore",
         state_mode="per_node",
-        use_mag=False,
+        use_mag=True,
         use_ang=False,
         use_raw=True,
         use_state_src=True,
         use_state_dst=False,
-        hidden_dim=32,
+        hidden_dim=16,
         message_dim=16,
         epochs=10,
         batch_size=8,
-        learning_rate=1e-2,
+        learning_rate=1e-3,
+        weight_decay=1e-4,
+        grad_clip_norm=0.1,
+        normalize_input=True,
+        validation_split=0.2,
+        validation_group_column=None,
+        early_stopping_patience=None,
         device="auto",
         seed=42,
         readout_mode="trial",
@@ -71,10 +81,46 @@ def _make_eegnet():
     )
 
 
+def _make_xwt_phase_gnn_v2():
+    return XWTPhaseGNNV2Classifier(
+        sampling_rate=250,
+        lowest=8.0,
+        highest=35.0,
+        nfreqs=32,
+        cwt_resample_n_time=100,
+        time_stride=1,
+        theta_dead_deg=25.0,
+        coi_mode="ignore",
+        message_dim=3,
+        hidden_state_dim=16,
+        encoder_dim=3,
+        use_encoder_batch_norm=True,
+        encoder_dropout=0.4,
+        use_local_residual=False,
+        use_prev_state_mean=True,
+        gru_input_dropout=0.35,
+        readout_dropout=0.25,
+        use_raw_in_message=True,
+        epochs=50,
+        batch_size=1,
+        learning_rate=3e-3,
+        weight_decay=2e-4,
+        grad_clip_norm=0.1,
+        normalize_input=True,
+        validation_split=0.2,
+        validation_group_column=None,
+        early_stopping_patience=None,
+        device="auto",
+        seed=42,
+        verbose=2,
+    )
+
+
 PIPELINE_BUILDERS = {
     "CSP+LDA": _make_csp_lda,
     "EEGNet": _make_eegnet,
     "XWT-Phase-GNN": _make_xwt_phase_gnn,
+    "XWT-Phase-GNN-V2": _make_xwt_phase_gnn_v2,
 }
 PIPELINE_PARAM_GRIDS = {
     "CSP+LDA": {
@@ -97,11 +143,10 @@ PIPELINE_PARAM_GRIDS = {
         "dropout_rate": [0.5],
     },
     "XWT-Phase-GNN": {
-        "hidden_dim": [16],
-        "message_dim": [16],
-        "theta_dead_deg": [45.0],
-        # "epochs": [30],
-        "batch_size": [4],
+        "time_stride": [1],
+    },
+    "XWT-Phase-GNN-V2": {
+        "time_stride": [1],
     },
 }
 
