@@ -13,8 +13,8 @@ from moabb.datasets import BNCI2014_001
 from moabb.evaluations import CrossSessionEvaluation, GlobalFutureSessionEvaluation
 from moabb.paradigms import LeftRightImagery
 try:
-    from my_contributions.moabb_pipelines.EEGNet import EEGNetClassifier
-    from my_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
+    from coheriqs_contributions.moabb_pipelines.EEGNet import EEGNetClassifier
+    from coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
         XWTPhaseGNNClassifier,
         XWTPhaseGNNV2Classifier,
     )
