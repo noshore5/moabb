@@ -10,7 +10,12 @@ from sklearn.pipeline import make_pipeline
 
 import moabb
 from moabb.datasets import BNCI2014_001
-from moabb.evaluations import CrossSessionEvaluation, GlobalFutureSessionEvaluation
+from moabb.evaluations import CrossSessionEvaluation
+try:
+    from moabb.evaluations import GlobalFutureSessionEvaluation
+except ImportError:
+    # Fallback to CrossSessionEvaluation if GlobalFutureSessionEvaluation not available
+    GlobalFutureSessionEvaluation = None
 from moabb.paradigms import LeftRightImagery
 try:
     from coheriqs_contributions.moabb_pipelines.EEGNet import EEGNetClassifier
@@ -29,7 +34,7 @@ except ModuleNotFoundError:
 
 def _make_csp_lda():
     return make_pipeline(
-        CSP(n_components=None, log=True, norm_trace=False, reg=None),
+        CSP(n_components=4, log=True, norm_trace=False, reg=None),
         LinearDiscriminantAnalysis(solver="eigen"),
     )
 
@@ -252,7 +257,7 @@ def main():
     )
     parser.add_argument(
         "--global-hyperparam-fit",
-        default="true",
+        default="false",
         choices=["false", "true", "both"],
         help=(
             "Evaluation selector: "
@@ -275,7 +280,7 @@ def main():
 
     dataset = BNCI2014_001()
     dataset.subject_list = args.subjects
-    paradigm = LeftRightImagery(fmin=8, fmax=35, scorer="roc_auc")
+    paradigm = LeftRightImagery(fmin=8, fmax=35)
 
     base_eval_kwargs = dict(
         paradigm=paradigm,
@@ -283,7 +288,6 @@ def main():
         overwrite=True,
         n_jobs=1,
         random_state=42,
-        save_inner_cv_results=True,
     )
 
     grouped_runs = defaultdict(list)
@@ -321,6 +325,11 @@ def main():
             param_grid = None
 
         if eval_mode == "global":
+            if GlobalFutureSessionEvaluation is None:
+                raise ValueError(
+                    "GlobalFutureSessionEvaluation not available in this moabb version. "
+                    "Use --global-hyperparam-fit false instead."
+                )
             evaluation = GlobalFutureSessionEvaluation(**eval_kwargs)
         elif eval_mode == "cross":
             evaluation = CrossSessionEvaluation(**eval_kwargs)
@@ -329,9 +338,13 @@ def main():
         group_results = evaluation.process(pipelines, param_grid=param_grid)
         results_chunks.append(group_results)
 
-        group_inner = evaluation.get_inner_cv_results()
-        if not group_inner.empty:
-            inner_chunks.append(group_inner)
+        try:
+            group_inner = evaluation.get_inner_cv_results()
+            if not group_inner.empty:
+                inner_chunks.append(group_inner)
+        except (AttributeError, TypeError):
+            # Inner CV results not available in this moabb version
+            pass
 
     results = pd.concat(results_chunks, ignore_index=True)
     inner = pd.concat(inner_chunks, ignore_index=True) if inner_chunks else pd.DataFrame()

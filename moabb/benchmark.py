@@ -6,7 +6,11 @@ from pathlib import Path
 import mne
 import pandas as pd
 import yaml
-from mne.utils import _open_lock
+try:
+    from mne.utils import _open_lock
+except ImportError:
+    # Fallback for newer mne versions
+    from threading import Lock as _open_lock
 
 from moabb import paradigms as moabb_paradigms
 from moabb.analysis import analyze
