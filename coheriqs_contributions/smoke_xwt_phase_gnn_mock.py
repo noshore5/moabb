@@ -11,7 +11,7 @@ import argparse
 import numpy as np
 
 try:
-    from my_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
+    from coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
         XWTPhaseGNNClassifier,
         XWTPhaseGNNV2Classifier,
     )
