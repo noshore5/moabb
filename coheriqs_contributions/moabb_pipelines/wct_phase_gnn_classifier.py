@@ -31,6 +31,331 @@ except ModuleNotFoundError:
     )
 
 
+def original_next_state(self, state, gate_mask, mag, ang, raw_t):
+    """
+    Original batch loop version.
+
+    Expected shapes:
+      gate_mask: [B, E, F]
+      mag:       [B, E, F]
+      ang:       [B, E, F]
+      raw_t:     [B, C]
+      state:
+        if self.state_mode == "per_node":
+            [B, C, H]
+        else:
+            [B, C, F, H]
+    """
+    device = state.device
+    batch_size = state.shape[0]
+
+    next_state = []
+
+    for b in range(batch_size):
+        active_idx = torch.nonzero(gate_mask[b], as_tuple=False)
+
+        if active_idx.numel() == 0:
+            if self.state_mode == "per_node":
+                agg_b = torch.zeros(
+                    self.n_channels,
+                    self.hidden_dim,
+                    device=device,
+                    dtype=state.dtype,
+                )
+                state_b = self.state_cell(agg_b, state[b])
+            else:
+                agg_b = torch.zeros(
+                    self.n_channels * self.nfreqs,
+                    self.hidden_dim,
+                    device=device,
+                    dtype=state.dtype,
+                )
+                state_b = state[b].reshape(
+                    self.n_channels * self.nfreqs,
+                    self.hidden_dim,
+                )
+                state_b = self.state_cell(agg_b, state_b).view(
+                    self.n_channels,
+                    self.nfreqs,
+                    self.hidden_dim,
+                )
+
+            next_state.append(state_b)
+            continue
+
+        edge_idx = active_idx[:, 0]
+        freq_idx = active_idx[:, 1]
+
+        features = []
+
+        if self.use_mag:
+            features.append(mag[b, edge_idx, freq_idx].unsqueeze(-1))
+
+        if self.use_ang:
+            features.append(ang[b, edge_idx, freq_idx].unsqueeze(-1))
+
+        if self.use_raw:
+            src_raw = raw_t[b, self.src_idx[edge_idx]].unsqueeze(-1)
+            dst_raw = raw_t[b, self.dst_idx[edge_idx]].unsqueeze(-1)
+            features.append(src_raw)
+            features.append(dst_raw)
+
+        if self.state_mode == "per_node":
+            if self.use_state_src:
+                src_state = state[b, self.src_idx[edge_idx], :]
+                features.append(src_state)
+
+            if self.use_state_dst:
+                dst_state = state[b, self.dst_idx[edge_idx], :]
+                features.append(dst_state)
+
+        else:
+            if self.use_state_src:
+                src_state = state[b, self.src_idx[edge_idx], freq_idx, :]
+                features.append(src_state)
+
+            if self.use_state_dst:
+                dst_state = state[b, self.dst_idx[edge_idx], freq_idx, :]
+                features.append(dst_state)
+
+        payload = torch.cat(features, dim=-1)
+        msg = self.message_mlp(payload)
+
+        if self.state_mode == "per_node":
+            agg_b = torch.zeros(
+                self.n_channels,
+                self.hidden_dim,
+                device=device,
+                dtype=msg.dtype,
+            )
+            agg_b.index_add_(0, self.dst_idx[edge_idx], msg)
+
+            state_b = self.state_cell(agg_b, state[b])
+
+        else:
+            agg_b = torch.zeros(
+                self.n_channels * self.nfreqs,
+                self.hidden_dim,
+                device=device,
+                dtype=msg.dtype,
+            )
+
+            flat_idx = self.dst_idx[edge_idx] * self.nfreqs + freq_idx
+            agg_b.index_add_(0, flat_idx, msg)
+
+            state_b = state[b].reshape(
+                self.n_channels * self.nfreqs,
+                self.hidden_dim,
+            )
+            state_b = self.state_cell(agg_b, state_b).view(
+                self.n_channels,
+                self.nfreqs,
+                self.hidden_dim,
+            )
+
+        next_state.append(state_b)
+
+    return torch.stack(next_state, dim=0)
+
+def forward_dense_style(
+    self,
+    raw_x: torch.Tensor,
+    mag: torch.Tensor,
+    ang: torch.Tensor,
+    gate_mask: torch.Tensor,
+    state: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Dense batched version of the previous per-batch loop.
+
+    Parameters
+    ----------
+    raw_x : tensor, shape [B, C]
+        Raw signal at one time step.
+
+    mag : tensor, shape [B, E, F]
+        Magnitude features.
+
+    ang : tensor, shape [B, E, F]
+        Angle features.
+
+    gate_mask : tensor, shape [B, E, F]
+        Boolean or 0/1 mask saying which edge-frequency pairs are active.
+
+    state :
+        If self.state_mode == "per_node":
+            shape [B, C, H]
+        Else:
+            shape [B, C, F, H]
+
+    Returns
+    -------
+    next_state :
+        Same shape as state.
+    """
+    batch_size = state.shape[0]
+    device = state.device
+    dtype = state.dtype
+    num_edges = self.src_idx.numel()
+
+    gate = gate_mask.to(dtype=dtype)
+
+    features = []
+
+    if self.use_mag:
+        # [B, E, F] -> [B, E, F, 1]
+        features.append(mag.unsqueeze(-1))
+
+    if self.use_ang:
+        # [B, E, F] -> [B, E, F, 1]
+        features.append(ang.unsqueeze(-1))
+
+    if self.use_raw:
+        # raw_x: [B, C]
+        src_raw = raw_x[:, self.src_idx].unsqueeze(-1).unsqueeze(-1)
+        dst_raw = raw_x[:, self.dst_idx].unsqueeze(-1).unsqueeze(-1)
+
+        # [B, E, 1, 1] -> [B, E, F, 1]
+        src_raw = src_raw.expand(batch_size, num_edges, self.nfreqs, 1)
+        dst_raw = dst_raw.expand(batch_size, num_edges, self.nfreqs, 1)
+
+        features.append(src_raw)
+        features.append(dst_raw)
+
+    if self.state_mode == "per_node":
+        if self.use_state_src:
+            # state[:, self.src_idx, :] gives [B, E, H]
+            # unsqueeze -> [B, E, 1, H]
+            # expand -> [B, E, F, H]
+            src_state = state[:, self.src_idx, :].unsqueeze(2)
+            src_state = src_state.expand(
+                batch_size,
+                num_edges,
+                self.nfreqs,
+                self.hidden_dim,
+            )
+            features.append(src_state)
+
+        if self.use_state_dst:
+            dst_state = state[:, self.dst_idx, :].unsqueeze(2)
+            dst_state = dst_state.expand(
+                batch_size,
+                num_edges,
+                self.nfreqs,
+                self.hidden_dim,
+            )
+            features.append(dst_state)
+
+    else:
+        if self.use_state_src:
+            # [B, E, F, H]
+            src_state = state[:, self.src_idx, :, :]
+            features.append(src_state)
+
+        if self.use_state_dst:
+            # [B, E, F, H]
+            dst_state = state[:, self.dst_idx, :, :]
+            features.append(dst_state)
+
+    payload = torch.cat(features, dim=-1)
+
+    # [B, E, F, input_dim] -> [B, E, F, H]
+    msg = self.message_mlp(payload)
+
+    # Zero out inactive edge-frequency pairs.
+    #
+    # This matches the previous sparse version if gate_mask is 0/1.
+    msg = msg * gate.unsqueeze(-1)
+
+    if self.state_mode == "per_node":
+        # Sum over frequency first:
+        # [B, E, F, H] -> [B, E, H]
+        msg_sum_f = msg.sum(dim=2)
+
+        # Aggregate edges into destination nodes:
+        # [B, E, H] -> [B, C, H]
+        agg = self._aggregate_per_node(msg_sum_f)
+
+        # GRUCell over all batch-node pairs:
+        # [B, C, H] -> [B*C, H]
+        state_flat = state.reshape(batch_size * self.n_channels, self.hidden_dim)
+        agg_flat = agg.reshape(batch_size * self.n_channels, self.hidden_dim)
+
+        next_state = self.state_cell(agg_flat, state_flat).view(
+            batch_size,
+            self.n_channels,
+            self.hidden_dim,
+        )
+
+    else:
+        # Aggregate edge-frequency messages into destination node-frequency slots:
+        # [B, E, F, H] -> [B, C, F, H]
+        agg = self._aggregate_per_node_per_freq(msg)
+
+        # GRUCell over all batch-node-frequency pairs:
+        # [B, C, F, H] -> [B*C*F, H]
+        state_flat = state.reshape(
+            batch_size * self.n_channels * self.nfreqs,
+            self.hidden_dim,
+        )
+        agg_flat = agg.reshape(
+            batch_size * self.n_channels * self.nfreqs,
+            self.hidden_dim,
+        )
+
+        next_state = self.state_cell(agg_flat, state_flat).view(
+            batch_size,
+            self.n_channels,
+            self.nfreqs,
+            self.hidden_dim,
+        )
+
+    return next_state, agg
+
+@torch.no_grad()
+def compare_original_and_batched(self, state, gate_mask, mag, ang, raw_t):
+    """
+    Runs both implementations and compares the produced next states.
+    """
+    next_original = original_next_state(
+        self=self,
+        state=state,
+        gate_mask=gate_mask,
+        mag=mag,
+        ang=ang,
+        raw_t=raw_t,
+    )
+
+    next_batched, _ = forward_dense_style(
+        self=self,
+        state=state,
+        gate_mask=gate_mask,
+        mag=mag,
+        ang=ang,
+        raw_x=raw_t,
+    )
+
+    print("next_original.shape:", next_original.shape)
+    print("next_batched.shape: ", next_batched.shape)
+
+    diff = (next_original - next_batched).abs()
+    print("max abs diff:", diff.max().item())
+    print("mean abs diff:", diff.mean().item())
+    print("max rel diff:", (diff / next_original.abs().clamp_min(1e-8)).max().item())
+    print("mean rel diff:", (diff / next_original.abs().clamp_min(1e-8)).mean().item())
+
+    print(
+        "allclose:",
+        torch.allclose(
+            next_original,
+            next_batched,
+            rtol=1e-5,
+            atol=1e-6,
+        ),
+    )
+
+    return next_original, next_batched
+
 class WCTPhaseGNNCore(nn.Module):
     """Torch core for level-0 phase-gated WCT message passing (sparse edges)."""
 
@@ -108,6 +433,23 @@ class WCTPhaseGNNCore(nn.Module):
         )
         self.state_cell = nn.GRUCell(hidden_dim, hidden_dim)
         self.classifier = nn.Linear(hidden_dim, n_classes)
+
+    def _aggregate_per_node(self, msg: torch.Tensor) -> torch.Tensor:
+        """Aggregate [B, E, H] messages to [B, C, H] by destination."""
+        batch_size, num_edges, hidden_dim = msg.shape
+        device = msg.device
+
+        agg = torch.zeros(
+            batch_size,
+            self.n_channels,
+            hidden_dim,
+            device=device,
+            dtype=msg.dtype,
+        )
+
+        agg.index_add_(1, self.dst_idx, msg)
+
+        return agg
 
     def forward(
         self,
@@ -187,89 +529,23 @@ class WCTPhaseGNNCore(nn.Module):
             ang = torch.nan_to_num(ang, nan=0.0, posinf=0.0, neginf=0.0)
 
             raw_t = raw_x[:, :, t_center]
-            next_state = []
 
-            for b in range(batch_size):
-                active_idx = torch.nonzero(gate_mask[b], as_tuple=False)
-                if active_idx.numel() == 0:
-                    if self.state_mode == "per_node":
-                        agg_b = torch.zeros(self.n_channels, self.hidden_dim, device=device)
-                        state_b = self.state_cell(agg_b, state[b])
-                    else:
-                        agg_b = torch.zeros(
-                            self.n_channels * self.nfreqs,
-                            self.hidden_dim,
-                            device=device,
-                        )
-                        state_b = state[b].reshape(
-                            self.n_channels * self.nfreqs, self.hidden_dim
-                        )
-                        state_b = self.state_cell(agg_b, state_b).view(
-                            self.n_channels, self.nfreqs, self.hidden_dim
-                        )
-                    next_state.append(state_b)
-                    continue
+            #compare_original_and_batched(self, state, gate_mask, mag, ang, raw_t)
 
-                edge_idx = active_idx[:, 0]
-                freq_idx = active_idx[:, 1]
+            state, _ = forward_dense_style(
+                self,
+                raw_x=raw_t,
+                mag=mag,
+                ang=ang,
+                gate_mask=gate_mask,
+                state=state,
+            )
 
-                features = []
-                if self.use_mag:
-                    features.append(mag[b, edge_idx, freq_idx].unsqueeze(-1))
-                if self.use_ang:
-                    features.append(ang[b, edge_idx, freq_idx].unsqueeze(-1))
-                if self.use_raw:
-                    src_raw = raw_t[b, self.src_idx[edge_idx]].unsqueeze(-1)
-                    dst_raw = raw_t[b, self.dst_idx[edge_idx]].unsqueeze(-1)
-                    features.append(src_raw)
-                    features.append(dst_raw)
 
-                if self.state_mode == "per_node":
-                    if self.use_state_src:
-                        src_state = state[b, self.src_idx[edge_idx], :]
-                        features.append(src_state)
-                    if self.use_state_dst:
-                        dst_state = state[b, self.dst_idx[edge_idx], :]
-                        features.append(dst_state)
-                else:
-                    if self.use_state_src:
-                        src_state = state[b, self.src_idx[edge_idx], freq_idx, :]
-                        features.append(src_state)
-                    if self.use_state_dst:
-                        dst_state = state[b, self.dst_idx[edge_idx], freq_idx, :]
-                        features.append(dst_state)
-
-                payload = torch.cat(features, dim=-1)
-                msg = self.message_mlp(payload)
-
-                if self.state_mode == "per_node":
-                    agg_b = torch.zeros(
-                        self.n_channels, self.hidden_dim, device=device, dtype=msg.dtype
-                    )
-                    agg_b.index_add_(0, self.dst_idx[edge_idx], msg)
-                    state_b = self.state_cell(agg_b, state[b])
-                else:
-                    agg_b = torch.zeros(
-                        self.n_channels * self.nfreqs,
-                        self.hidden_dim,
-                        device=device,
-                        dtype=msg.dtype,
-                    )
-                    flat_idx = self.dst_idx[edge_idx] * self.nfreqs + freq_idx
-                    agg_b.index_add_(0, flat_idx, msg)
-                    state_b = state[b].reshape(
-                        self.n_channels * self.nfreqs, self.hidden_dim
-                    )
-                    state_b = self.state_cell(agg_b, state_b).view(
-                        self.n_channels, self.nfreqs, self.hidden_dim
-                    )
-
-                next_state.append(state_b)
-
-            state = torch.stack(next_state, dim=0)
 
         if self.state_mode == "per_node":
-            pooled = state.mean(dim=1)
+             pooled = state.mean(dim=1)
+
         else:
             pooled = state.mean(dim=(1, 2))
 
