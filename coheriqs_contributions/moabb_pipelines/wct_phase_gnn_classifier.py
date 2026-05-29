@@ -8,30 +8,23 @@ This module contains:
 from __future__ import annotations
 
 import math
-from typing import Callable
 
 import torch
 import torch.nn as nn
 
 try:
     from coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
-        XWTPhaseGNNClassifier as _BaseV1,
-        XWTPhaseGNNV2Classifier as _BaseV2,
+        _BaseCWTGNNClassifier,
         _ordered_pair_indices,
-        _resolve_phase_rule,
-        _phase_rule_deadzone_sign,
     )
 except ModuleNotFoundError:
     from moabb_pipelines.xwt_phase_gnn_classifier import (
-        XWTPhaseGNNClassifier as _BaseV1,
-        XWTPhaseGNNV2Classifier as _BaseV2,
+        _BaseCWTGNNClassifier,
         _ordered_pair_indices,
-        _resolve_phase_rule,
-        _phase_rule_deadzone_sign,
     )
 
 
-def original_next_state(self, state, gate_mask, mag, ang, raw_t):
+def _original_next_state(self, state, gate_mask, mag, ang, raw_t):
     """
     Original batch loop version.
 
@@ -157,7 +150,7 @@ def original_next_state(self, state, gate_mask, mag, ang, raw_t):
 
     return torch.stack(next_state, dim=0)
 
-def forward_dense_style(
+def _forward_dense_phase_update(
     self,
     raw_x: torch.Tensor,
     mag: torch.Tensor,
@@ -313,11 +306,11 @@ def forward_dense_style(
     return next_state, agg
 
 @torch.no_grad()
-def compare_original_and_batched(self, state, gate_mask, mag, ang, raw_t):
+def _compare_original_and_batched(self, state, gate_mask, mag, ang, raw_t):
     """
     Runs both implementations and compares the produced next states.
     """
-    next_original = original_next_state(
+    next_original = _original_next_state(
         self=self,
         state=state,
         gate_mask=gate_mask,
@@ -326,7 +319,7 @@ def compare_original_and_batched(self, state, gate_mask, mag, ang, raw_t):
         raw_t=raw_t,
     )
 
-    next_batched, _ = forward_dense_style(
+    next_batched, _ = _forward_dense_phase_update(
         self=self,
         state=state,
         gate_mask=gate_mask,
@@ -366,27 +359,19 @@ class WCTPhaseGNNCore(nn.Module):
         n_classes: int,
         hidden_dim: int = 64,
         message_dim: int = 64,
-        theta_dead_deg: float = 45.0,
         coherence_threshold: float = 0.7,
         phase_threshold_deg: float = 30.0,
         window_size: int = 25,
-        time_stride: int = 1,
         state_mode: str = "per_node",
-        phase_rule: str | Callable[[torch.Tensor, float], torch.Tensor] = "deadzone_sign",
         use_mag: bool = True,
         use_ang: bool = True,
         use_raw: bool = True,
         use_state_src: bool = True,
         use_state_dst: bool = True,
-        readout_mode: str = "trial",
     ) -> None:
         super().__init__()
-        if time_stride <= 0:
-            raise ValueError("time_stride must be >= 1")
         if state_mode not in {"per_node", "per_node_per_freq"}:
             raise ValueError("state_mode must be one of {'per_node', 'per_node_per_freq'}")
-        if readout_mode != "trial":
-            raise ValueError("Only readout_mode='trial' is implemented for level 0")
         if window_size <= 0:
             raise ValueError("window_size must be >= 1")
 
@@ -394,19 +379,15 @@ class WCTPhaseGNNCore(nn.Module):
         self.nfreqs = nfreqs
         self.hidden_dim = hidden_dim
         self.message_dim = message_dim
-        self.theta_dead_rad = math.radians(theta_dead_deg)
         self.coherence_threshold = float(coherence_threshold)
         self.phase_threshold_rad = math.radians(phase_threshold_deg)
         self.window_size = int(window_size)
-        self.time_stride = time_stride
         self.state_mode = state_mode
-        self.phase_rule_fn = _resolve_phase_rule(phase_rule)
         self.use_mag = use_mag
         self.use_ang = use_ang
         self.use_raw = use_raw
         self.use_state_src = use_state_src
         self.use_state_dst = use_state_dst
-        self.readout_mode = readout_mode
 
         src_idx, dst_idx = _ordered_pair_indices(n_channels)
         self.register_buffer("src_idx", src_idx, persistent=False)
@@ -519,8 +500,9 @@ class WCTPhaseGNNCore(nn.Module):
             mag = torch.mean(mag, dim=2)
             ang = torch.mean(ang, dim=2)
 
-            gate_mask = (coh > self.coherence_threshold) & (mean_phase > self.phase_threshold_rad)
-            gate_mask = torch.nan_to_num(gate_mask, nan=0.0, posinf=0.0, neginf=0.0)
+            gate_mask = (coh > self.coherence_threshold) & (
+                mean_phase > self.phase_threshold_rad
+            )
 
             gate_sum += float(gate_mask.sum().item())
             gate_count += float(gate_mask.numel())
@@ -530,9 +512,7 @@ class WCTPhaseGNNCore(nn.Module):
 
             raw_t = raw_x[:, :, t_center]
 
-            #compare_original_and_batched(self, state, gate_mask, mag, ang, raw_t)
-
-            state, _ = forward_dense_style(
+            state, _ = _forward_dense_phase_update(
                 self,
                 raw_x=raw_t,
                 mag=mag,
@@ -541,11 +521,8 @@ class WCTPhaseGNNCore(nn.Module):
                 state=state,
             )
 
-
-
         if self.state_mode == "per_node":
-             pooled = state.mean(dim=1)
-
+            pooled = state.mean(dim=1)
         else:
             pooled = state.mean(dim=(1, 2))
 
@@ -571,16 +548,12 @@ class WCTPhaseGNNV2Core(nn.Module):
         use_prev_state_mean: bool = True,
         gru_input_dropout: float | None = 0.0,
         readout_dropout: float | None = 0.0,
-        time_stride: int = 1,
-        theta_dead_deg: float = 45.0,
         coherence_threshold: float = 0.7,
         phase_threshold_deg: float = 30.0,
         window_size: int = 25,
         use_raw_in_message: bool = True,
     ) -> None:
         super().__init__()
-        if time_stride <= 0:
-            raise ValueError("time_stride must be >= 1")
         if encoder_dropout is not None:
             if float(encoder_dropout) < 0.0 or float(encoder_dropout) >= 1.0:
                 raise ValueError("encoder_dropout must be in [0.0, 1.0), or None.")
@@ -604,13 +577,10 @@ class WCTPhaseGNNV2Core(nn.Module):
         self.use_prev_state_mean = use_prev_state_mean
         self.gru_input_dropout = None if gru_input_dropout is None else float(gru_input_dropout)
         self.readout_dropout = None if readout_dropout is None else float(readout_dropout)
-        self.time_stride = time_stride
-        self.theta_dead_rad = math.radians(theta_dead_deg)
         self.coherence_threshold = float(coherence_threshold)
         self.phase_threshold_rad = math.radians(phase_threshold_deg)
         self.window_size = int(window_size)
         self.use_raw_in_message = use_raw_in_message
-        self.phase_rule_fn = _phase_rule_deadzone_sign
 
         src_idx, dst_idx = _ordered_pair_indices(n_channels)
         self.register_buffer("src_idx", src_idx, persistent=False)
@@ -726,8 +696,9 @@ class WCTPhaseGNNV2Core(nn.Module):
             coh = (mean_cross.abs() ** 2) / (mean_auto1 * mean_auto2 + 1e-12)
             mean_phase = torch.mean(delta, dim=2)
 
-            gate_mask = (coh > self.coherence_threshold) & (mean_phase > self.phase_threshold_rad)
-            gate_mask = torch.nan_to_num(gate_mask, nan=0.0, posinf=0.0, neginf=0.0)
+            gate_mask = (coh > self.coherence_threshold) & (
+                mean_phase > self.phase_threshold_rad
+            )
 
             gate_sum += float(gate_mask.sum().item())
             gate_count += float(gate_mask.numel())
@@ -832,8 +803,10 @@ class WCTPhaseGNNV2Core(nn.Module):
         return logits, edge_density
 
 
-class WCTPhaseGNNClassifier(_BaseV1):
+class WCTPhaseGNNClassifier(_BaseCWTGNNClassifier):
     """sklearn/MOABB wrapper around the level-0 WCT phase GNN core."""
+
+    model_label = "WCT-V1"
 
     def __init__(
         self,
@@ -842,14 +815,10 @@ class WCTPhaseGNNClassifier(_BaseV1):
         highest: float = 35.0,
         nfreqs: int = 48,
         cwt_resample_n_time: int | None = None,
-        time_stride: int = 1,
-        theta_dead_deg: float = 45.0,
         coherence_threshold: float = 0.7,
         phase_threshold_deg: float = 30.0,
         window_size: int = 25,
-        coi_mode: str = "ignore",
         state_mode: str = "per_node",
-        phase_rule: str | Callable[[torch.Tensor, float], torch.Tensor] = "deadzone_sign",
         use_mag: bool = True,
         use_ang: bool = True,
         use_raw: bool = True,
@@ -868,27 +837,25 @@ class WCTPhaseGNNClassifier(_BaseV1):
         early_stopping_patience: int | None = None,
         device: str = "auto",
         seed: int = 42,
-        readout_mode: str = "trial",
         verbose: int = 0,
     ) -> None:
-        super().__init__(
+        self.coherence_threshold = coherence_threshold
+        self.phase_threshold_deg = phase_threshold_deg
+        self.window_size = window_size
+        self.state_mode = state_mode
+        self.use_mag = use_mag
+        self.use_ang = use_ang
+        self.use_raw = use_raw
+        self.use_state_src = use_state_src
+        self.use_state_dst = use_state_dst
+        self.hidden_dim = hidden_dim
+        self.message_dim = message_dim
+        self._init_cwt_gnn_classifier(
             sampling_rate=sampling_rate,
             lowest=lowest,
             highest=highest,
             nfreqs=nfreqs,
             cwt_resample_n_time=cwt_resample_n_time,
-            time_stride=time_stride,
-            theta_dead_deg=theta_dead_deg,
-            coi_mode=coi_mode,
-            state_mode=state_mode,
-            phase_rule=phase_rule,
-            use_mag=use_mag,
-            use_ang=use_ang,
-            use_raw=use_raw,
-            use_state_src=use_state_src,
-            use_state_dst=use_state_dst,
-            hidden_dim=hidden_dim,
-            message_dim=message_dim,
             epochs=epochs,
             batch_size=batch_size,
             learning_rate=learning_rate,
@@ -900,43 +867,33 @@ class WCTPhaseGNNClassifier(_BaseV1):
             early_stopping_patience=early_stopping_patience,
             device=device,
             seed=seed,
-            readout_mode=readout_mode,
             verbose=verbose,
         )
-        self.coherence_threshold = coherence_threshold
-        self.phase_threshold_deg = phase_threshold_deg
-        self.window_size = window_size
 
     def _build_model(self, n_channels: int, n_classes: int) -> WCTPhaseGNNCore:
-        if self.coi_mode != "ignore":
-            raise ValueError("Only coi_mode='ignore' is supported at level 0.")
-
         return WCTPhaseGNNCore(
             n_channels=n_channels,
             nfreqs=self.nfreqs,
             n_classes=n_classes,
             hidden_dim=self.hidden_dim,
             message_dim=self.message_dim,
-            theta_dead_deg=self.theta_dead_deg,
             coherence_threshold=self.coherence_threshold,
             phase_threshold_deg=self.phase_threshold_deg,
             window_size=self.window_size,
-            time_stride=self.time_stride,
             state_mode=self.state_mode,
-            phase_rule=self.phase_rule,
             use_mag=self.use_mag,
             use_ang=self.use_ang,
             use_raw=self.use_raw,
             use_state_src=self.use_state_src,
             use_state_dst=self.use_state_dst,
-            readout_mode=self.readout_mode,
         )
 
 
-class WCTPhaseGNNV2Classifier(_BaseV2):
+class WCTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
     """V2 sklearn/MOABB wrapper with channel-local encoder and freq-indexed state."""
 
     _estimator_type = "classifier"
+    model_label = "WCT-V2"
 
     def __init__(
         self,
@@ -945,12 +902,9 @@ class WCTPhaseGNNV2Classifier(_BaseV2):
         highest: float = 35.0,
         nfreqs: int = 32,
         cwt_resample_n_time: int | None = None,
-        time_stride: int = 1,
-        theta_dead_deg: float = 45.0,
         coherence_threshold: float = 0.7,
         phase_threshold_deg: float = 30.0,
         window_size: int = 25,
-        coi_mode: str = "ignore",
         message_dim: int = 3,
         hidden_state_dim: int = 32,
         encoder_dim: int = 16,
@@ -972,28 +926,27 @@ class WCTPhaseGNNV2Classifier(_BaseV2):
         early_stopping_patience: int | None = None,
         device: str = "auto",
         seed: int = 42,
-        readout_mode: str = "trial",
         verbose: int = 0,
     ) -> None:
-        super().__init__(
+        self.coherence_threshold = coherence_threshold
+        self.phase_threshold_deg = phase_threshold_deg
+        self.window_size = window_size
+        self.message_dim = message_dim
+        self.hidden_state_dim = hidden_state_dim
+        self.encoder_dim = encoder_dim
+        self.use_encoder_batch_norm = use_encoder_batch_norm
+        self.encoder_dropout = encoder_dropout
+        self.use_local_residual = use_local_residual
+        self.use_prev_state_mean = use_prev_state_mean
+        self.gru_input_dropout = gru_input_dropout
+        self.readout_dropout = readout_dropout
+        self.use_raw_in_message = use_raw_in_message
+        self._init_cwt_gnn_classifier(
             sampling_rate=sampling_rate,
             lowest=lowest,
             highest=highest,
             nfreqs=nfreqs,
             cwt_resample_n_time=cwt_resample_n_time,
-            time_stride=time_stride,
-            theta_dead_deg=theta_dead_deg,
-            coi_mode=coi_mode,
-            message_dim=message_dim,
-            hidden_state_dim=hidden_state_dim,
-            encoder_dim=encoder_dim,
-            use_encoder_batch_norm=use_encoder_batch_norm,
-            encoder_dropout=encoder_dropout,
-            use_local_residual=use_local_residual,
-            use_prev_state_mean=use_prev_state_mean,
-            gru_input_dropout=gru_input_dropout,
-            readout_dropout=readout_dropout,
-            use_raw_in_message=use_raw_in_message,
             epochs=epochs,
             batch_size=batch_size,
             learning_rate=learning_rate,
@@ -1005,19 +958,10 @@ class WCTPhaseGNNV2Classifier(_BaseV2):
             early_stopping_patience=early_stopping_patience,
             device=device,
             seed=seed,
-            readout_mode=readout_mode,
             verbose=verbose,
         )
-        self.coherence_threshold = coherence_threshold
-        self.phase_threshold_deg = phase_threshold_deg
-        self.window_size = window_size
 
     def _build_model(self, n_channels: int, n_classes: int) -> WCTPhaseGNNV2Core:
-        if self.coi_mode != "ignore":
-            raise ValueError("Only coi_mode='ignore' is supported at level 0.")
-        if self.readout_mode != "trial":
-            raise ValueError("Only readout_mode='trial' is supported for V2.")
-
         return WCTPhaseGNNV2Core(
             n_channels=n_channels,
             nfreqs=self.nfreqs,
@@ -1031,8 +975,6 @@ class WCTPhaseGNNV2Classifier(_BaseV2):
             use_prev_state_mean=self.use_prev_state_mean,
             gru_input_dropout=self.gru_input_dropout,
             readout_dropout=self.readout_dropout,
-            time_stride=self.time_stride,
-            theta_dead_deg=self.theta_dead_deg,
             coherence_threshold=self.coherence_threshold,
             phase_threshold_deg=self.phase_threshold_deg,
             window_size=self.window_size,

@@ -25,12 +25,6 @@ repo_root_path = str(REPO_ROOT)
 if repo_root_path not in sys.path:
     sys.path.insert(0, repo_root_path)
 
-COHERENT_MULTIPLEX_DIR = REPO_ROOT / "Coherent_Multiplex"
-if COHERENT_MULTIPLEX_DIR.exists():
-    coherent_multiplex_path = str(COHERENT_MULTIPLEX_DIR)
-    if coherent_multiplex_path not in sys.path:
-        sys.path.insert(0, coherent_multiplex_path)
-
 from coheriqs_contributions.moabb_pipelines.coherence_cnn_classifier import (
     CoherenceCNNClassifier,
 )
@@ -63,12 +57,9 @@ def _make_wct_phase_gnn():
         highest=35.0,
         nfreqs=16,
         cwt_resample_n_time=100,
-        time_stride=1,
-        theta_dead_deg=30.0,
         coherence_threshold=0.7,
         phase_threshold_deg=30.0,
         window_size=25,
-        coi_mode="ignore",
         state_mode="per_node",
         use_mag=True,
         use_ang=False,
@@ -88,7 +79,6 @@ def _make_wct_phase_gnn():
         early_stopping_patience=None,
         device="auto",
         seed=42,
-        readout_mode="trial",
         verbose=2,
     )
 
@@ -102,7 +92,6 @@ def _make_xwt_phase_gnn():
         cwt_resample_n_time=100,
         time_stride=1,
         theta_dead_deg=30.0,
-        coi_mode="ignore",
         state_mode="per_node",
         use_mag=True,
         use_ang=False,
@@ -122,7 +111,6 @@ def _make_xwt_phase_gnn():
         early_stopping_patience=None,
         device="auto",
         seed=42,
-        readout_mode="trial",
         verbose=2,
     )
 
@@ -133,6 +121,7 @@ def _make_wavelet_rf():
         highest=40,
         nfreqs=50,
         sampling_rate=250,
+        verbose=2,
     )
 
 
@@ -147,6 +136,7 @@ def _make_coherence_cnn():
         learning_rate=0.001,
         device="cpu",
         use_class_weights=False,
+        verbose=2,
     )
 
 
@@ -161,13 +151,12 @@ def _make_cwt_cnn():
         learning_rate=0.001,
         device="cpu",
         use_class_weights=False,
+        verbose=2,
     )
 
 
 def _make_eegnet():
     return EEGNetClassifier(
-        n_channels=22,
-        n_timepoints=1001,
         epochs=100,
         batch_size=32,
         learning_rate=0.001,
@@ -184,12 +173,9 @@ def _make_wct_phase_gnn_v2():
         highest=35.0,
         nfreqs=8,
         cwt_resample_n_time=100,
-        time_stride=1,
-        theta_dead_deg=25.0,
         coherence_threshold=0.7,
         phase_threshold_deg=30.0,
         window_size=25,
-        coi_mode="ignore",
         message_dim=3,
         hidden_state_dim=8,
         encoder_dim=3,
@@ -224,7 +210,6 @@ def _make_xwt_phase_gnn_v2():
         cwt_resample_n_time=100,
         time_stride=1,
         theta_dead_deg=25.0,
-        coi_mode="ignore",
         message_dim=3,
         hidden_state_dim=16,
         encoder_dim=3,
@@ -308,16 +293,16 @@ PIPELINE_PARAM_GRIDS = {
         "use_class_weights": [False],
     },
     "WCT-Phase-GNN": {
-        "time_stride": [1],
+        "batch_size": [32],
     },
     "WCT-Phase-GNN-V2": {
-        "time_stride": [1],
+        "batch_size": [32],
     },
     "XWT-Phase-GNN": {
-        "time_stride": [1],
+        "batch_size": [32],
     },
     "XWT-Phase-GNN-V2": {
-        "time_stride": [1],
+        "batch_size": [32],
     },
 }
 
