@@ -1,6 +1,8 @@
 import argparse
+import sys
 from collections import defaultdict
 from copy import deepcopy
+from pathlib import Path
 
 from mne.decoding import CSP
 import pandas as pd
@@ -17,19 +19,34 @@ except ImportError:
     # Fallback to CrossSessionEvaluation if GlobalFutureSessionEvaluation not available
     GlobalFutureSessionEvaluation = None
 from moabb.paradigms import LeftRightImagery
-try:
-    from coheriqs_contributions.moabb_pipelines.EEGNet import EEGNetClassifier
-    from coheriqs_contributions.moabb_pipelines.wct_phase_gnn_classifier import (
-        WCTPhaseGNNClassifier,
-        WCTPhaseGNNV2Classifier,
-    )
-except ModuleNotFoundError:
-    # Support direct script execution from my_contributions/ directory.
-    from moabb_pipelines.EEGNet import EEGNetClassifier
-    from moabb_pipelines.wct_phase_gnn_classifier import (
-        WCTPhaseGNNClassifier,
-        WCTPhaseGNNV2Classifier,
-    )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+repo_root_path = str(REPO_ROOT)
+if repo_root_path not in sys.path:
+    sys.path.insert(0, repo_root_path)
+
+COHERENT_MULTIPLEX_DIR = REPO_ROOT / "Coherent_Multiplex"
+if COHERENT_MULTIPLEX_DIR.exists():
+    coherent_multiplex_path = str(COHERENT_MULTIPLEX_DIR)
+    if coherent_multiplex_path not in sys.path:
+        sys.path.insert(0, coherent_multiplex_path)
+
+from coheriqs_contributions.moabb_pipelines.coherence_cnn_classifier import (
+    CoherenceCNNClassifier,
+)
+from coheriqs_contributions.moabb_pipelines.custom_classifiers import (
+    WaveletTransformClassifier,
+)
+from coheriqs_contributions.moabb_pipelines.CWT_CNN import CWTCNNClassifier
+from coheriqs_contributions.moabb_pipelines.EEGNet import EEGNetClassifier
+from coheriqs_contributions.moabb_pipelines.wct_phase_gnn_classifier import (
+    WCTPhaseGNNClassifier,
+    WCTPhaseGNNV2Classifier,
+)
+from coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
+    XWTPhaseGNNClassifier,
+    XWTPhaseGNNV2Classifier,
+)
 
 
 def _make_csp_lda():
@@ -60,7 +77,7 @@ def _make_wct_phase_gnn():
         use_state_dst=False,
         hidden_dim=16,
         message_dim=16,
-        epochs=100,
+        epochs=20,
         batch_size=8,
         learning_rate=1e-3,
         weight_decay=1e-4,
@@ -76,11 +93,82 @@ def _make_wct_phase_gnn():
     )
 
 
+def _make_xwt_phase_gnn():
+    return XWTPhaseGNNClassifier(
+        sampling_rate=250,
+        lowest=8.0,
+        highest=35.0,
+        nfreqs=32,
+        cwt_resample_n_time=100,
+        time_stride=1,
+        theta_dead_deg=30.0,
+        coi_mode="ignore",
+        state_mode="per_node",
+        use_mag=True,
+        use_ang=False,
+        use_raw=True,
+        use_state_src=True,
+        use_state_dst=False,
+        hidden_dim=16,
+        message_dim=16,
+        epochs=10,
+        batch_size=8,
+        learning_rate=1e-3,
+        weight_decay=1e-4,
+        grad_clip_norm=0.1,
+        normalize_input=True,
+        validation_split=0.2,
+        validation_group_column=None,
+        early_stopping_patience=None,
+        device="auto",
+        seed=42,
+        readout_mode="trial",
+        verbose=2,
+    )
+
+
+def _make_wavelet_rf():
+    return WaveletTransformClassifier(
+        lowest=4,
+        highest=40,
+        nfreqs=50,
+        sampling_rate=250,
+    )
+
+
+def _make_coherence_cnn():
+    return CoherenceCNNClassifier(
+        lowest=4,
+        highest=40,
+        nfreqs=50,
+        sampling_rate=250,
+        epochs=100,
+        batch_size=32,
+        learning_rate=0.001,
+        device="cpu",
+        use_class_weights=False,
+    )
+
+
+def _make_cwt_cnn():
+    return CWTCNNClassifier(
+        lowest=4,
+        highest=40,
+        nfreqs=50,
+        sampling_rate=250,
+        epochs=100,
+        batch_size=32,
+        learning_rate=0.001,
+        device="cpu",
+        use_class_weights=False,
+    )
+
+
 def _make_eegnet():
     return EEGNetClassifier(
         n_channels=22,
         n_timepoints=1001,
-        epochs=50,
+        epochs=100,
         batch_size=32,
         learning_rate=0.001,
         dropout_rate=0.5,
@@ -127,12 +215,53 @@ def _make_wct_phase_gnn_v2():
     )
 
 
+def _make_xwt_phase_gnn_v2():
+    return XWTPhaseGNNV2Classifier(
+        sampling_rate=250,
+        lowest=8.0,
+        highest=35.0,
+        nfreqs=32,
+        cwt_resample_n_time=100,
+        time_stride=1,
+        theta_dead_deg=25.0,
+        coi_mode="ignore",
+        message_dim=3,
+        hidden_state_dim=16,
+        encoder_dim=3,
+        use_encoder_batch_norm=True,
+        encoder_dropout=0.4,
+        use_local_residual=False,
+        use_prev_state_mean=True,
+        gru_input_dropout=0.35,
+        readout_dropout=0.25,
+        use_raw_in_message=True,
+        epochs=50,
+        batch_size=1,
+        learning_rate=3e-3,
+        weight_decay=2e-4,
+        grad_clip_norm=0.1,
+        normalize_input=True,
+        validation_split=0.2,
+        validation_group_column=None,
+        early_stopping_patience=None,
+        device="auto",
+        seed=42,
+        verbose=2,
+    )
+
+
 PIPELINE_BUILDERS = {
+    "Coherence-CNN": _make_coherence_cnn,
     "CSP+LDA": _make_csp_lda,
+    "CWT-CNN": _make_cwt_cnn,
     "EEGNet": _make_eegnet,
     "WCT-Phase-GNN": _make_wct_phase_gnn,
     "WCT-Phase-GNN-V2": _make_wct_phase_gnn_v2,
+    "Wavelet-RF": _make_wavelet_rf,
+    "XWT-Phase-GNN": _make_xwt_phase_gnn,
+    "XWT-Phase-GNN-V2": _make_xwt_phase_gnn_v2,
 }
+DEFAULT_PIPELINES = ["WCT-Phase-GNN", "XWT-Phase-GNN", "EEGNet"]
 PIPELINE_PARAM_GRIDS = {
     "CSP+LDA": {
         "csp__n_components": [5, 6, 7],
@@ -150,10 +279,44 @@ PIPELINE_PARAM_GRIDS = {
         "learning_rate": [0.001],
         "dropout_rate": [0.5],
     },
+    "Wavelet-RF": {
+        "lowest": [4],
+        "highest": [40],
+        "nfreqs": [50],
+        "sampling_rate": [250],
+    },
+    "Coherence-CNN": {
+        "lowest": [4],
+        "highest": [40],
+        "nfreqs": [50],
+        "sampling_rate": [250],
+        "epochs": [100],
+        "batch_size": [32],
+        "learning_rate": [0.001],
+        "device": ["cpu"],
+        "use_class_weights": [False],
+    },
+    "CWT-CNN": {
+        "lowest": [4],
+        "highest": [40],
+        "nfreqs": [50],
+        "sampling_rate": [250],
+        "epochs": [100],
+        "batch_size": [32],
+        "learning_rate": [0.001],
+        "device": ["cpu"],
+        "use_class_weights": [False],
+    },
     "WCT-Phase-GNN": {
         "time_stride": [1],
     },
     "WCT-Phase-GNN-V2": {
+        "time_stride": [1],
+    },
+    "XWT-Phase-GNN": {
+        "time_stride": [1],
+    },
+    "XWT-Phase-GNN-V2": {
         "time_stride": [1],
     },
 }
@@ -233,6 +396,58 @@ def _prepare_param_grid_for_run(pipelines, run_param_grid):
     return effective_param_grid, singleton_applied
 
 
+def _print_run_plan(subjects, selected_pipelines, pipeline_runs):
+    print("\n=== Run plan ===", flush=True)
+    print(f"Subjects: {subjects}", flush=True)
+    print(f"Pipelines: {selected_pipelines}", flush=True)
+    print(f"Evaluation runs: {len(pipeline_runs)}", flush=True)
+    for run_cfg in pipeline_runs:
+        print(f"  - {run_cfg['label']}", flush=True)
+
+
+def _print_inner_results(inner):
+    print("\n=== Inner cv_results_ ===")
+    if inner.empty:
+        print("No inner cv_results_ collected.")
+        return
+
+    summary_cols = [
+        c
+        for c in [
+            "eval_type",
+            "dataset",
+            "subject",
+            "session",
+            "pipeline",
+            "outer_fold",
+            "params",
+            "mean_test_score",
+            "mean_train_score",
+            "rank_test_score",
+        ]
+        if c in inner.columns
+    ]
+    print(inner[summary_cols].to_string(index=False))
+
+    split_cols = [
+        c
+        for c in [
+            "subject",
+            "session",
+            "pipeline",
+            "outer_fold",
+            "params",
+            "mean_test_score",
+            "mean_train_score",
+        ]
+        + [f"split{i}_{t}_score" for t in ["train", "test"] for i in range(3)]
+        if c in inner.columns
+    ]
+    if split_cols != summary_cols:
+        print("\n=== Inner CV split scores ===")
+        print(inner[split_cols].to_string(index=False))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--subjects", nargs="+", type=int, default=[1])
@@ -244,7 +459,7 @@ def main():
         metavar="PIPELINE",
         help=(
             "Pipeline/model to run. Repeat for multiple pipelines. "
-            "If omitted, defaults to WCT-Phase-GNN and EEGNet."
+            f"If omitted, defaults to {', '.join(DEFAULT_PIPELINES)}."
         ),
     )
     parser.add_argument(
@@ -269,15 +484,19 @@ def main():
             "'both' => run both evaluation types."
         ),
     )
-    args = parser.parse_args()
-    selected_pipelines = (
-        args.pipeline if args.pipeline else ["WCT-Phase-GNN", "EEGNet"]
+    parser.add_argument(
+        "--show-inner-results",
+        action="store_true",
+        help="Print collected inner cv_results_ summaries and split scores.",
     )
+    args = parser.parse_args()
+    selected_pipelines = args.pipeline if args.pipeline else DEFAULT_PIPELINES
     pipeline_runs = _build_pipeline_runs(
         pipeline_names=selected_pipelines,
         inner_group_mode=args.inner_group_mode,
         global_hyperparam_fit_mode=args.global_hyperparam_fit,
     )
+    _print_run_plan(args.subjects, selected_pipelines, pipeline_runs)
 
     moabb.set_log_level("info")
 
@@ -300,6 +519,11 @@ def main():
     results_chunks = []
     inner_chunks = []
     for (eval_mode, inner_group), run_cfgs in grouped_runs.items():
+        print(
+            "\n=== Starting group: "
+            f"eval={eval_mode}, inner_group={inner_group or 'None'} ===",
+            flush=True,
+        )
         eval_kwargs = dict(base_eval_kwargs)
         if inner_group is not None:
             eval_kwargs.update(
@@ -308,7 +532,11 @@ def main():
                 inner_cv_groups=inner_group,
             )
 
-        pipelines = {cfg["label"]: PIPELINE_BUILDERS[cfg["base_name"]]() for cfg in run_cfgs}
+        pipelines = {
+            cfg["label"]: PIPELINE_BUILDERS[cfg["base_name"]]()
+            for cfg in run_cfgs
+        }
+        print(f"Group pipelines: {list(pipelines)}", flush=True)
         run_param_grid = {
             cfg["label"]: deepcopy(PIPELINE_PARAM_GRIDS[cfg["base_name"]])
             for cfg in run_cfgs
@@ -326,6 +554,13 @@ def main():
 
         if not param_grid:
             param_grid = None
+        grid_status = (
+            "disabled after singleton application" if param_grid is None else "enabled"
+        )
+        print(
+            f"Grid search: {grid_status}",
+            flush=True,
+        )
 
         if eval_mode == "global":
             if GlobalFutureSessionEvaluation is None:
@@ -339,6 +574,7 @@ def main():
         else:
             raise ValueError(f"Unsupported eval_mode='{eval_mode}'.")
         group_results = evaluation.process(pipelines, param_grid=param_grid)
+        print(f"Completed group rows: {len(group_results)}", flush=True)
         results_chunks.append(group_results)
 
         try:
@@ -373,6 +609,9 @@ def main():
         .sort_values(["pipeline"])
     )
     print(per_pipeline.to_string(index=False))
+
+    if args.show_inner_results:
+        _print_inner_results(inner)
 
 
 if __name__ == "__main__":
