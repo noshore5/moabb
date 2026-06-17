@@ -37,6 +37,9 @@ from coheriqs_contributions.moabb_pipelines.wct_phase_gnn_classifier import (
     WCTPhaseGNNClassifier,
     WCTPhaseGNNV2Classifier,
 )
+from coheriqs_contributions.moabb_pipelines.wct_evidence_gnn_classifier import (
+    WCTEvidenceGNNClassifier,
+)
 from coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
     XWTPhaseGNNClassifier,
     XWTPhaseGNNV2Classifier,
@@ -69,6 +72,38 @@ def _make_wct_phase_gnn():
         hidden_dim=16,
         message_dim=16,
         epochs=20,
+        batch_size=8,
+        learning_rate=1e-3,
+        weight_decay=1e-4,
+        grad_clip_norm=0.1,
+        normalize_input=True,
+        validation_split=0.2,
+        validation_group_column=None,
+        early_stopping_patience=None,
+        device="auto",
+        seed=42,
+        verbose=2,
+    )
+
+
+def _make_wct_evidence_gnn():
+    return WCTEvidenceGNNClassifier(
+        sampling_rate=250,
+        lowest=8.0,
+        highest=35.0,
+        nfreqs=16,
+        cwt_resample_n_time=100,
+        coherence_threshold=0.7,
+        phase_threshold_deg=30.0,
+        window_size=25,
+        use_mag=True,
+        use_ang=False,
+        use_raw=True,
+        readout_mode="flatten",
+        evidence_norm="none",
+        hidden_dim=8,
+        message_dim=8,
+        epochs=200,
         batch_size=8,
         learning_rate=1e-3,
         weight_decay=1e-4,
@@ -240,6 +275,7 @@ PIPELINE_BUILDERS = {
     "CSP+LDA": _make_csp_lda,
     "CWT-CNN": _make_cwt_cnn,
     "EEGNet": _make_eegnet,
+    "WCT-Evidence-GNN": _make_wct_evidence_gnn,
     "WCT-Phase-GNN": _make_wct_phase_gnn,
     "WCT-Phase-GNN-V2": _make_wct_phase_gnn_v2,
     "Wavelet-RF": _make_wavelet_rf,
@@ -294,6 +330,11 @@ PIPELINE_PARAM_GRIDS = {
     },
     "WCT-Phase-GNN": {
         "batch_size": [32],
+    },
+    "WCT-Evidence-GNN": {
+        "batch_size": [32],
+        "readout_mode": ["flatten"],
+        "evidence_norm": ["active_slots"],
     },
     "WCT-Phase-GNN-V2": {
         "batch_size": [32],

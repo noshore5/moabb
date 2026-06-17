@@ -24,6 +24,33 @@ except ModuleNotFoundError:
     )
 
 
+def _compute_wct_window_features(
+    src_r: torch.Tensor,
+    src_i: torch.Tensor,
+    dst_r: torch.Tensor,
+    dst_i: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute window-level WCT features for directed source/destination pairs."""
+    # (a + ib) * conj(c + id) = (ac + bd) + i(bc - ad)
+    xwt_real = src_r * dst_r + src_i * dst_i
+    xwt_imag = src_i * dst_r - src_r * dst_i
+
+    mag = torch.sqrt(xwt_real * xwt_real + xwt_imag * xwt_imag + 1e-12)
+    ang = torch.atan2(xwt_imag, xwt_real)
+    delta = torch.atan2(torch.sin(ang), torch.cos(ang))
+
+    cross = torch.complex(xwt_real, xwt_imag)
+    auto1 = src_r * src_r + src_i * src_i
+    auto2 = dst_r * dst_r + dst_i * dst_i
+    mean_cross = torch.mean(cross, dim=2)
+    mean_auto1 = torch.mean(auto1, dim=2)
+    mean_auto2 = torch.mean(auto2, dim=2)
+    coh = (mean_cross.abs() ** 2) / (mean_auto1 * mean_auto2 + 1e-12)
+    mean_phase = torch.mean(delta, dim=2)
+
+    return torch.mean(mag, dim=2), torch.mean(ang, dim=2), coh, mean_phase
+
+
 def _original_next_state(self, state, gate_mask, mag, ang, raw_t):
     """
     Original batch loop version.
@@ -480,26 +507,12 @@ class WCTPhaseGNNCore(nn.Module):
             dst_r = w_real[:, self.dst_idx, window_start:window_end, :]
             dst_i = w_imag[:, self.dst_idx, window_start:window_end, :]
 
-            # (a + ib) * conj(c + id) = (ac + bd) + i(bc - ad)
-            xwt_real = src_r * dst_r + src_i * dst_i
-            xwt_imag = src_i * dst_r - src_r * dst_i
-
-            mag = torch.sqrt(xwt_real * xwt_real + xwt_imag * xwt_imag + 1e-12)
-            ang = torch.atan2(xwt_imag, xwt_real)
-            delta = torch.atan2(torch.sin(ang), torch.cos(ang))
-
-            cross = torch.complex(xwt_real, xwt_imag)
-            auto1 = src_r * src_r + src_i * src_i
-            auto2 = dst_r * dst_r + dst_i * dst_i
-            mean_cross = torch.mean(cross, dim=2)
-            mean_auto1 = torch.mean(auto1, dim=2)
-            mean_auto2 = torch.mean(auto2, dim=2)
-            coh = (mean_cross.abs() ** 2) / (mean_auto1 * mean_auto2 + 1e-12)
-            mean_phase = torch.mean(delta, dim=2)
-
-            mag = torch.mean(mag, dim=2)
-            ang = torch.mean(ang, dim=2)
-
+            mag, ang, coh, mean_phase = _compute_wct_window_features(
+                src_r,
+                src_i,
+                dst_r,
+                dst_i,
+            )
             gate_mask = (coh > self.coherence_threshold) & (
                 mean_phase > self.phase_threshold_rad
             )
