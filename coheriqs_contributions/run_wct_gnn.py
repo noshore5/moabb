@@ -114,6 +114,10 @@ def _make_wct_evidence_gnn():
         early_stopping_patience=None,
         device="auto",
         seed=42,
+        component_profile="legacy",
+        message_layer_norm=False,
+        message_init_seed=None,
+        readout_init_seed=None,
         verbose=2,
     )
 
@@ -223,7 +227,7 @@ def _make_wct_phase_gnn_v2():
         use_raw_in_message=False,
         epochs=50,
         batch_size=16,
-        learning_rate=3e-3,
+        learning_rate=1e-3,
         weight_decay=2e-4,
         grad_clip_norm=0.1,
         normalize_input=True,
@@ -282,7 +286,7 @@ PIPELINE_BUILDERS = {
     "XWT-Phase-GNN": _make_xwt_phase_gnn,
     "XWT-Phase-GNN-V2": _make_xwt_phase_gnn_v2,
 }
-DEFAULT_PIPELINES = ["WCT-Phase-GNN", "XWT-Phase-GNN", "EEGNet"]
+DEFAULT_PIPELINES = ["WCT-Evidence-GNN",]
 PIPELINE_PARAM_GRIDS = {
     "CSP+LDA": {
         "csp__n_components": [5, 6, 7],
@@ -335,6 +339,11 @@ PIPELINE_PARAM_GRIDS = {
         "batch_size": [32],
         "readout_mode": ["flatten"],
         "evidence_norm": ["active_slots"],
+        "message_layer_norm": [False],
+        # "seed": [42],
+        "message_init_seed": [43],
+        "readout_init_seed": [44],
+        "normalize_input": [True],
     },
     "WCT-Phase-GNN-V2": {
         "batch_size": [32],

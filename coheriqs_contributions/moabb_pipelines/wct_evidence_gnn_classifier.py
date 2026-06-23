@@ -8,6 +8,27 @@ import torch
 import torch.nn as nn
 
 try:
+    from coheriqs_contributions.nn_components import (
+        ActConfig,
+        DenseMLPConfig,
+        InitConfig,
+        NormConfig,
+        RegConfig,
+        build_dense_mlp,
+        scoped_torch_init_seed,
+    )
+except ModuleNotFoundError:
+    from nn_components import (
+        ActConfig,
+        DenseMLPConfig,
+        InitConfig,
+        NormConfig,
+        RegConfig,
+        build_dense_mlp,
+        scoped_torch_init_seed,
+    )
+
+try:
     from coheriqs_contributions.moabb_pipelines.wct_phase_gnn_classifier import (
         _BaseCWTGNNClassifier,
         _compute_wct_window_features,
@@ -19,6 +40,11 @@ except ModuleNotFoundError:
         _compute_wct_window_features,
         _ordered_pair_indices,
     )
+
+
+WCT_EVIDENCE_COMPONENT_PROFILES = (
+    "legacy",
+)
 
 
 class WCTEvidenceGNNCore(nn.Module):
@@ -39,6 +65,11 @@ class WCTEvidenceGNNCore(nn.Module):
         use_raw: bool = True,
         readout_mode: str = "mean",
         evidence_norm: str = "all_slots",
+        component_profile: str = "legacy",
+        message_layer_norm: bool = False,
+        model_init_seed: int | None = None,
+        message_init_seed: int | None = None,
+        readout_init_seed: int | None = None,
     ) -> None:
         super().__init__()
         if window_size <= 0:
@@ -63,6 +94,12 @@ class WCTEvidenceGNNCore(nn.Module):
         self.use_raw = use_raw
         self.readout_mode = readout_mode
         self.evidence_norm = evidence_norm
+        self.component_profile = component_profile
+        if component_profile not in WCT_EVIDENCE_COMPONENT_PROFILES:
+            raise ValueError(
+                f"Unsupported component_profile={component_profile!r}. "
+                f"Expected one of {WCT_EVIDENCE_COMPONENT_PROFILES}."
+            )
 
         src_idx, dst_idx = _ordered_pair_indices(n_channels)
         self.register_buffer("src_idx", src_idx, persistent=False)
@@ -78,13 +115,22 @@ class WCTEvidenceGNNCore(nn.Module):
         if payload_dim == 0:
             raise ValueError("At least one payload component must be enabled.")
 
-        self.message_mlp = nn.Sequential(
-            nn.Linear(payload_dim, message_dim),
-            nn.ReLU(),
-            nn.Linear(message_dim, hidden_dim),
-        )
-        readout_dim = hidden_dim * n_channels if readout_mode == "flatten" else hidden_dim
-        self.classifier = nn.Linear(readout_dim, n_classes)
+        with scoped_torch_init_seed(model_init_seed):
+            self.message_mlp = _build_message_mlp(
+                message_layer_norm=message_layer_norm,
+                in_features=payload_dim,
+                hidden_features=message_dim,
+                out_features=hidden_dim,
+                init_seed=message_init_seed,
+            )
+            readout_dim = (
+                hidden_dim * n_channels if readout_mode == "flatten" else hidden_dim
+            )
+            self.classifier = _build_readout(
+                in_features=readout_dim,
+                n_classes=n_classes,
+                init_seed=readout_init_seed,
+            )
 
     def _aggregate_per_node(self, msg: torch.Tensor) -> torch.Tensor:
         """Aggregate [B, E, H] messages to [B, C, H] by destination."""
@@ -241,6 +287,10 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         early_stopping_patience: int | None = None,
         device: str = "auto",
         seed: int = 42,
+        component_profile: str = "legacy",
+        message_layer_norm: bool = False,
+        message_init_seed: int | None = None,
+        readout_init_seed: int | None = None,
         verbose: int = 0,
     ) -> None:
         self.coherence_threshold = coherence_threshold
@@ -253,6 +303,10 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.evidence_norm = evidence_norm
         self.hidden_dim = hidden_dim
         self.message_dim = message_dim
+        self.component_profile = component_profile
+        self.message_layer_norm = message_layer_norm
+        self.message_init_seed = message_init_seed
+        self.readout_init_seed = readout_init_seed
         self._init_cwt_gnn_classifier(
             sampling_rate=sampling_rate,
             lowest=lowest,
@@ -288,4 +342,52 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             use_raw=self.use_raw,
             readout_mode=self.readout_mode,
             evidence_norm=self.evidence_norm,
+            component_profile=self.component_profile,
+            message_layer_norm=self.message_layer_norm,
+            model_init_seed=self.seed,
+            message_init_seed=self.message_init_seed,
+            readout_init_seed=self.readout_init_seed,
         )
+
+
+def _build_message_mlp(
+    *,
+    message_layer_norm: bool,
+    in_features: int,
+    hidden_features: int,
+    out_features: int,
+    init_seed: int | None,
+) -> nn.Module:
+    return build_dense_mlp(
+        DenseMLPConfig(
+            in_features=in_features,
+            hidden_features=hidden_features,
+            out_features=out_features,
+            activation=ActConfig(kind="relu"),
+            norm=NormConfig(kind="layer" if message_layer_norm else None),
+            regularization=RegConfig(),
+            init=InitConfig(mode="torch_default"),
+        ),
+        init_seed=init_seed,
+    )
+
+
+def _build_readout(
+    *,
+    in_features: int,
+    n_classes: int,
+    init_seed: int | None,
+) -> nn.Module:
+    return build_dense_mlp(
+        DenseMLPConfig(
+            in_features=in_features,
+            hidden_features=n_classes,
+            out_features=n_classes,
+            depth=1,
+            activation=ActConfig(kind="identity"),
+            norm=NormConfig(kind=None),
+            regularization=RegConfig(),
+            init=InitConfig(mode="torch_default"),
+        ),
+        init_seed=init_seed,
+    )
