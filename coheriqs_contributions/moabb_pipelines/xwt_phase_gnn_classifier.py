@@ -13,6 +13,8 @@ try:
     from coheriqs_contributions.moabb_pipelines.common import (
         TorchEEGClassifier,
         apply_global_zscore,
+        augment_paired_cwt_batch,
+        compute_paired_cwt_noise_bank,
         compute_cwt_real_imag_tensors,
         fit_global_zscore_stats,
         ordered_pair_indices as _ordered_pair_indices,
@@ -24,6 +26,8 @@ except ModuleNotFoundError:
     from moabb_pipelines.common import (
         TorchEEGClassifier,
         apply_global_zscore,
+        augment_paired_cwt_batch,
+        compute_paired_cwt_noise_bank,
         compute_cwt_real_imag_tensors,
         fit_global_zscore_stats,
         ordered_pair_indices as _ordered_pair_indices,
@@ -252,12 +256,17 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         learning_rate: float,
         weight_decay: float,
         grad_clip_norm: float | None,
-        validation_split: float | list | tuple | None,
-        validation_group_column: str | None,
-        early_stopping_patience: int | None,
-        device: str,
-        seed: int,
-        verbose: int,
+        noise_augmentation_enabled: bool = False,
+        noise_apply_prob: float = 0.0,
+        noise_strength: float = 0.0,
+        noise_bank_size: int = 128,
+        noise_bank_seed: int | None = None,
+        validation_split: float | list | tuple | None = 0.2,
+        validation_group_column: str | None = None,
+        early_stopping_patience: int | None = None,
+        device: str = "auto",
+        seed: int = 42,
+        verbose: int = 0,
     ) -> None:
         self.sampling_rate = sampling_rate
         self.lowest = lowest
@@ -265,9 +274,19 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         self.nfreqs = nfreqs
         self.cwt_resample_n_time = cwt_resample_n_time
         self.normalize_input = normalize_input
+        self.noise_augmentation_enabled = noise_augmentation_enabled
+        self.noise_apply_prob = noise_apply_prob
+        self.noise_strength = noise_strength
+        self.noise_bank_size = noise_bank_size
+        self.noise_bank_seed = noise_bank_seed
         self.transform_ = None
         self.X_mean_: float | None = None
         self.X_std_: float | None = None
+        self.noise_bank_: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        self.noise_channel_std_: torch.Tensor | None = None
+        self.noise_bank_device_: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        self.noise_channel_std_device_: torch.Tensor | None = None
+        self._validate_noise_augmentation_params()
         self._init_torch_classifier(
             epochs=epochs,
             batch_size=batch_size,
@@ -284,6 +303,8 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         )
 
     def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):
+        if fit:
+            self._validate_noise_augmentation_params()
         if self.normalize_input:
             if fit:
                 ref = X if train_idx is None else X[train_idx]
@@ -294,7 +315,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
 
         if self.transform_ is None:
             self.transform_, _ = resolve_coherence_utils()
-        return compute_cwt_real_imag_tensors(
+        features = compute_cwt_real_imag_tensors(
             X,
             sampling_rate=self.sampling_rate,
             highest=self.highest,
@@ -304,10 +325,100 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             transform_fn=self.transform_,
             verbose=self.verbose,
         )
+        if fit:
+            self._fit_noise_augmentation_state(features, X, train_idx)
+        return features
 
     def _build_model_from_features(self, features, n_classes: int) -> nn.Module:
         raw_x = features[0] if isinstance(features, tuple) else features
         return self._build_model(n_channels=int(raw_x.shape[1]), n_classes=n_classes)
+
+    def _validate_noise_augmentation_params(self) -> None:
+        if not 0.0 <= float(self.noise_apply_prob) <= 1.0:
+            raise ValueError("noise_apply_prob must be in [0.0, 1.0].")
+        if float(self.noise_strength) < 0.0:
+            raise ValueError("noise_strength must be >= 0.0.")
+        if int(self.noise_bank_size) <= 0:
+            raise ValueError("noise_bank_size must be > 0.")
+
+    def _uses_noise_augmentation(self) -> bool:
+        return (
+            bool(self.noise_augmentation_enabled)
+            and float(self.noise_apply_prob) > 0.0
+            and float(self.noise_strength) > 0.0
+        )
+
+    def _fit_noise_augmentation_state(
+        self,
+        features: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        X: np.ndarray,
+        train_idx,
+    ) -> None:
+        self.noise_bank_ = None
+        self.noise_channel_std_ = None
+        self.noise_bank_device_ = None
+        self.noise_channel_std_device_ = None
+        if not self._uses_noise_augmentation():
+            return
+
+        raw_x = features[0]
+        if train_idx is None:
+            ref = raw_x
+        else:
+            ref = raw_x[torch.as_tensor(train_idx, dtype=torch.long)]
+        channel_std = torch.std(ref, dim=(0, 2), unbiased=False)
+        channel_std = torch.nan_to_num(channel_std, nan=0.0, posinf=0.0, neginf=0.0)
+        self.noise_channel_std_ = channel_std.float().contiguous()
+        bank_seed = (
+            int(self.noise_bank_seed)
+            if self.noise_bank_seed is not None
+            else int(self.seed or 0) + 10_003
+        )
+        self.noise_bank_ = compute_paired_cwt_noise_bank(
+            bank_size=int(self.noise_bank_size),
+            segment_length=int(X.shape[2]),
+            sampling_rate=self.sampling_rate,
+            highest=self.highest,
+            lowest=self.lowest,
+            nfreqs=self.nfreqs,
+            cwt_resample_n_time=self.cwt_resample_n_time,
+            transform_fn=self.transform_,
+            seed=bank_seed,
+            verbose=self.verbose,
+        )
+
+    def _prepare_training_state_on_device(self) -> None:
+        self.noise_bank_device_ = None
+        self.noise_channel_std_device_ = None
+        if not self._uses_noise_augmentation():
+            return
+        if self.device_ is None:
+            raise ValueError("Torch device is not initialized.")
+        if self.noise_bank_ is None or self.noise_channel_std_ is None:
+            raise ValueError("Noise augmentation state is not initialized.")
+        self.noise_bank_device_ = tuple(
+            tensor.to(device=self.device_, dtype=torch.float32)
+            for tensor in self.noise_bank_
+        )
+        self.noise_channel_std_device_ = self.noise_channel_std_.to(
+            device=self.device_,
+            dtype=torch.float32,
+        )
+
+    def _augment_train_batch_inputs(
+        self, batch_inputs: tuple[torch.Tensor, ...]
+    ) -> tuple[torch.Tensor, ...]:
+        if not self._uses_noise_augmentation():
+            return batch_inputs
+        if self.noise_bank_device_ is None or self.noise_channel_std_device_ is None:
+            raise ValueError("Noise augmentation device state is not initialized.")
+        return augment_paired_cwt_batch(
+            batch_inputs,
+            noise_bank=self.noise_bank_device_,
+            channel_std=self.noise_channel_std_device_,
+            apply_prob=float(self.noise_apply_prob),
+            strength=float(self.noise_strength),
+        )
 
 
 class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
@@ -339,6 +450,11 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
         weight_decay: float = 1e-4,
         grad_clip_norm: float | None = 0.1,
         normalize_input: bool = True,
+        noise_augmentation_enabled: bool = False,
+        noise_apply_prob: float = 0.0,
+        noise_strength: float = 0.0,
+        noise_bank_size: int = 128,
+        noise_bank_seed: int | None = None,
         validation_split: float | list | tuple | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
@@ -369,6 +485,11 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
             learning_rate=learning_rate,
             weight_decay=weight_decay,
             grad_clip_norm=grad_clip_norm,
+            noise_augmentation_enabled=noise_augmentation_enabled,
+            noise_apply_prob=noise_apply_prob,
+            noise_strength=noise_strength,
+            noise_bank_size=noise_bank_size,
+            noise_bank_seed=noise_bank_seed,
             validation_split=validation_split,
             validation_group_column=validation_group_column,
             early_stopping_patience=early_stopping_patience,
@@ -655,6 +776,11 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
         weight_decay: float = 1e-4,
         grad_clip_norm: float | None = 0.1,
         normalize_input: bool = True,
+        noise_augmentation_enabled: bool = False,
+        noise_apply_prob: float = 0.0,
+        noise_strength: float = 0.0,
+        noise_bank_size: int = 128,
+        noise_bank_seed: int | None = None,
         validation_split: float | list | tuple | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
@@ -686,6 +812,11 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
             learning_rate=learning_rate,
             weight_decay=weight_decay,
             grad_clip_norm=grad_clip_norm,
+            noise_augmentation_enabled=noise_augmentation_enabled,
+            noise_apply_prob=noise_apply_prob,
+            noise_strength=noise_strength,
+            noise_bank_size=noise_bank_size,
+            noise_bank_seed=noise_bank_seed,
             validation_split=validation_split,
             validation_group_column=validation_group_column,
             early_stopping_patience=early_stopping_patience,

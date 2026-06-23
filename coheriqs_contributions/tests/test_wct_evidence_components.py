@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn as nn
 from sklearn.model_selection import ParameterGrid
 
 from coheriqs_contributions.moabb_pipelines.common import (
+    augment_paired_cwt_batch,
     print_torch_parameter_hashes,
     torch_parameter_hashes,
+)
+from coheriqs_contributions.moabb_pipelines.wct_phase_gnn_classifier import (
+    WCTPhaseGNNClassifier,
 )
 from coheriqs_contributions.moabb_pipelines.wct_evidence_gnn_classifier import (
     WCTEvidenceGNNClassifier,
@@ -68,6 +73,197 @@ def test_component_controls_are_sklearn_parameter_grid_friendly() -> None:
         {"message_layer_norm": False},
         {"message_layer_norm": True},
     ]
+
+
+def test_noise_augmentation_controls_are_sklearn_parameter_grid_friendly() -> None:
+    estimator = WCTEvidenceGNNClassifier()
+
+    estimator.set_params(
+        noise_augmentation_enabled=True,
+        noise_apply_prob=0.5,
+        noise_strength=0.25,
+        noise_bank_size=7,
+        noise_bank_seed=11,
+    )
+
+    params = estimator.get_params()
+    assert params["noise_augmentation_enabled"] is True
+    assert params["noise_apply_prob"] == 0.5
+    assert params["noise_strength"] == 0.25
+    assert params["noise_bank_size"] == 7
+    assert params["noise_bank_seed"] == 11
+
+    sibling = WCTPhaseGNNClassifier(noise_strength=0.1)
+    assert sibling.get_params()["noise_strength"] == 0.1
+
+
+def test_paired_cwt_noise_augmentation_preserves_pairing_and_shapes() -> None:
+    raw_x = torch.zeros(3, 2, 4)
+    w_real = torch.zeros(3, 2, 4, 2)
+    w_imag = torch.zeros(3, 2, 4, 2)
+    raw_bank = torch.tensor([[1.0, 1.0, 1.0, 1.0], [2.0, 2.0, 2.0, 2.0]])
+    real_bank = raw_bank[:, :, None].expand(2, 4, 2) * 10.0
+    imag_bank = raw_bank[:, :, None].expand(2, 4, 2) * 100.0
+
+    augmented = augment_paired_cwt_batch(
+        (raw_x, w_real, w_imag),
+        noise_bank=(raw_bank, real_bank, imag_bank),
+        channel_std=torch.tensor([2.0, 3.0]),
+        apply_prob=1.0,
+        strength=0.5,
+    )
+
+    raw_aug, real_aug, imag_aug = augmented
+    assert raw_aug.shape == raw_x.shape
+    assert real_aug.shape == w_real.shape
+    assert imag_aug.shape == w_imag.shape
+
+    scale = torch.tensor([1.0, 1.5]).view(1, 2, 1)
+    raw_unit = raw_aug / scale
+    real_unit = real_aug / scale.unsqueeze(-1)
+    imag_unit = imag_aug / scale.unsqueeze(-1)
+    assert torch.allclose(real_unit, raw_unit.unsqueeze(-1).expand_as(real_unit) * 10.0)
+    assert torch.allclose(imag_unit, raw_unit.unsqueeze(-1).expand_as(imag_unit) * 100.0)
+
+
+def test_paired_cwt_noise_augmentation_noop_modes() -> None:
+    raw_x = torch.randn(2, 3, 4)
+    w_real = torch.randn(2, 3, 4, 2)
+    w_imag = torch.randn(2, 3, 4, 2)
+    bank = (
+        torch.randn(5, 4),
+        torch.randn(5, 4, 2),
+        torch.randn(5, 4, 2),
+    )
+
+    for apply_prob, strength in [(0.0, 1.0), (1.0, 0.0)]:
+        augmented = augment_paired_cwt_batch(
+            (raw_x, w_real, w_imag),
+            noise_bank=bank,
+            channel_std=torch.ones(3),
+            apply_prob=apply_prob,
+            strength=strength,
+        )
+        assert all(
+            torch.equal(actual, expected)
+            for actual, expected in zip(augmented, (raw_x, w_real, w_imag), strict=True)
+        )
+
+
+def test_paired_cwt_noise_augmentation_rejects_device_mismatch() -> None:
+    raw_x = torch.zeros(2, 3, 4)
+    w_real = torch.zeros(2, 3, 4, 2)
+    w_imag = torch.zeros(2, 3, 4, 2)
+    bank = (
+        torch.empty(5, 4, device="meta"),
+        torch.empty(5, 4, 2, device="meta"),
+        torch.empty(5, 4, 2, device="meta"),
+    )
+
+    with pytest.raises(ValueError, match="batch device"):
+        augment_paired_cwt_batch(
+            (raw_x, w_real, w_imag),
+            noise_bank=bank,
+            channel_std=torch.ones(3),
+            apply_prob=1.0,
+            strength=1.0,
+        )
+
+
+def test_classifier_prepares_noise_state_on_device_and_uses_it_for_batches() -> None:
+    class RecordingModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen_raw = None
+
+        def forward(self, raw_x, w_real, w_imag):
+            self.seen_raw = raw_x.detach().clone()
+            return torch.zeros(raw_x.shape[0], 2, device=raw_x.device)
+
+    estimator = WCTEvidenceGNNClassifier(
+        noise_augmentation_enabled=True,
+        noise_apply_prob=1.0,
+        noise_strength=1.0,
+    )
+    estimator.device_ = torch.device("cpu")
+    estimator.noise_bank_ = (
+        torch.ones(2, 4),
+        torch.ones(2, 4, 3),
+        torch.ones(2, 4, 3),
+    )
+    estimator.noise_channel_std_ = torch.ones(2)
+    estimator._prepare_training_state_on_device()
+
+    assert estimator.noise_bank_device_ is not None
+    assert estimator.noise_channel_std_device_ is not None
+    assert all(tensor.device == estimator.device_ for tensor in estimator.noise_bank_device_)
+    assert estimator.noise_channel_std_device_.device == estimator.device_
+
+    estimator.noise_bank_ = (
+        torch.empty(2, 4, device="meta"),
+        torch.empty(2, 4, 3, device="meta"),
+        torch.empty(2, 4, 3, device="meta"),
+    )
+    estimator.noise_channel_std_ = torch.empty(2, device="meta")
+    estimator.model_ = RecordingModel()
+    estimator.model_.train()
+    batch_inputs = (
+        torch.zeros(2, 2, 4),
+        torch.zeros(2, 2, 4, 3),
+        torch.zeros(2, 2, 4, 3),
+    )
+
+    estimator._model_forward(batch_inputs)
+
+    assert torch.equal(estimator.model_.seen_raw, torch.ones_like(batch_inputs[0]))
+
+
+def test_noise_channel_std_uses_training_split_after_resampling(monkeypatch) -> None:
+    estimator = WCTEvidenceGNNClassifier(
+        noise_augmentation_enabled=True,
+        noise_apply_prob=1.0,
+        noise_strength=0.5,
+        noise_bank_size=3,
+    )
+    raw_x = torch.tensor(
+        [
+            [[1.0, 3.0], [10.0, 14.0]],
+            [[5.0, 7.0], [20.0, 24.0]],
+            [[100.0, 100.0], [200.0, 200.0]],
+        ]
+    )
+    features = (
+        raw_x,
+        torch.zeros(3, 2, 2, 4),
+        torch.zeros(3, 2, 2, 4),
+    )
+    captured = {}
+
+    def fake_noise_bank(**kwargs):
+        captured.update(kwargs)
+        return (
+            torch.zeros(3, 2),
+            torch.zeros(3, 2, 4),
+            torch.zeros(3, 2, 4),
+        )
+
+    monkeypatch.setattr(
+        "coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier."
+        "compute_paired_cwt_noise_bank",
+        fake_noise_bank,
+    )
+    estimator.transform_ = object()
+
+    estimator._fit_noise_augmentation_state(
+        features,
+        X=torch.zeros(3, 2, 8).numpy(),
+        train_idx=torch.tensor([0, 1]),
+    )
+
+    expected = torch.std(raw_x[:2], dim=(0, 2), unbiased=False)
+    assert torch.equal(estimator.noise_channel_std_, expected)
+    assert captured["bank_size"] == 3
+    assert captured["segment_length"] == 8
 
 
 def test_component_seed_grid_propagates_independently_to_core() -> None:

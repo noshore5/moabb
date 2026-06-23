@@ -408,6 +408,101 @@ def compute_cwt_real_imag_tensors(
     )
 
 
+def compute_paired_cwt_noise_bank(
+    *,
+    bank_size: int,
+    segment_length: int,
+    sampling_rate: int,
+    highest: float,
+    lowest: float,
+    nfreqs: int,
+    cwt_resample_n_time: int | None,
+    transform_fn,
+    seed: int,
+    verbose: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build matched raw/CWT noise entries from the same white-noise segments."""
+
+    if bank_size <= 0:
+        raise ValueError("noise_bank_size must be > 0.")
+    if segment_length <= 0:
+        raise ValueError("Noise segment length must be > 0.")
+
+    rng = np.random.default_rng(int(seed))
+    noise = rng.standard_normal((bank_size, 1, segment_length)).astype(np.float32)
+    raw_noise, cwt_real_noise, cwt_imag_noise = compute_cwt_real_imag_tensors(
+        noise,
+        sampling_rate=sampling_rate,
+        highest=highest,
+        lowest=lowest,
+        nfreqs=nfreqs,
+        cwt_resample_n_time=cwt_resample_n_time,
+        transform_fn=transform_fn,
+        verbose=verbose,
+    )
+    return (
+        raw_noise[:, 0, :].contiguous(),
+        cwt_real_noise[:, 0, :, :].contiguous(),
+        cwt_imag_noise[:, 0, :, :].contiguous(),
+    )
+
+
+def augment_paired_cwt_batch(
+    batch_inputs: tuple[torch.Tensor, ...],
+    *,
+    noise_bank: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    channel_std: torch.Tensor,
+    apply_prob: float,
+    strength: float,
+) -> tuple[torch.Tensor, ...]:
+    """Apply paired raw/CWT noise to a CWT-GNN input triple."""
+
+    if len(batch_inputs) != 3:
+        return batch_inputs
+    if apply_prob <= 0.0 or strength <= 0.0:
+        return batch_inputs
+
+    raw_x, w_real, w_imag = batch_inputs
+    raw_noise_bank, real_noise_bank, imag_noise_bank = noise_bank
+    batch_size, n_channels, _ = raw_x.shape
+    bank_size = int(raw_noise_bank.shape[0])
+    if bank_size <= 0:
+        return batch_inputs
+
+    device = raw_x.device
+    bank_tensors = (raw_noise_bank, real_noise_bank, imag_noise_bank, channel_std)
+    if any(tensor.device != device for tensor in bank_tensors):
+        raise ValueError(
+            "Noise augmentation tensors must already be on the batch device."
+        )
+
+    prob_mask = torch.rand(batch_size, n_channels, device=device) < float(apply_prob)
+    if not bool(prob_mask.any().item()):
+        return batch_inputs
+
+    noise_idx = torch.randint(bank_size, (batch_size, n_channels), device=device)
+    scale = (
+        float(strength)
+        * channel_std.view(1, n_channels)
+        * prob_mask.to(dtype=raw_x.dtype)
+    )
+
+    raw_noise = raw_noise_bank[noise_idx]
+    real_noise = real_noise_bank[noise_idx]
+    imag_noise = imag_noise_bank[noise_idx]
+
+    raw_aug = raw_x + scale.unsqueeze(-1) * raw_noise
+    real_aug = (
+        w_real
+        + scale.to(dtype=w_real.dtype).unsqueeze(-1).unsqueeze(-1) * real_noise
+    )
+    imag_aug = (
+        w_imag
+        + scale.to(dtype=w_imag.dtype).unsqueeze(-1).unsqueeze(-1) * imag_noise
+    )
+    return raw_aug, real_aug, imag_aug
+
+
 class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     """Reusable sklearn-compatible PyTorch classifier lifecycle."""
 
@@ -467,7 +562,17 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     def _build_model_from_features(self, features, n_classes: int) -> nn.Module:
         raise NotImplementedError
 
+    def _augment_train_batch_inputs(
+        self, batch_inputs: tuple[torch.Tensor, ...]
+    ) -> tuple[torch.Tensor, ...]:
+        return batch_inputs
+
+    def _prepare_training_state_on_device(self) -> None:
+        return None
+
     def _model_forward(self, batch_inputs: tuple[torch.Tensor, ...]):
+        if self.model_ is not None and self.model_.training:
+            batch_inputs = self._augment_train_batch_inputs(batch_inputs)
         output = self.model_(*batch_inputs)
         if isinstance(output, tuple):
             logits = output[0]
@@ -548,6 +653,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.model_ = self._build_model_from_features(features, n_classes).to(
             self.device_
         )
+        self._prepare_training_state_on_device()
         if self.verbose >= 2:
             model_label = getattr(self, "model_label", self.__class__.__name__)
             print_torch_parameter_summary(
