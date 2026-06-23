@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import random
 from copy import deepcopy
 from pathlib import Path
@@ -114,6 +115,63 @@ def print_torch_parameter_summary(model: nn.Module, header: str = "Model") -> No
         f"non_trainable_params={total_params - total_trainable}",
         flush=True,
     )
+
+
+def torch_parameter_hashes(
+    model: nn.Module,
+    *,
+    precision: float = 1e-6,
+) -> tuple[dict[str, str], str]:
+    """Return tolerance-aware hashes for model parameters and the full model."""
+
+    if not np.isfinite(precision) or precision <= 0:
+        raise ValueError("precision must be a finite positive number.")
+
+    parameter_hashes = {}
+    model_hasher = hashlib.blake2b(digest_size=16)
+    for name, param in model.named_parameters():
+        param_hasher = hashlib.blake2b(digest_size=16)
+        metadata = f"{name}|{tuple(param.shape)}|{param.dtype}|{precision:.17g}"
+        param_hasher.update(metadata.encode("utf-8"))
+        param_hasher.update(_quantized_parameter_bytes(param, precision))
+        digest = param_hasher.hexdigest()
+        parameter_hashes[name] = digest
+        model_hasher.update(name.encode("utf-8"))
+        model_hasher.update(b"\0")
+        model_hasher.update(bytes.fromhex(digest))
+
+    return parameter_hashes, model_hasher.hexdigest()
+
+
+def print_torch_parameter_hashes(
+    model: nn.Module,
+    header: str = "Model",
+    *,
+    precision: float = 1e-6,
+) -> None:
+    """Print reproducible per-parameter and global model fingerprints."""
+
+    parameter_hashes, model_hash = torch_parameter_hashes(
+        model,
+        precision=precision,
+    )
+    print(
+        f"[{header}] Parameter hashes algorithm=blake2b-128 "
+        f"precision={precision:.1e}",
+        flush=True,
+    )
+    for name, digest in parameter_hashes.items():
+        print(f"[{header}] {name}: hash={digest}", flush=True)
+    print(f"[{header}] model_hash={model_hash}", flush=True)
+
+
+def _quantized_parameter_bytes(param: torch.Tensor, precision: float) -> bytes:
+    values = param.detach().cpu()
+    if values.is_complex():
+        values = torch.view_as_real(values)
+    if values.is_floating_point():
+        values = torch.round(values.to(torch.float64) / precision).to(torch.int64)
+    return np.ascontiguousarray(values.numpy()).tobytes()
 
 
 def resolve_coherence_utils():
@@ -491,9 +549,11 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             self.device_
         )
         if self.verbose >= 2:
+            model_label = getattr(self, "model_label", self.__class__.__name__)
             print_torch_parameter_summary(
-                self.model_, header=getattr(self, "model_label", self.__class__.__name__)
+                self.model_, header=model_label
             )
+            print_torch_parameter_hashes(self.model_, header=model_label)
 
         optimizer = optim.Adam(
             self.model_.parameters(),
