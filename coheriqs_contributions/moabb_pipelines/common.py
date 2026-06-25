@@ -661,7 +661,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             )
             print_torch_parameter_hashes(self.model_, header=model_label)
 
-        optimizer = optim.Adam(
+        optimizer = optim.AdamW(
             self.model_.parameters(),
             lr=self.learning_rate,
             weight_decay=self.weight_decay,
