@@ -7,24 +7,34 @@ import math
 import torch
 import torch.nn as nn
 
+import numpy as np
+
 try:
     from coheriqs_contributions.nn_components import (
         ActConfig,
+        Conv1dConfig,
+        Conv2dConfig,
         DenseMLPConfig,
         InitConfig,
         NormConfig,
         RegConfig,
         build_dense_mlp,
-        scoped_torch_init_seed,
-    )
+        build_conv1d_block,
+        build_conv2d_block,
+        scoped_torch_init_seed, ResidualConfig,
+)
 except ModuleNotFoundError:
     from nn_components import (
         ActConfig,
+        Conv1dConfig,
+        Conv2dConfig,
         DenseMLPConfig,
         InitConfig,
         NormConfig,
         RegConfig,
+        build_conv1d_block,
         build_dense_mlp,
+        build_conv2d_block,
         scoped_torch_init_seed,
     )
 
@@ -63,6 +73,8 @@ class WCTEvidenceGNNCore(nn.Module):
         use_mag: bool = True,
         use_ang: bool = False,
         use_raw: bool = True,
+        use_freq: bool = True,
+        use_time: bool = True,
         readout_mode: str = "mean",
         evidence_norm: str = "all_slots",
         component_profile: str = "legacy",
@@ -70,6 +82,8 @@ class WCTEvidenceGNNCore(nn.Module):
         model_init_seed: int | None = None,
         message_init_seed: int | None = None,
         readout_init_seed: int | None = None,
+
+       
     ) -> None:
         super().__init__()
         if window_size <= 0:
@@ -92,6 +106,8 @@ class WCTEvidenceGNNCore(nn.Module):
         self.use_mag = use_mag
         self.use_ang = use_ang
         self.use_raw = use_raw
+        self.use_freq = use_freq
+        self.use_time = use_time
         self.readout_mode = readout_mode
         self.evidence_norm = evidence_norm
         self.component_profile = component_profile
@@ -104,8 +120,13 @@ class WCTEvidenceGNNCore(nn.Module):
         src_idx, dst_idx = _ordered_pair_indices(n_channels)
         self.register_buffer("src_idx", src_idx, persistent=False)
         self.register_buffer("dst_idx", dst_idx, persistent=False)
-
-        payload_dim = 0
+        feature_dim = 4
+        self.feature_dim = feature_dim
+        payload_dim = feature_dim * 2
+        if self.use_freq:
+            payload_dim += 1
+        if self.use_time:
+            payload_dim += 1
         if self.use_mag:
             payload_dim += 1
         if self.use_ang:
@@ -116,6 +137,14 @@ class WCTEvidenceGNNCore(nn.Module):
             raise ValueError("At least one payload component must be enabled.")
 
         with scoped_torch_init_seed(model_init_seed):
+
+            self.feature_conv = _build_feature_conv(
+                kernel_size=5,
+                intermediate_channels=nfreqs,
+                out_channels=feature_dim * nfreqs,
+                pool_size=4,
+            )
+
             self.message_mlp = _build_message_mlp(
                 message_layer_norm=message_layer_norm,
                 in_features=payload_dim,
@@ -186,10 +215,48 @@ class WCTEvidenceGNNCore(nn.Module):
             dtype=torch.float32,
         )
 
-        for window_start in range(0, n_time - self.window_size + 1, self.window_size):
-            window_end = window_start + self.window_size
-            t_center = window_start + (self.window_size // 2)
+        # [B, 1, C, T] -> [B, F*D, C, T']
+        # C' = feature_dim
+        conv_features = self.feature_conv(raw_x.unsqueeze(1))
 
+        feature_time_steps = conv_features.shape[3]
+
+        windows_starts = range(0, n_time - self.window_size + 1, self.window_size)
+        num_steps = len(windows_starts)
+
+        assert feature_time_steps >= num_steps, "Number of feature time steps must be greater than or equal to the number of steps."
+
+        window_ends = [window_start + self.window_size for window_start in windows_starts]
+        window_centers = [window_start + (self.window_size // 2) for window_start in windows_starts]
+
+        window_feature_time_ratio = feature_time_steps / n_time
+
+        corresponding_feature_time_steps = [round(window_feature_time_ratio * window_start) for window_start in windows_starts]
+
+        assert np.all(np.diff(corresponding_feature_time_steps) > 0), "Corresponding feature time steps must be increasing."
+
+        # [B, F*D, C, T'] -> [B, F, D, C, T']
+        conv_by_freq = conv_features.view(
+            batch_size,
+            self.nfreqs,
+            self.feature_dim,
+            n_channels,
+            feature_time_steps,
+        )
+        # [B, F, D, C, T'] -> [B, C, F, D, T']
+        conv_by_freq = conv_by_freq.permute(0, 3, 1, 2, 4)
+
+        # in edge form: [B, C, F, D, T'] -> [B, E, F, D, T']
+        edge_src_conv = conv_by_freq.index_select(1, self.src_idx)
+        edge_dst_conv = conv_by_freq.index_select(1, self.dst_idx)
+
+        if self.use_freq:
+            freq_center = (
+                (torch.arange(self.nfreqs, device=raw_x.device, dtype=raw_x.dtype) + 0.5)
+                / float(self.nfreqs)
+            ).view(1, 1, self.nfreqs, 1).expand(batch_size, num_edges, self.nfreqs, 1)
+
+        for window_start, window_end, window_center, corresponding_feature_time_step in zip(windows_starts, window_ends, window_centers, corresponding_feature_time_steps):
             src_r = w_real[:, self.src_idx, window_start:window_end, :]
             src_i = w_imag[:, self.src_idx, window_start:window_end, :]
             dst_r = w_real[:, self.dst_idx, window_start:window_end, :]
@@ -215,6 +282,25 @@ class WCTEvidenceGNNCore(nn.Module):
                 )
 
             features = []
+
+            t_idx = corresponding_feature_time_step
+            features.append(edge_src_conv[:, :, :, :, t_idx])
+            features.append(edge_dst_conv[:, :, :, :, t_idx])
+
+            if self.use_freq:
+                features.append(freq_center)
+
+            if self.use_time:
+                time_center = float(window_center) / max(n_time - 1, 1)
+                features.append(
+                    torch.full(
+                        (batch_size, num_edges, self.nfreqs, 1),
+                        time_center,
+                        device=raw_x.device,
+                        dtype=raw_x.dtype,
+                    )
+                )
+
             if self.use_mag:
                 mag = torch.nan_to_num(mag, nan=0.0, posinf=0.0, neginf=0.0)
                 features.append(mag.unsqueeze(-1))
@@ -222,7 +308,7 @@ class WCTEvidenceGNNCore(nn.Module):
                 ang = torch.nan_to_num(ang, nan=0.0, posinf=0.0, neginf=0.0)
                 features.append(ang.unsqueeze(-1))
             if self.use_raw:
-                raw_t = raw_x[:, :, t_center]
+                raw_t = raw_x[:, :, window_center]
                 src_raw = raw_t[:, self.src_idx].unsqueeze(-1).unsqueeze(-1)
                 dst_raw = raw_t[:, self.dst_idx].unsqueeze(-1).unsqueeze(-1)
                 features.extend(
@@ -272,6 +358,8 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         use_mag: bool = True,
         use_ang: bool = False,
         use_raw: bool = True,
+        use_freq: bool = True,
+        use_time: bool = True,
         readout_mode: str = "mean",
         evidence_norm: str = "all_slots",
         hidden_dim: int = 8,
@@ -304,6 +392,8 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.use_mag = use_mag
         self.use_ang = use_ang
         self.use_raw = use_raw
+        self.use_freq = use_freq
+        self.use_time = use_time
         self.readout_mode = readout_mode
         self.evidence_norm = evidence_norm
         self.hidden_dim = hidden_dim
@@ -350,6 +440,8 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             use_mag=self.use_mag,
             use_ang=self.use_ang,
             use_raw=self.use_raw,
+            use_freq=self.use_freq,
+            use_time=self.use_time,
             readout_mode=self.readout_mode,
             evidence_norm=self.evidence_norm,
             component_profile=self.component_profile,
@@ -358,6 +450,47 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             message_init_seed=self.message_init_seed,
             readout_init_seed=self.readout_init_seed,
         )
+
+
+def _build_feature_conv(
+    *,
+    kernel_size: int,
+    intermediate_channels: int,
+    out_channels: int,
+    pool_size: int,
+) -> nn.Module:
+    conv_blocks = []
+    conv1 = build_conv2d_block(
+        Conv2dConfig(
+            in_channels=1,
+            out_channels=intermediate_channels,
+            kernel_size=(1, kernel_size),
+            padding=0,
+            regularization=RegConfig(0.5, 0.0),
+            norm=NormConfig("layer"),
+            activation=ActConfig(kind="gelu"),
+        ),
+    )
+    max_pool1 = nn.MaxPool2d(kernel_size=(1, pool_size), stride=(1, pool_size))
+
+    conv_blocks.append(conv1)
+    conv_blocks.append(max_pool1)
+    conv2 = build_conv2d_block(
+        Conv2dConfig(
+            in_channels=intermediate_channels,
+            out_channels=out_channels,
+            kernel_size=(1, kernel_size),
+            padding=0,
+            regularization=RegConfig(0.0, 0.5),
+            norm=NormConfig("layer"),
+            activation=ActConfig(kind="gelu"),
+        ),
+    )
+    max_pool2 = nn.MaxPool2d(kernel_size=(1, pool_size), stride=(1, pool_size))
+    conv_blocks.append(conv2)
+    conv_blocks.append(max_pool2)
+
+    return nn.Sequential(*conv_blocks)
 
 
 def _build_message_mlp(
@@ -370,14 +503,16 @@ def _build_message_mlp(
 ) -> nn.Module:
     return build_dense_mlp(
         DenseMLPConfig(
+            depth=2,
             in_features=in_features,
             hidden_features=hidden_features,
             out_features=out_features,
-            activation=ActConfig(kind="relu"),
-            norm=NormConfig(kind="layer" if message_layer_norm else None),
-            regularization=RegConfig(),
+            activation=ActConfig(kind="silu"),
+            norm=NormConfig(kind="layer" if message_layer_norm else None, affine=True),
+            regularization=RegConfig(dropout=0.0),
             init=InitConfig(mode="torch_default"),
         ),
+        # residual=ResidualConfig(norm_position="sandwich", shortcut="auto", rezero=True),
         init_seed=init_seed,
     )
 
