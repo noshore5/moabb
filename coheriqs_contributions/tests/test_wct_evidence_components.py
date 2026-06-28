@@ -7,6 +7,7 @@ from sklearn.model_selection import ParameterGrid
 
 from coheriqs_contributions.moabb_pipelines.common import (
     augment_paired_cwt_batch,
+    print_torch_custom_model_summary,
     print_torch_parameter_hashes,
     torch_parameter_hashes,
 )
@@ -21,6 +22,21 @@ from coheriqs_contributions.moabb_pipelines.wct_evidence_gnn_classifier import (
 
 def _linear_layers(module: nn.Module) -> list[nn.Linear]:
     return [m for m in module.modules() if isinstance(m, nn.Linear)]
+
+
+def _random_wct_batch(
+    *,
+    batch_size: int = 2,
+    n_channels: int = 3,
+    n_time: int = 64,
+    nfreqs: int = 4,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    generator = torch.Generator().manual_seed(17)
+    raw_x = torch.randn(batch_size, n_channels, n_time, generator=generator)
+    w_real = torch.randn(batch_size, n_channels, n_time, nfreqs, generator=generator)
+    w_imag = torch.randn(batch_size, n_channels, n_time, nfreqs, generator=generator)
+    freqs = torch.linspace(8.0, 35.0, nfreqs).expand(batch_size, nfreqs)
+    return raw_x, w_real, w_imag, freqs
 
 
 def test_legacy_profile_keeps_current_trainable_dense_shapes() -> None:
@@ -39,7 +55,7 @@ def test_legacy_profile_keeps_current_trainable_dense_shapes() -> None:
 
     linear_shapes = [(m.in_features, m.out_features) for m in _linear_layers(core)]
 
-    assert linear_shapes == [(3, 5), (5, 7), (21, 2)]
+    assert linear_shapes == [(13, 5), (5, 7), (21, 2)]
 
 
 def test_message_component_accepts_edge_frequency_payload_shape() -> None:
@@ -55,7 +71,7 @@ def test_message_component_accepts_edge_frequency_payload_shape() -> None:
         message_layer_norm=True,
     )
 
-    out = core.message_mlp(torch.randn(2, 6, 4, 3))
+    out = core.message_mlp(torch.randn(2, 6, 4, 13))
 
     assert out.shape == (2, 6, 4, 7)
     assert any(isinstance(layer, nn.LayerNorm) for layer in core.message_mlp.modules())
@@ -73,6 +89,161 @@ def test_component_controls_are_sklearn_parameter_grid_friendly() -> None:
         {"message_layer_norm": False},
         {"message_layer_norm": True},
     ]
+
+
+def test_window_compute_controls_are_sklearn_parameter_grid_friendly() -> None:
+    estimator = WCTEvidenceGNNClassifier()
+
+    assert estimator.get_params()["window_compute_mode"] == "auto"
+    assert estimator.get_params()["max_windows_per_chunk"] is None
+
+    estimator.set_params(
+        window_compute_mode="chunked",
+        max_windows_per_chunk=2,
+    )
+    assert estimator.window_compute_mode == "chunked"
+    assert estimator.max_windows_per_chunk == 2
+
+    combos = list(
+        ParameterGrid(
+            {
+                "window_compute_mode": ["sequential", "chunked"],
+                "max_windows_per_chunk": [1, 2],
+            }
+        )
+    )
+    assert len(combos) == 4
+
+
+def test_window_compute_modes_match_for_exact_windowed_config() -> None:
+    batch_inputs = _random_wct_batch()
+    core = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        coherence_threshold=0.0,
+        phase_threshold_deg=-180.0,
+        window_size=32,
+        use_mag=True,
+        use_ang=True,
+        use_raw=True,
+        use_freq=True,
+        use_time=True,
+        model_init_seed=23,
+        window_compute_mode="sequential",
+    )
+    core.eval()
+
+    outputs = {}
+    with torch.no_grad():
+        for mode in ["sequential", "chunked", "single_pass_windowed", "auto"]:
+            core.window_compute_mode = mode
+            core.max_windows_per_chunk = 2 if mode == "chunked" else None
+            outputs[mode] = core(*batch_inputs)
+
+    sequential_logits, sequential_density = outputs["sequential"]
+    for mode in ["chunked", "single_pass_windowed", "auto"]:
+        logits, density = outputs[mode]
+        assert torch.allclose(logits, sequential_logits, rtol=1e-5, atol=1e-5)
+        assert density == pytest.approx(sequential_density, abs=1e-7)
+
+
+def test_single_pass_continuous_outputs_valid_shape() -> None:
+    batch_inputs = _random_wct_batch()
+    core = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        coherence_threshold=0.0,
+        phase_threshold_deg=-180.0,
+        window_size=32,
+        model_init_seed=23,
+        window_compute_mode="single_pass_continuous",
+    )
+    core.eval()
+
+    with torch.no_grad():
+        logits, edge_density = core(*batch_inputs)
+
+    assert logits.shape == (2, 2)
+    assert 0.0 <= edge_density <= 1.0
+
+
+def test_window_compute_rejects_invalid_controls() -> None:
+    with pytest.raises(ValueError, match="window_compute_mode"):
+        WCTEvidenceGNNCore(
+            n_channels=3,
+            nfreqs=4,
+            n_classes=2,
+            window_compute_mode="invalid",
+        )
+
+    with pytest.raises(ValueError, match="max_windows_per_chunk"):
+        WCTEvidenceGNNCore(
+            n_channels=3,
+            nfreqs=4,
+            n_classes=2,
+            max_windows_per_chunk=0,
+        )
+
+
+def test_custom_model_summary_default_noop(capsys) -> None:
+    print_torch_custom_model_summary(nn.Linear(2, 1), header="Plain")
+
+    assert capsys.readouterr().out == ""
+
+
+def test_wct_evidence_custom_model_summary_prints_mode_and_memory(capsys) -> None:
+    core = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        window_size=32,
+        window_compute_mode="auto",
+    )
+    core.configure_summary_context(
+        batch_size=8,
+        n_time=64,
+        dtype=torch.float32,
+        n_samples=12,
+    )
+
+    print_torch_custom_model_summary(core, header="Evidence")
+    output = capsys.readouterr().out
+
+    assert "[Evidence] WCTEvidence config" in output
+    assert "window_compute_mode=auto" in output
+    assert "effective_window_compute_mode=single_pass_windowed" in output
+    assert "B=8 C=3 E=6 T=64 W=32 N=2 F=4" in output
+    assert "message_payload" in output
+    assert "approx_memory=" in output
+
+
+def test_run_wct_gnn_evidence_config_uses_new_auto_mode_smoke() -> None:
+    from coheriqs_contributions import run_wct_gnn
+
+    estimator = run_wct_gnn._make_wct_evidence_gnn()
+    params = next(iter(ParameterGrid(run_wct_gnn.PIPELINE_PARAM_GRIDS["WCT-Evidence-GNN"])))
+    estimator.set_params(**params)
+
+    batch_inputs = _random_wct_batch(
+        batch_size=2,
+        n_channels=3,
+        n_time=200,
+        nfreqs=16,
+    )
+    core = estimator._build_model_from_features(batch_inputs, n_classes=2)
+    core.eval()
+
+    assert estimator.window_compute_mode == "auto"
+    assert estimator.max_windows_per_chunk is None
+    assert core._resolve_window_compute_mode() == "single_pass_windowed"
+
+    with torch.no_grad():
+        logits, edge_density = core(*batch_inputs)
+
+    assert logits.shape == (2, 2)
+    assert 0.0 <= edge_density <= 1.0
 
 
 def test_noise_augmentation_controls_are_sklearn_parameter_grid_friendly() -> None:
@@ -176,7 +347,7 @@ def test_classifier_prepares_noise_state_on_device_and_uses_it_for_batches() -> 
             super().__init__()
             self.seen_raw = None
 
-        def forward(self, raw_x, w_real, w_imag, freqs):
+        def forward(self, raw_x, w_real, w_imag, freqs=None):
             self.seen_raw = raw_x.detach().clone()
             return torch.zeros(raw_x.shape[0], 2, device=raw_x.device)
 
