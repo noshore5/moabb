@@ -33,7 +33,7 @@ log = logging.getLogger(__name__)
 class CWTCNN(nn.Module):
     """CNN over per-channel CWT magnitude maps."""
 
-    def __init__(self, n_classes: int, input_shape: tuple[int, int, int]):
+    def __init__(self, n_classes: int, input_shape: tuple[int, int, int], **kwargs):
         super().__init__()
         n_channels, _, _ = input_shape
         self.conv1 = nn.Conv2d(n_channels, 32, kernel_size=(1, 15), padding=(0, 7))
@@ -168,5 +168,5 @@ class CWTCNNClassifier(TorchEEGClassifier):
             np.float32
         )
 
-    def _build_model_from_features(self, features, n_classes: int) -> nn.Module:
-        return CWTCNN(n_classes, tuple(features.shape[1:]))
+    def _build_model_from_features(self, features, n_classes: int, **kwargs) -> nn.Module:
+        return CWTCNN(n_classes, tuple(features.shape[1:]), **kwargs)

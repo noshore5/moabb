@@ -12,6 +12,8 @@ import math
 import torch
 import torch.nn as nn
 
+from coheriqs_contributions.constructions.coherence_analysis import visualize_complex_points_and_mean
+
 try:
     from coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
         _BaseCWTGNNClassifier,
@@ -29,26 +31,69 @@ def _compute_wct_window_features(
     src_i: torch.Tensor,
     dst_r: torch.Tensor,
     dst_i: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    freqs: torch.Tensor,
+    smooth_kernel_and_pad: tuple[torch.Tensor, tuple[int, int, int, int]] = None,
+    padding_mode: str = "reflect",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute window-level WCT features for directed source/destination pairs."""
     # (a + ib) * conj(c + id) = (ac + bd) + i(bc - ad)
     xwt_real = src_r * dst_r + src_i * dst_i
     xwt_imag = src_i * dst_r - src_r * dst_i
+    
 
     mag = torch.sqrt(xwt_real * xwt_real + xwt_imag * xwt_imag + 1e-12)
-    ang = torch.atan2(xwt_imag, xwt_real)
-    delta = torch.atan2(torch.sin(ang), torch.cos(ang))
+    # ang = torch.atan2(xwt_imag, xwt_real)
 
-    cross = torch.complex(xwt_real, xwt_imag)
     auto1 = src_r * src_r + src_i * src_i
     auto2 = dst_r * dst_r + dst_i * dst_i
-    mean_cross = torch.mean(cross, dim=2)
-    mean_auto1 = torch.mean(auto1, dim=2)
-    mean_auto2 = torch.mean(auto2, dim=2)
-    coh = (mean_cross.abs() ** 2) / (mean_auto1 * mean_auto2 + 1e-12)
-    mean_phase = torch.mean(delta, dim=2)
+    if smooth_kernel_and_pad is None:
+        cross = torch.complex(xwt_real, xwt_imag)
+        smooth_cross = torch.mean(cross, dim=2)
+        smooth_auto1 = torch.mean(auto1, dim=2)
+        smooth_auto2 = torch.mean(auto2, dim=2)
+        coh = (smooth_cross.abs() ** 2) / (smooth_auto1 * smooth_auto2 + 1e-12)
+    else:
+        smooth_kernel, pad = smooth_kernel_and_pad
+        B, E, T, F = xwt_real.shape
 
-    return torch.mean(mag, dim=2), torch.mean(ang, dim=2), coh, mean_phase
+        inv_scale = freqs.view(B, 1, 1, F)
+        xwt_real = xwt_real * inv_scale
+        xwt_imag = xwt_imag * inv_scale
+        auto1 = auto1 * inv_scale
+        auto2 = auto2 * inv_scale
+
+        # Stack all maps so we smooth everything in one conv2d call.
+        # Shape: [B, E, 4, T, F]
+        maps = torch.stack([xwt_real, xwt_imag, auto1, auto2], dim=2)
+        maps = maps.view(B * E * 4, 1, T, F)
+
+        maps = torch.nn.functional.pad(maps, pad, mode=padding_mode)
+        smoothed = torch.nn.functional.conv2d(maps, smooth_kernel)
+
+        out_T, out_F = smoothed.shape[-2:]
+
+        smoothed = smoothed.view(B, E, 4, out_T, out_F)
+
+        smooth_cross = torch.complex(smoothed[:,:,0], smoothed[:,:,1])
+        smooth_auto1 = smoothed[:,:,2]
+        smooth_auto2 = smoothed[:,:,3]
+
+        coh = (smooth_cross.abs() ** 2) / (smooth_auto1 * smooth_auto2 + 1e-12)
+
+        coh, coh_max_idx = torch.max(coh, dim=2)
+
+        idx = coh_max_idx.unsqueeze(2)  # [B, E, 1, F]
+
+        smooth_cross = torch.gather(smooth_cross, dim=2, index=idx).squeeze(2)
+
+    coh = coh.clamp(min=0.0, max=1.0)
+
+    mean_mag = torch.mean(mag, dim=2)
+
+    # mean_phase = torch.mean(ang, dim=2)
+    mean_phase = torch.angle(smooth_cross)
+
+    return mean_mag, mean_phase, coh
 
 
 def _original_next_state(self, state, gate_mask, mag, ang, raw_t):
@@ -395,6 +440,7 @@ class WCTPhaseGNNCore(nn.Module):
         use_raw: bool = True,
         use_state_src: bool = True,
         use_state_dst: bool = True,
+        **kwargs,
     ) -> None:
         super().__init__()
         if state_mode not in {"per_node", "per_node_per_freq"}:
@@ -464,6 +510,7 @@ class WCTPhaseGNNCore(nn.Module):
         raw_x: torch.Tensor,
         w_real: torch.Tensor,
         w_imag: torch.Tensor,
+        freqs: torch.Tensor,
     ) -> tuple[torch.Tensor, float]:
         """Forward pass.
 
@@ -472,6 +519,7 @@ class WCTPhaseGNNCore(nn.Module):
         raw_x : tensor, shape (B, C, T)
         w_real : tensor, shape (B, C, T, F)
         w_imag : tensor, shape (B, C, T, F)
+        freqs : tensor, shape (F,)
         """
         batch_size, n_channels, n_time = raw_x.shape
         if n_channels != self.n_channels:
@@ -507,7 +555,7 @@ class WCTPhaseGNNCore(nn.Module):
             dst_r = w_real[:, self.dst_idx, window_start:window_end, :]
             dst_i = w_imag[:, self.dst_idx, window_start:window_end, :]
 
-            mag, ang, coh, mean_phase = _compute_wct_window_features(
+            mean_mag, mean_phase, coh = _compute_wct_window_features(
                 src_r,
                 src_i,
                 dst_r,
@@ -520,16 +568,16 @@ class WCTPhaseGNNCore(nn.Module):
             gate_sum += float(gate_mask.sum().item())
             gate_count += float(gate_mask.numel())
 
-            mag = torch.nan_to_num(mag, nan=0.0, posinf=0.0, neginf=0.0)
-            ang = torch.nan_to_num(ang, nan=0.0, posinf=0.0, neginf=0.0)
+            mean_mag = torch.nan_to_num(mean_mag, nan=0.0, posinf=0.0, neginf=0.0)
+            mean_phase = torch.nan_to_num(mean_phase, nan=0.0, posinf=0.0, neginf=0.0)
 
             raw_t = raw_x[:, :, t_center]
 
             state, _ = _forward_dense_phase_update(
                 self,
                 raw_x=raw_t,
-                mag=mag,
-                ang=ang,
+                mag=mean_mag,
+                ang=mean_phase,
                 gate_mask=gate_mask,
                 state=state,
             )
@@ -565,6 +613,7 @@ class WCTPhaseGNNV2Core(nn.Module):
         phase_threshold_deg: float = 30.0,
         window_size: int = 25,
         use_raw_in_message: bool = True,
+        **kwargs,
     ) -> None:
         super().__init__()
         if encoder_dropout is not None:
@@ -648,6 +697,7 @@ class WCTPhaseGNNV2Core(nn.Module):
         raw_x: torch.Tensor,
         w_real: torch.Tensor,
         w_imag: torch.Tensor,
+        freqs: torch.Tensor,
     ) -> tuple[torch.Tensor, float]:
         """Forward pass.
 
@@ -656,6 +706,7 @@ class WCTPhaseGNNV2Core(nn.Module):
         raw_x : tensor, shape (B, C, T)
         w_real : tensor, shape (B, C, T, F)
         w_imag : tensor, shape (B, C, T, F)
+        freqs : tensor, shape (F,)
         """
         batch_size, n_channels, n_time = raw_x.shape
         if n_channels != self.n_channels:
@@ -893,7 +944,7 @@ class WCTPhaseGNNClassifier(_BaseCWTGNNClassifier):
             verbose=verbose,
         )
 
-    def _build_model(self, n_channels: int, n_classes: int) -> WCTPhaseGNNCore:
+    def _build_model(self, n_channels: int, n_classes: int, **kwargs) -> WCTPhaseGNNCore:
         return WCTPhaseGNNCore(
             n_channels=n_channels,
             nfreqs=self.nfreqs,
@@ -909,6 +960,7 @@ class WCTPhaseGNNClassifier(_BaseCWTGNNClassifier):
             use_raw=self.use_raw,
             use_state_src=self.use_state_src,
             use_state_dst=self.use_state_dst,
+            **kwargs,
         )
 
 
@@ -994,7 +1046,7 @@ class WCTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
             verbose=verbose,
         )
 
-    def _build_model(self, n_channels: int, n_classes: int) -> WCTPhaseGNNV2Core:
+    def _build_model(self, n_channels: int, n_classes: int, **kwargs) -> WCTPhaseGNNV2Core:
         return WCTPhaseGNNV2Core(
             n_channels=n_channels,
             nfreqs=self.nfreqs,
@@ -1012,4 +1064,5 @@ class WCTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
             phase_threshold_deg=self.phase_threshold_deg,
             window_size=self.window_size,
             use_raw_in_message=self.use_raw_in_message,
+            **kwargs,
         )

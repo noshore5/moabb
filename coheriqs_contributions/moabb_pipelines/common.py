@@ -341,6 +341,55 @@ def to_float_tensors(features) -> tuple[torch.Tensor, ...]:
             tensors.append(torch.from_numpy(np.asarray(value)).float())
     return tuple(tensors)
 
+def make_gaussian_weight2d(
+    kernel_size=(9, 5),   # (T kernel, S kernel)
+    sigma=(None, None),    # (T sigma, S sigma)
+    pad_h=None,
+    pad_w=None,
+    *,
+    device=None,
+    dtype=None,
+) -> tuple[torch.Tensor, tuple[int, int, int, int]]:
+    """
+    Returns:
+        weight: [1, 1, H, W], ready for F.conv2d
+        pad:    tuple for F.pad: (left, right, top, bottom)
+    """
+    # if pad_h is None then use "same" padding - so pad_h_total = kh - 1; same for pad_w
+    # otherwise use the provided pad_h and pad_w
+
+    kh, kw = kernel_size
+    sh, sw = sigma
+    if sh is None:
+        sh = (kh - 1) / 2
+    if sw is None:
+        sw = (kw - 1) / 2
+
+    h = torch.arange(kh, device=device, dtype=dtype) - (kh - 1) / 2
+    w = torch.arange(kw, device=device, dtype=dtype) - (kw - 1) / 2
+
+    hh, ww_grid = torch.meshgrid(h, w, indexing="ij")
+
+    kernel = torch.exp(-0.5 * ((hh / sh) ** 2 + (ww_grid / sw) ** 2))
+    kernel = kernel / kernel.sum()
+
+    # conv2d weight shape
+    weight = kernel[None, None, :, :]  # [1, 1, KH, KW]
+
+    # F.pad order is: (left, right, top, bottom)
+    pad_h_total = kh - 1 if pad_h is None else pad_h
+    pad_w_total = kw - 1 if pad_w is None else pad_w
+
+    pad_h_top = pad_h_total // 2
+    pad_h_bottom = pad_h_total - pad_h_top
+
+    pad_w_left = pad_w_total // 2
+    pad_w_right = pad_w_total - pad_w_left
+
+    pad = (pad_w_left, pad_w_right, pad_h_top, pad_h_bottom)
+
+    return weight, pad
+
 
 def prepare_cwt_tf(
     coeffs: np.ndarray,
@@ -370,7 +419,7 @@ def compute_cwt_real_imag_tensors(
     cwt_resample_n_time: int | None,
     transform_fn,
     verbose: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     n_samples, n_channels, n_time_orig = X.shape
     n_time = n_time_orig if cwt_resample_n_time is None else int(cwt_resample_n_time)
     if n_time <= 0:
@@ -378,6 +427,16 @@ def compute_cwt_real_imag_tensors(
 
     w_real = np.zeros((n_samples, n_channels, n_time, nfreqs), dtype=np.float32)
     w_imag = np.zeros((n_samples, n_channels, n_time, nfreqs), dtype=np.float32)
+
+    _, freqs = transform_fn(
+        X[0, 0, :],
+        sampling_rate,
+        highest,
+        lowest,
+        nfreqs=nfreqs,
+    )
+
+    freqs = torch.from_numpy(freqs).float().expand(n_samples, nfreqs)
 
     with tqdm(
         total=n_samples * n_channels,
@@ -405,6 +464,7 @@ def compute_cwt_real_imag_tensors(
         torch.from_numpy(raw_x).float(),
         torch.from_numpy(w_real).float(),
         torch.from_numpy(w_imag).float(),
+        freqs,
     )
 
 
@@ -430,7 +490,7 @@ def compute_paired_cwt_noise_bank(
 
     rng = np.random.default_rng(int(seed))
     noise = rng.standard_normal((bank_size, 1, segment_length)).astype(np.float32)
-    raw_noise, cwt_real_noise, cwt_imag_noise = compute_cwt_real_imag_tensors(
+    raw_noise, cwt_real_noise, cwt_imag_noise, _ = compute_cwt_real_imag_tensors(
         noise,
         sampling_rate=sampling_rate,
         highest=highest,
@@ -559,7 +619,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):
         raise NotImplementedError
 
-    def _build_model_from_features(self, features, n_classes: int) -> nn.Module:
+    def _build_model_from_features(self, features, n_classes: int, **kwargs) -> nn.Module:
         raise NotImplementedError
 
     def _augment_train_batch_inputs(
@@ -650,7 +710,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 num_workers=0,
             )
 
-        self.model_ = self._build_model_from_features(features, n_classes).to(
+        self.model_ = self._build_model_from_features(features, n_classes, device=self.device_).to(
             self.device_
         )
         self._prepare_training_state_on_device()

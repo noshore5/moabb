@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 class CoherenceCNN(nn.Module):
     """CNN over pairwise wavelet-coherence maps."""
 
-    def __init__(self, n_classes: int, input_shape: tuple[int, int, int]):
+    def __init__(self, n_classes: int, input_shape: tuple[int, int, int], **kwargs):
         super().__init__()
         n_pairs, nfreqs, n_timepoints = input_shape
         self.conv1 = nn.Conv2d(n_pairs, 32, kernel_size=(3, 3), padding=(1, 1))
@@ -214,5 +214,5 @@ class CoherenceCNNClassifier(TorchEEGClassifier):
             np.float32
         )
 
-    def _build_model_from_features(self, features, n_classes: int) -> nn.Module:
-        return CoherenceCNN(n_classes, tuple(features.shape[1:]))
+    def _build_model_from_features(self, features, n_classes: int, **kwargs) -> nn.Module:
+        return CoherenceCNN(n_classes, tuple(features.shape[1:]), **kwargs)

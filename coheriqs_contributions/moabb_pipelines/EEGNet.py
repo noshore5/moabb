@@ -22,7 +22,7 @@ except ModuleNotFoundError:
 class EEGNetModel(nn.Module):
     """Compact EEGNet-style CNN."""
 
-    def __init__(self, n_classes: int, n_channels: int, dropout_rate: float = 0.5):
+    def __init__(self, n_classes: int, n_channels: int, dropout_rate: float = 0.5, **kwargs):
         super().__init__()
         f1 = 8
         f2 = 16
@@ -105,9 +105,10 @@ class EEGNetClassifier(TorchEEGClassifier):
             raise ValueError("Input normalization stats are not initialized.")
         return apply_global_zscore(X, self.X_mean_, self.X_std_).astype(np.float32)
 
-    def _build_model_from_features(self, features, n_classes: int) -> nn.Module:
+    def _build_model_from_features(self, features, n_classes: int, **kwargs) -> nn.Module:
         return EEGNetModel(
             n_classes=n_classes,
             n_channels=int(features.shape[1]),
             dropout_rate=self.dropout_rate,
+            **kwargs,
         )

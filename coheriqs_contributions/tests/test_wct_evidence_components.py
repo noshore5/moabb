@@ -176,7 +176,7 @@ def test_classifier_prepares_noise_state_on_device_and_uses_it_for_batches() -> 
             super().__init__()
             self.seen_raw = None
 
-        def forward(self, raw_x, w_real, w_imag):
+        def forward(self, raw_x, w_real, w_imag, freqs):
             self.seen_raw = raw_x.detach().clone()
             return torch.zeros(raw_x.shape[0], 2, device=raw_x.device)
 

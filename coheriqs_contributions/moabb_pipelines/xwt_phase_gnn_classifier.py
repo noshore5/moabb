@@ -56,6 +56,7 @@ class XWTPhaseGNNCore(nn.Module):
         use_raw: bool = True,
         use_state_src: bool = True,
         use_state_dst: bool = True,
+        **kwargs,
     ) -> None:
         super().__init__()
         if time_stride <= 0:
@@ -147,6 +148,7 @@ class XWTPhaseGNNCore(nn.Module):
         raw_x: torch.Tensor,
         w_real: torch.Tensor,
         w_imag: torch.Tensor,
+        freqs: torch.Tensor,
     ) -> tuple[torch.Tensor, float]:
         batch_size, n_channels, n_time = raw_x.shape
         if n_channels != self.n_channels:
@@ -329,9 +331,9 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             self._fit_noise_augmentation_state(features, X, train_idx)
         return features
 
-    def _build_model_from_features(self, features, n_classes: int) -> nn.Module:
+    def _build_model_from_features(self, features, n_classes: int, **kwargs) -> nn.Module:
         raw_x = features[0] if isinstance(features, tuple) else features
-        return self._build_model(n_channels=int(raw_x.shape[1]), n_classes=n_classes)
+        return self._build_model(n_channels=int(raw_x.shape[1]), n_classes=n_classes, **kwargs)
 
     def _validate_noise_augmentation_params(self) -> None:
         if not 0.0 <= float(self.noise_apply_prob) <= 1.0:
@@ -498,7 +500,7 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
             verbose=verbose,
         )
 
-    def _build_model(self, n_channels: int, n_classes: int) -> XWTPhaseGNNCore:
+    def _build_model(self, n_channels: int, n_classes: int, **kwargs) -> XWTPhaseGNNCore:
         return XWTPhaseGNNCore(
             n_channels=n_channels,
             nfreqs=self.nfreqs,
@@ -514,6 +516,7 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
             use_raw=self.use_raw,
             use_state_src=self.use_state_src,
             use_state_dst=self.use_state_dst,
+            **kwargs,
         )
 
 
@@ -537,6 +540,7 @@ class XWTPhaseGNNV2Core(nn.Module):
         time_stride: int = 1,
         theta_dead_deg: float = 45.0,
         use_raw_in_message: bool = True,
+        **kwargs,
     ) -> None:
         super().__init__()
         if time_stride <= 0:
@@ -637,6 +641,7 @@ class XWTPhaseGNNV2Core(nn.Module):
         raw_x: torch.Tensor,
         w_real: torch.Tensor,
         w_imag: torch.Tensor,
+        freqs: torch.Tensor,
     ) -> tuple[torch.Tensor, float]:
         batch_size, n_channels, n_time = raw_x.shape
         if n_channels != self.n_channels:
@@ -825,7 +830,7 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
             verbose=verbose,
         )
 
-    def _build_model(self, n_channels: int, n_classes: int) -> XWTPhaseGNNV2Core:
+    def _build_model(self, n_channels: int, n_classes: int, **kwargs) -> XWTPhaseGNNV2Core:
         return XWTPhaseGNNV2Core(
             n_channels=n_channels,
             nfreqs=self.nfreqs,
@@ -842,4 +847,5 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
             time_stride=self.time_stride,
             theta_dead_deg=self.theta_dead_deg,
             use_raw_in_message=self.use_raw_in_message,
+            **kwargs,
         )

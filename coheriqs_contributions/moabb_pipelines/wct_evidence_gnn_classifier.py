@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import math
+from typing import Literal
 
 import torch
 import torch.nn as nn
 
 import numpy as np
+
+from coheriqs_contributions.moabb_pipelines.common import make_gaussian_weight2d, resolve_torch_device
 
 try:
     from coheriqs_contributions.nn_components import (
@@ -83,11 +86,26 @@ class WCTEvidenceGNNCore(nn.Module):
         message_init_seed: int | None = None,
         readout_init_seed: int | None = None,
 
+        padding_time_dim: bool = False,
+        padding_mode: Literal["reflect", "constant", "replicate"] = "reflect",
+        smooth_kernel_sigma: tuple[float, float] = (None, None),
+        smooth_kernel_size: tuple[int | None, int] = (None, 3),
+        **kwargs,
        
     ) -> None:
         super().__init__()
+        if smooth_kernel_size[0] is not None and smooth_kernel_size[0] <= 0:
+            raise ValueError("smooth_kernel_size[0] must be > 0")
+        if smooth_kernel_size[1] <= 0 or smooth_kernel_size[1] is None:
+            raise ValueError("smooth_kernel_size[1] must be > 0 and not None")
         if window_size <= 0:
             raise ValueError("window_size must be >= 1")
+        if padding_mode not in {"reflect", "constant", "replicate"}:
+            raise ValueError("padding_mode must be one of {'reflect', 'constant', 'replicate'}")
+        if smooth_kernel_sigma[0] is not None and (smooth_kernel_sigma[0] <= 0.0):
+            raise ValueError("smooth_kernel_sigma[0] must be > 0.0 or None")
+        if smooth_kernel_sigma[1] is not None and (smooth_kernel_sigma[1] <= 0.0):
+            raise ValueError("smooth_kernel_sigma[1] must be > 0.0 or None")
         if readout_mode not in {"mean", "flatten"}:
             raise ValueError("readout_mode must be one of {'mean', 'flatten'}")
         if evidence_norm not in {"all_slots", "windows", "active_slots", "none"}:
@@ -101,6 +119,7 @@ class WCTEvidenceGNNCore(nn.Module):
         self.hidden_dim = hidden_dim
         self.message_dim = message_dim
         self.coherence_threshold = float(coherence_threshold)
+        
         self.phase_threshold_rad = math.radians(phase_threshold_deg)
         self.window_size = int(window_size)
         self.use_mag = use_mag
@@ -110,16 +129,24 @@ class WCTEvidenceGNNCore(nn.Module):
         self.use_time = use_time
         self.readout_mode = readout_mode
         self.evidence_norm = evidence_norm
-        self.component_profile = component_profile
+        self.component_profile = component_profile        
         if component_profile not in WCT_EVIDENCE_COMPONENT_PROFILES:
             raise ValueError(
                 f"Unsupported component_profile={component_profile!r}. "
                 f"Expected one of {WCT_EVIDENCE_COMPONENT_PROFILES}."
             )
 
+        
         src_idx, dst_idx = _ordered_pair_indices(n_channels)
         self.register_buffer("src_idx", src_idx, persistent=False)
         self.register_buffer("dst_idx", dst_idx, persistent=False)
+
+        
+        self.padding_time_dim = padding_time_dim
+        self.padding_mode = padding_mode
+        self.smooth_kernel_sigma = smooth_kernel_sigma
+        self.smooth_kernel_size = (window_size if smooth_kernel_size[0] is None else smooth_kernel_size[0], smooth_kernel_size[1])
+
         feature_dim = 4
         self.feature_dim = feature_dim
         payload_dim = feature_dim * 2
@@ -191,10 +218,22 @@ class WCTEvidenceGNNCore(nn.Module):
         raw_x: torch.Tensor,
         w_real: torch.Tensor,
         w_imag: torch.Tensor,
+        freqs: torch.Tensor,
     ) -> tuple[torch.Tensor, float]:
         batch_size, n_channels, n_time = raw_x.shape
         if n_channels != self.n_channels:
             raise ValueError(f"Expected {self.n_channels} channels, got {n_channels}.")
+
+        device = raw_x.device
+        dtype = raw_x.dtype
+
+        smooth_kernel_and_pad = make_gaussian_weight2d(
+            kernel_size=self.smooth_kernel_size,
+            sigma=self.smooth_kernel_sigma,
+            pad_h=0 if not self.padding_time_dim else None,
+            device=device,
+            dtype=dtype,
+        )
 
         evidence = torch.zeros(
             batch_size,
@@ -251,10 +290,7 @@ class WCTEvidenceGNNCore(nn.Module):
         edge_dst_conv = conv_by_freq.index_select(1, self.dst_idx)
 
         if self.use_freq:
-            freq_center = (
-                (torch.arange(self.nfreqs, device=raw_x.device, dtype=raw_x.dtype) + 0.5)
-                / float(self.nfreqs)
-            ).view(1, 1, self.nfreqs, 1).expand(batch_size, num_edges, self.nfreqs, 1)
+            freqs_features = (1.0 / freqs).view(batch_size, 1, self.nfreqs, 1).expand(batch_size, num_edges, self.nfreqs, 1)
 
         for window_start, window_end, window_center, corresponding_feature_time_step in zip(windows_starts, window_ends, window_centers, corresponding_feature_time_steps):
             src_r = w_real[:, self.src_idx, window_start:window_end, :]
@@ -262,11 +298,14 @@ class WCTEvidenceGNNCore(nn.Module):
             dst_r = w_real[:, self.dst_idx, window_start:window_end, :]
             dst_i = w_imag[:, self.dst_idx, window_start:window_end, :]
 
-            mag, ang, coh, mean_phase = _compute_wct_window_features(
+            mean_mag, mean_phase, coh = _compute_wct_window_features(
                 src_r,
                 src_i,
                 dst_r,
                 dst_i,
+                freqs,
+                smooth_kernel_and_pad=smooth_kernel_and_pad,
+                padding_mode=self.padding_mode,
             )
             gate_mask = (coh > self.coherence_threshold) & (
                 mean_phase > self.phase_threshold_rad
@@ -288,7 +327,7 @@ class WCTEvidenceGNNCore(nn.Module):
             features.append(edge_dst_conv[:, :, :, :, t_idx])
 
             if self.use_freq:
-                features.append(freq_center)
+                features.append(freqs_features)
 
             if self.use_time:
                 time_center = float(window_center) / max(n_time - 1, 1)
@@ -302,11 +341,11 @@ class WCTEvidenceGNNCore(nn.Module):
                 )
 
             if self.use_mag:
-                mag = torch.nan_to_num(mag, nan=0.0, posinf=0.0, neginf=0.0)
-                features.append(mag.unsqueeze(-1))
+                mean_mag = torch.nan_to_num(mean_mag, nan=0.0, posinf=0.0, neginf=0.0)
+                features.append(mean_mag.unsqueeze(-1))
             if self.use_ang:
-                ang = torch.nan_to_num(ang, nan=0.0, posinf=0.0, neginf=0.0)
-                features.append(ang.unsqueeze(-1))
+                mean_phase = torch.nan_to_num(mean_phase, nan=0.0, posinf=0.0, neginf=0.0)
+                features.append(mean_phase.unsqueeze(-1))
             if self.use_raw:
                 raw_t = raw_x[:, :, window_center]
                 src_raw = raw_t[:, self.src_idx].unsqueeze(-1).unsqueeze(-1)
@@ -384,6 +423,10 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         message_layer_norm: bool = False,
         message_init_seed: int | None = None,
         readout_init_seed: int | None = None,
+        padding_time_dim: bool = False,
+        padding_mode: Literal["reflect", "constant", "replicate"] = "reflect",
+        smooth_kernel_sigma: tuple[float, float] = (None, None),
+        smooth_kernel_size: tuple[int | None, int] = (None, 3),
         verbose: int = 0,
     ) -> None:
         self.coherence_threshold = coherence_threshold
@@ -402,6 +445,10 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.message_layer_norm = message_layer_norm
         self.message_init_seed = message_init_seed
         self.readout_init_seed = readout_init_seed
+        self.padding_time_dim = padding_time_dim
+        self.padding_mode = padding_mode
+        self.smooth_kernel_sigma = smooth_kernel_sigma
+        self.smooth_kernel_size = smooth_kernel_size
         self._init_cwt_gnn_classifier(
             sampling_rate=sampling_rate,
             lowest=lowest,
@@ -427,7 +474,7 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             verbose=verbose,
         )
 
-    def _build_model(self, n_channels: int, n_classes: int) -> WCTEvidenceGNNCore:
+    def _build_model(self, n_channels: int, n_classes: int, **kwargs) -> WCTEvidenceGNNCore:
         return WCTEvidenceGNNCore(
             n_channels=n_channels,
             nfreqs=self.nfreqs,
@@ -449,6 +496,11 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             model_init_seed=self.seed,
             message_init_seed=self.message_init_seed,
             readout_init_seed=self.readout_init_seed,
+            padding_time_dim=self.padding_time_dim,
+            padding_mode=self.padding_mode,
+            smooth_kernel_sigma=self.smooth_kernel_sigma,
+            smooth_kernel_size=self.smooth_kernel_size,
+            **kwargs,
         )
 
 
