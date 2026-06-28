@@ -165,6 +165,16 @@ def print_torch_parameter_hashes(
     print(f"[{header}] model_hash={model_hash}", flush=True)
 
 
+def print_torch_custom_model_summary(
+    model: nn.Module,
+    header: str = "Model",
+) -> None:
+    """Print optional model-specific summary details."""
+    custom_summary = getattr(model, "print_custom_summary", None)
+    if callable(custom_summary):
+        custom_summary(header=header)
+
+
 def _quantized_parameter_bytes(param: torch.Tensor, precision: float) -> bytes:
     values = param.detach().cpu()
     if values.is_complex():
@@ -720,6 +730,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 self.model_, header=model_label
             )
             print_torch_parameter_hashes(self.model_, header=model_label)
+            print_torch_custom_model_summary(self.model_, header=model_label)
 
         optimizer = optim.AdamW(
             self.model_.parameters(),
