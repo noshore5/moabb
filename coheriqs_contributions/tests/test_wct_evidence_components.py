@@ -13,6 +13,7 @@ from coheriqs_contributions.moabb_pipelines.common import (
 )
 from coheriqs_contributions.moabb_pipelines.wct_phase_gnn_classifier import (
     WCTPhaseGNNClassifier,
+    _compute_wct_window_features,
 )
 from coheriqs_contributions.moabb_pipelines.wct_evidence_gnn_classifier import (
     WCTEvidenceGNNClassifier,
@@ -115,8 +116,9 @@ def test_window_compute_controls_are_sklearn_parameter_grid_friendly() -> None:
     assert len(combos) == 4
 
 
-def test_window_compute_modes_match_for_exact_windowed_config() -> None:
-    batch_inputs = _random_wct_batch()
+@pytest.mark.parametrize("use_mag", [True, False])
+def test_window_compute_modes_match_for_exact_windowed_config(use_mag: bool) -> None:
+    batch_inputs = _random_wct_batch(n_time=96)
     core = WCTEvidenceGNNCore(
         n_channels=3,
         nfreqs=4,
@@ -124,7 +126,7 @@ def test_window_compute_modes_match_for_exact_windowed_config() -> None:
         coherence_threshold=0.0,
         phase_threshold_deg=-180.0,
         window_size=32,
-        use_mag=True,
+        use_mag=use_mag,
         use_ang=True,
         use_raw=True,
         use_freq=True,
@@ -146,6 +148,36 @@ def test_window_compute_modes_match_for_exact_windowed_config() -> None:
         logits, density = outputs[mode]
         assert torch.allclose(logits, sequential_logits, rtol=1e-5, atol=1e-5)
         assert density == pytest.approx(sequential_density, abs=1e-7)
+
+
+def test_wct_window_features_can_skip_magnitude_without_changing_phase_or_coh() -> None:
+    generator = torch.Generator().manual_seed(31)
+    src_r = torch.randn(2, 6, 16, 4, generator=generator)
+    src_i = torch.randn(2, 6, 16, 4, generator=generator)
+    dst_r = torch.randn(2, 6, 16, 4, generator=generator)
+    dst_i = torch.randn(2, 6, 16, 4, generator=generator)
+    freqs = torch.linspace(8.0, 35.0, 4).expand(2, 4)
+
+    mean_mag, mean_phase, coh = _compute_wct_window_features(
+        src_r,
+        src_i,
+        dst_r,
+        dst_i,
+        freqs,
+    )
+    skipped_mag, skipped_phase, skipped_coh = _compute_wct_window_features(
+        src_r,
+        src_i,
+        dst_r,
+        dst_i,
+        freqs,
+        compute_mag=False,
+    )
+
+    assert mean_mag is not None
+    assert skipped_mag is None
+    assert torch.allclose(skipped_phase, mean_phase)
+    assert torch.allclose(skipped_coh, coh)
 
 
 def test_single_pass_continuous_outputs_valid_shape() -> None:
@@ -219,7 +251,7 @@ def test_wct_evidence_custom_model_summary_prints_mode_and_memory(capsys) -> Non
     assert "approx_memory=" in output
 
 
-def test_run_wct_gnn_evidence_config_uses_new_auto_mode_smoke() -> None:
+def test_run_wct_gnn_evidence_config_smoke_matches_grid() -> None:
     from coheriqs_contributions import run_wct_gnn
 
     estimator = run_wct_gnn._make_wct_evidence_gnn()
@@ -235,9 +267,10 @@ def test_run_wct_gnn_evidence_config_uses_new_auto_mode_smoke() -> None:
     core = estimator._build_model_from_features(batch_inputs, n_classes=2)
     core.eval()
 
-    assert estimator.window_compute_mode == "auto"
-    assert estimator.max_windows_per_chunk is None
-    assert core._resolve_window_compute_mode() == "single_pass_windowed"
+    assert estimator.use_mag is False
+    assert estimator.window_compute_mode == params["window_compute_mode"]
+    assert estimator.max_windows_per_chunk == params["max_windows_per_chunk"]
+    assert core._resolve_window_compute_mode() == params["window_compute_mode"]
 
     with torch.no_grad():
         logits, edge_density = core(*batch_inputs)

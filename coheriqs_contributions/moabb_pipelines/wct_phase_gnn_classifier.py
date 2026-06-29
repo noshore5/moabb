@@ -31,17 +31,22 @@ def _compute_wct_window_features(
     src_i: torch.Tensor,
     dst_r: torch.Tensor,
     dst_i: torch.Tensor,
-    freqs: torch.Tensor,
+    freqs: torch.Tensor | None = None,
     smooth_kernel_and_pad: tuple[torch.Tensor, tuple[int, int, int, int]] = None,
     padding_mode: str = "reflect",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    *,
+    compute_mag: bool = True,
+) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Compute window-level WCT features for directed source/destination pairs."""
     # (a + ib) * conj(c + id) = (ac + bd) + i(bc - ad)
     xwt_real = src_r * dst_r + src_i * dst_i
     xwt_imag = src_i * dst_r - src_r * dst_i
     
 
-    mag = torch.sqrt(xwt_real * xwt_real + xwt_imag * xwt_imag + 1e-12)
+    mean_mag = None
+    if compute_mag:
+        mag = torch.sqrt(xwt_real * xwt_real + xwt_imag * xwt_imag + 1e-12)
+        mean_mag = torch.mean(mag, dim=2)
     # ang = torch.atan2(xwt_imag, xwt_real)
 
     auto1 = src_r * src_r + src_i * src_i
@@ -53,6 +58,8 @@ def _compute_wct_window_features(
         smooth_auto2 = torch.mean(auto2, dim=2)
         coh = (smooth_cross.abs() ** 2) / (smooth_auto1 * smooth_auto2 + 1e-12)
     else:
+        if freqs is None:
+            raise ValueError("freqs are required when smooth_kernel_and_pad is provided.")
         smooth_kernel, pad = smooth_kernel_and_pad
         B, E, T, F = xwt_real.shape
 
@@ -87,8 +94,6 @@ def _compute_wct_window_features(
         smooth_cross = torch.gather(smooth_cross, dim=2, index=idx).squeeze(2)
 
     coh = coh.clamp(min=0.0, max=1.0)
-
-    mean_mag = torch.mean(mag, dim=2)
 
     # mean_phase = torch.mean(ang, dim=2)
     mean_phase = torch.angle(smooth_cross)
