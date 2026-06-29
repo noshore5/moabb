@@ -804,7 +804,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 epoch_targets.append(batch_y_np)
                 epoch_probas.append(batch_proba_np)
 
-                if self.verbose >= 2:
+                if self.verbose >= 3:
                     running_loss = loss_sum / n_batches
                     running_acc = n_correct / max(1, n_seen)
                     running_auc = safe_roc_auc(

@@ -129,7 +129,9 @@ def _make_wct_evidence_gnn():
         padding_mode="reflect",
         smooth_kernel_size=(None, 3),
         smooth_kernel_sigma=(None, None),
-        verbose=2,
+        window_compute_mode="sequential",
+        max_windows_per_chunk=None,
+        verbose=3,
     )
 
 
@@ -368,7 +370,9 @@ PIPELINE_PARAM_GRIDS = {
         "use_freq": [True],
         "use_mag": [False],
         "use_ang": [False],
-        "verbose": [1],
+        "max_windows_per_chunk": [None],
+        "window_compute_mode": ["sequential"],
+        "verbose": [3],
 
     },
     "WCT-Phase-GNN-V2": {
