@@ -161,6 +161,12 @@ class WCTEvidenceGNNCore(nn.Module):
         message_init_seed: int | None = None,
         readout_init_seed: int | None = None,
 
+        feature_conv_kernel_size: int = 5,
+        feature_conv_pool_size: int = 4,
+        feature_conv_intermediate_channels: int | None  = None,
+        feature_conv_intermediate_channels_reduced: int | None = None,
+        feature_conv_feature_dim: int = 4,
+
         padding_time_dim: bool = False,
         padding_mode: Literal["reflect", "constant", "replicate"] = "reflect",
         smooth_kernel_sigma: tuple[float, float] = (None, None),
@@ -247,9 +253,19 @@ class WCTEvidenceGNNCore(nn.Module):
         self.window_compute_mode = window_compute_mode
         self.max_windows_per_chunk = max_windows_per_chunk
 
-        feature_dim = 4
-        self.feature_dim = feature_dim
-        payload_dim = feature_dim * 2
+        self.feature_conv_kernel_size = feature_conv_kernel_size
+        self.feature_conv_pool_size = feature_conv_pool_size
+
+        if feature_conv_intermediate_channels is None:
+            feature_conv_intermediate_channels = nfreqs
+        
+        self.feature_conv_intermediate_channels = feature_conv_intermediate_channels
+        self.feature_conv_out_channels = feature_conv_feature_dim * nfreqs
+        self.feature_conv_intermediate_channels_reduced = feature_conv_intermediate_channels_reduced
+        
+        self.feature_conv_feature_dim = feature_conv_feature_dim
+
+        payload_dim = self.feature_conv_feature_dim * 2
         if self.use_freq:
             payload_dim += 1
         if self.use_time:
@@ -268,10 +284,11 @@ class WCTEvidenceGNNCore(nn.Module):
         with scoped_torch_init_seed(model_init_seed):
 
             self.feature_conv = _build_feature_conv(
-                kernel_size=5,
-                intermediate_channels=nfreqs,
-                out_channels=feature_dim * nfreqs,
-                pool_size=4,
+                kernel_size=self.feature_conv_kernel_size,
+                intermediate_channels=self.feature_conv_intermediate_channels,
+                out_channels=self.feature_conv_out_channels,
+                pool_size=self.feature_conv_pool_size,
+                intermediate_channels_reduced=self.feature_conv_intermediate_channels_reduced,
             )
 
             self.message_mlp = _build_message_mlp(
@@ -366,7 +383,7 @@ class WCTEvidenceGNNCore(nn.Module):
             f"[{header}] WCTEvidence dimensions "
             f"B={batch_size} C={self.n_channels} E={num_edges} "
             f"T={n_time} W={self.window_size} N={n_windows} F={self.nfreqs} "
-            f"D={self.feature_dim} H={self.hidden_dim} "
+            f"D={self.feature_conv_feature_dim} H={self.hidden_dim} "
             f"dtype={dtype} bytes_per_elem={dtype_bytes} "
             f"n_samples={n_samples}",
             flush=True,
@@ -415,12 +432,12 @@ class WCTEvidenceGNNCore(nn.Module):
         estimates = [
             (
                 "feature_conv_output",
-                (batch_size, self.nfreqs * self.feature_dim, self.n_channels, feature_time_steps),
+                (batch_size, self.nfreqs * self.feature_conv_feature_dim, self.n_channels, feature_time_steps),
                 1,
             ),
             (
                 "edge_conv_src_dst",
-                (batch_size, num_edges, self.nfreqs, self.feature_dim, feature_time_steps),
+                (batch_size, num_edges, self.nfreqs, self.feature_conv_feature_dim, feature_time_steps),
                 2,
             ),
         ]
@@ -1044,7 +1061,7 @@ class WCTEvidenceGNNCore(nn.Module):
         )
 
         # [B, 1, C, T] -> [B, F*D, C, T']
-        # C' = feature_dim
+        # C' = feature_conv_feature_dim
         conv_features = self.feature_conv(raw_x.unsqueeze(1))
 
         feature_time_steps = conv_features.shape[3]
@@ -1059,7 +1076,7 @@ class WCTEvidenceGNNCore(nn.Module):
         conv_by_freq = conv_features.view(
             batch_size,
             self.nfreqs,
-            self.feature_dim,
+            self.feature_conv_feature_dim,
             n_channels,
             feature_time_steps,
         )
@@ -1139,6 +1156,11 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         message_layer_norm: bool = False,
         message_init_seed: int | None = None,
         readout_init_seed: int | None = None,
+        feature_conv_kernel_size: int = 5,
+        feature_conv_pool_size: int = 4,
+        feature_conv_intermediate_channels: int | None  = None,
+        feature_conv_intermediate_channels_reduced: int | None = None,
+        feature_conv_feature_dim: int = 4,
         padding_time_dim: bool = False,
         padding_mode: Literal["reflect", "constant", "replicate"] = "reflect",
         smooth_kernel_sigma: tuple[float, float] = (None, None),
@@ -1169,6 +1191,11 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.message_layer_norm = message_layer_norm
         self.message_init_seed = message_init_seed
         self.readout_init_seed = readout_init_seed
+        self.feature_conv_kernel_size = feature_conv_kernel_size
+        self.feature_conv_pool_size = feature_conv_pool_size
+        self.feature_conv_intermediate_channels = feature_conv_intermediate_channels
+        self.feature_conv_intermediate_channels_reduced = feature_conv_intermediate_channels_reduced
+        self.feature_conv_feature_dim = feature_conv_feature_dim
         self.padding_time_dim = padding_time_dim
         self.padding_mode = padding_mode
         self.smooth_kernel_sigma = smooth_kernel_sigma
@@ -1237,6 +1264,11 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             model_init_seed=self.seed,
             message_init_seed=self.message_init_seed,
             readout_init_seed=self.readout_init_seed,
+            feature_conv_kernel_size=self.feature_conv_kernel_size,
+            feature_conv_pool_size=self.feature_conv_pool_size,
+            feature_conv_intermediate_channels=self.feature_conv_intermediate_channels,
+            feature_conv_intermediate_channels_reduced=self.feature_conv_intermediate_channels_reduced,
+            feature_conv_feature_dim=self.feature_conv_feature_dim,
             padding_time_dim=self.padding_time_dim,
             padding_mode=self.padding_mode,
             smooth_kernel_sigma=self.smooth_kernel_sigma,
@@ -1253,6 +1285,7 @@ def _build_feature_conv(
     intermediate_channels: int,
     out_channels: int,
     pool_size: int,
+    intermediate_channels_reduced: int | None = None,
 ) -> nn.Module:
     conv_blocks = []
     conv1 = build_conv2d_block(
@@ -1262,7 +1295,7 @@ def _build_feature_conv(
             kernel_size=(1, kernel_size),
             padding=0,
             regularization=RegConfig(0.5, 0.0),
-            norm=NormConfig("layer"),
+            norm=NormConfig("batch"),
             activation=ActConfig(kind="gelu"),
         ),
     )
@@ -1270,14 +1303,32 @@ def _build_feature_conv(
 
     conv_blocks.append(conv1)
     conv_blocks.append(max_pool1)
+
+    conv2_in_channels = intermediate_channels
+    if intermediate_channels_reduced is not None:
+        # use MLP-like conv 1x1 kernel to reduce channels
+        conv2_in_channels = intermediate_channels_reduced
+        conv1_reduced = build_conv2d_block(
+            Conv2dConfig(
+                in_channels=intermediate_channels,
+                out_channels=intermediate_channels_reduced,
+                kernel_size=(1, 1),
+                padding=0,
+                regularization=RegConfig(),
+
+                norm=NormConfig("batch"),
+                activation=ActConfig(kind="gelu"),
+            ),
+        )
+        conv_blocks.append(conv1_reduced)
     conv2 = build_conv2d_block(
         Conv2dConfig(
-            in_channels=intermediate_channels,
+            in_channels=conv2_in_channels,
             out_channels=out_channels,
             kernel_size=(1, kernel_size),
             padding=0,
             regularization=RegConfig(0.0, 0.5),
-            norm=NormConfig("layer"),
+            norm=NormConfig("batch"),
             activation=ActConfig(kind="gelu"),
         ),
     )
@@ -1302,7 +1353,7 @@ def _build_message_mlp(
             in_features=in_features,
             hidden_features=hidden_features,
             out_features=out_features,
-            activation=ActConfig(kind="silu"),
+            activation=ActConfig(kind="gelu"),
             norm=NormConfig(kind="layer" if message_layer_norm else None, affine=True),
             regularization=RegConfig(dropout=0.0),
             init=InitConfig(mode="torch_default"),

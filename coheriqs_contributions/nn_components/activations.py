@@ -10,7 +10,7 @@ from .configs import ActConfig
 def build_activation(cfg: ActConfig) -> nn.Module:
     """Build an activation module from a small typed config."""
 
-    if cfg.kind == "identity":
+    if cfg.kind == "identity" or cfg.kind is None:
         return nn.Identity()
     if cfg.kind == "relu":
         return nn.ReLU(inplace=cfg.inplace)

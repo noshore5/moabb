@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
-ActivationKind = Literal["identity", "relu", "gelu", "silu", "elu", "tanh"]
+ActivationKind = Literal["identity", "relu", "gelu", "silu", "elu", "tanh"] | None
 InitMode = Literal[
     "torch_default",
     "auto",
@@ -60,7 +60,7 @@ class NormConfig:
 class ActConfig:
     """Activation factory settings."""
 
-    kind: ActivationKind = "gelu"
+    kind: ActivationKind = None
     inplace: bool = False
 
 
