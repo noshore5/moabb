@@ -138,16 +138,63 @@ def test_window_compute_modes_match_for_exact_windowed_config(use_mag: bool) -> 
 
     outputs = {}
     with torch.no_grad():
-        for mode in ["sequential", "chunked", "single_pass_windowed", "auto"]:
-            core.window_compute_mode = mode
-            core.max_windows_per_chunk = 2 if mode == "chunked" else None
+        for mode, max_windows_per_chunk in [
+            ("sequential", None),
+            ("chunked_cap_1", 1),
+            ("chunked_cap_2", 2),
+            ("chunked_cap_4", 4),
+            ("single_pass_windowed", None),
+            ("auto", None),
+        ]:
+            core.window_compute_mode = "chunked" if mode.startswith("chunked") else mode
+            core.max_windows_per_chunk = max_windows_per_chunk
             outputs[mode] = core(*batch_inputs)
 
     sequential_logits, sequential_density = outputs["sequential"]
-    for mode in ["chunked", "single_pass_windowed", "auto"]:
+    for mode in [
+        "chunked_cap_1",
+        "chunked_cap_2",
+        "chunked_cap_4",
+        "single_pass_windowed",
+        "auto",
+    ]:
         logits, density = outputs[mode]
         assert torch.allclose(logits, sequential_logits, rtol=1e-5, atol=1e-5)
         assert density == pytest.approx(sequential_density, abs=1e-7)
+
+
+@pytest.mark.parametrize("use_mag", [True, False])
+def test_chunked_caps_match_for_exact_windowed_config(use_mag: bool) -> None:
+    batch_inputs = _random_wct_batch(n_time=96)
+    core = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        coherence_threshold=0.0,
+        phase_threshold_deg=-180.0,
+        window_size=32,
+        use_mag=use_mag,
+        use_ang=True,
+        use_raw=True,
+        use_freq=True,
+        use_time=True,
+        model_init_seed=23,
+        window_compute_mode="chunked",
+    )
+    core.eval()
+
+    outputs = {}
+    with torch.no_grad():
+        for max_windows_per_chunk in [1, 2, 4]:
+            core.window_compute_mode = "chunked"
+            core.max_windows_per_chunk = max_windows_per_chunk
+            outputs[max_windows_per_chunk] = core(*batch_inputs)
+
+    reference_logits, reference_density = outputs[1]
+    for max_windows_per_chunk in [2, 4]:
+        logits, density = outputs[max_windows_per_chunk]
+        assert torch.allclose(logits, reference_logits, rtol=1e-5, atol=1e-5)
+        assert density == pytest.approx(reference_density, abs=1e-7)
 
 
 def test_single_pass_windowed_fallback_matches_chunked_for_shorter_kernel() -> None:

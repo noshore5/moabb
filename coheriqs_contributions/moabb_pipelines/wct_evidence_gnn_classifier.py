@@ -826,31 +826,59 @@ class WCTEvidenceGNNCore(nn.Module):
     ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
         batch_size = w_real.shape[0]
         num_edges = self.src_idx.numel()
-        chunks = []
+        if layout.n_windows == 0:
+            empty = w_real.new_empty(batch_size, num_edges, 0, self.nfreqs)
+            return empty if self.use_mag else None, empty, empty
+
+        mean_mag_out = (
+            w_real.new_empty(batch_size, num_edges, layout.n_windows, self.nfreqs)
+            if self.use_mag
+            else None
+        )
+        mean_phase_out = w_real.new_empty(
+            batch_size,
+            num_edges,
+            layout.n_windows,
+            self.nfreqs,
+        )
+        coh_out = w_real.new_empty(
+            batch_size,
+            num_edges,
+            layout.n_windows,
+            self.nfreqs,
+        )
+
         for first in range(0, layout.n_windows, max_windows_per_chunk):
             last = min(first + max_windows_per_chunk, layout.n_windows)
             chunk_starts = layout.starts[first:last]
             chunk_ends = layout.ends[first:last]
             chunk_size = last - first
-            window_slices = list(zip(chunk_starts, chunk_ends, strict=True))
+            if chunk_size == 1:
+                window_start = chunk_starts[0]
+                window_end = chunk_ends[0]
+                real_edges = w_real[:, self.edge_pair_idx, window_start:window_end, :]
+                imag_edges = w_imag[:, self.edge_pair_idx, window_start:window_end, :]
+                chunk_freqs = freqs
+            else:
+                window_slices = list(zip(chunk_starts, chunk_ends, strict=True))
+                real_edges = torch.cat(
+                    [
+                        w_real[:, self.edge_pair_idx, window_start:window_end, :]
+                        for window_start, window_end in window_slices
+                    ],
+                    dim=0,
+                )
+                imag_edges = torch.cat(
+                    [
+                        w_imag[:, self.edge_pair_idx, window_start:window_end, :]
+                        for window_start, window_end in window_slices
+                    ],
+                    dim=0,
+                )
+                chunk_freqs = freqs.repeat(chunk_size, 1)
 
-            real_edges = torch.cat(
-                [
-                    w_real[:, self.edge_pair_idx, window_start:window_end, :]
-                    for window_start, window_end in window_slices
-                ],
-                dim=0,
-            )
-            imag_edges = torch.cat(
-                [
-                    w_imag[:, self.edge_pair_idx, window_start:window_end, :]
-                    for window_start, window_end in window_slices
-                ],
-                dim=0,
-            )
             src_r, dst_r = real_edges.split(num_edges, dim=1)
             src_i, dst_i = imag_edges.split(num_edges, dim=1)
-            chunk_freqs = freqs.repeat(chunk_size, 1)
 
             mean_mag, mean_phase, coh = _compute_wct_window_features(
                 src_r,
@@ -862,39 +890,41 @@ class WCTEvidenceGNNCore(nn.Module):
                 padding_mode=self.padding_mode,
                 compute_mag=self.use_mag,
             )
-            chunk_mean_mag = (
-                None
-                if mean_mag is None
-                else mean_mag.reshape(chunk_size, batch_size, num_edges, self.nfreqs)
-                .permute(1, 2, 0, 3)
-            )
-            chunks.append(
-                (
-                    chunk_mean_mag,
-                    mean_phase.reshape(chunk_size, batch_size, num_edges, self.nfreqs)
-                    .permute(1, 2, 0, 3),
-                    coh.reshape(chunk_size, batch_size, num_edges, self.nfreqs)
-                    .permute(1, 2, 0, 3),
+
+            if chunk_size == 1:
+                chunk_mean_mag = None if mean_mag is None else mean_mag.unsqueeze(2)
+                chunk_mean_phase = mean_phase.unsqueeze(2)
+                chunk_coh = coh.unsqueeze(2)
+            else:
+                chunk_mean_mag = (
+                    None
+                    if mean_mag is None
+                    else mean_mag.reshape(chunk_size, batch_size, num_edges, self.nfreqs)
+                    .permute(1, 2, 0, 3)
                 )
-            )
+                chunk_mean_phase = mean_phase.reshape(
+                    chunk_size,
+                    batch_size,
+                    num_edges,
+                    self.nfreqs,
+                ).permute(1, 2, 0, 3)
+                chunk_coh = coh.reshape(
+                    chunk_size,
+                    batch_size,
+                    num_edges,
+                    self.nfreqs,
+                ).permute(1, 2, 0, 3)
 
-        if not chunks:
-            empty = w_real.new_empty(batch_size, num_edges, 0, self.nfreqs)
-            return empty if self.use_mag else None, empty, empty
+            if mean_mag_out is not None:
+                if chunk_mean_mag is None:
+                    raise RuntimeError(
+                        "Magnitude features were requested but not computed."
+                    )
+                mean_mag_out[:, :, first:last, :] = chunk_mean_mag
+            mean_phase_out[:, :, first:last, :] = chunk_mean_phase
+            coh_out[:, :, first:last, :] = chunk_coh
 
-        if len(chunks) == 1:
-            return chunks[0]
-
-        if self.use_mag:
-            mean_mag_chunks = [chunk[0] for chunk in chunks]
-            if any(chunk is None for chunk in mean_mag_chunks):
-                raise RuntimeError("Magnitude features were requested but not computed.")
-            mean_mag = torch.cat(mean_mag_chunks, dim=2)
-        else:
-            mean_mag = None
-        mean_phase = torch.cat([chunk[1] for chunk in chunks], dim=2)
-        coh = torch.cat([chunk[2] for chunk in chunks], dim=2)
-        return mean_mag, mean_phase, coh
+        return mean_mag_out, mean_phase_out, coh_out
 
     def _compute_wct_features_for_mode(
         self,
