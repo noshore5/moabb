@@ -12,8 +12,6 @@ import math
 import torch
 import torch.nn as nn
 
-from coheriqs_contributions.constructions.coherence_analysis import visualize_complex_points_and_mean
-
 try:
     from coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
         _BaseCWTGNNClassifier,
