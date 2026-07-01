@@ -451,22 +451,30 @@ class WCTEvidenceGNNCore(nn.Module):
                 )
             )
             if effective_mode == "single_pass_windowed":
-                smooth_time = max(n_time - self.smooth_kernel_size[0] + 1, 0)
-                positions = max(self.window_size - self.smooth_kernel_size[0] + 1, 0)
+                strided = self._single_pass_windowed_strided_supported()
+                smooth_time = (
+                    n_windows
+                    if strided
+                    else max(n_time - self.smooth_kernel_size[0] + 1, 0)
+                )
                 estimates.extend(
                     [
                         (
                             "smoothed_wct_maps",
                             (batch_size, num_edges, smooth_time, self.nfreqs),
                             4,
-                        ),
+                        )
+                    ]
+                )
+                if not strided:
+                    positions = max(self.window_size - self.smooth_kernel_size[0] + 1, 0)
+                    estimates.append(
                         (
                             "windowed_coh_cross_selection",
                             (batch_size, num_edges, n_windows, positions, self.nfreqs),
                             2,
-                        ),
-                    ]
-                )
+                        )
+                    )
             else:
                 estimates.extend(
                     [
@@ -570,6 +578,12 @@ class WCTEvidenceGNNCore(nn.Module):
             and self.smooth_kernel_size[0] <= self.window_size
         )
 
+    def _single_pass_windowed_strided_supported(self) -> bool:
+        return (
+            not self.padding_time_dim
+            and self.smooth_kernel_size[0] == self.window_size
+        )
+
     def _validate_single_pass_windowed_supported(self) -> None:
         if self._single_pass_windowed_supported():
             return
@@ -626,6 +640,8 @@ class WCTEvidenceGNNCore(nn.Module):
         auto1: torch.Tensor,
         auto2: torch.Tensor,
         smooth_kernel_and_pad: tuple[torch.Tensor, tuple[int, int, int, int]],
+        *,
+        stride: tuple[int, int] = (1, 1),
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         smooth_kernel, pad = smooth_kernel_and_pad
         batch_size, num_edges, n_time, nfreqs = xwt_real.shape
@@ -633,7 +649,7 @@ class WCTEvidenceGNNCore(nn.Module):
         maps = torch.stack([xwt_real, xwt_imag, auto1, auto2], dim=2)
         maps = maps.view(batch_size * num_edges * 4, 1, n_time, nfreqs)
         maps = torch.nn.functional.pad(maps, pad, mode=self.padding_mode)
-        smoothed = torch.nn.functional.conv2d(maps, smooth_kernel)
+        smoothed = torch.nn.functional.conv2d(maps, smooth_kernel, stride=stride)
         out_time, out_freq = smoothed.shape[-2:]
         smoothed = smoothed.view(batch_size, num_edges, 4, out_time, out_freq)
         smooth_cross = torch.complex(smoothed[:, :, 0], smoothed[:, :, 1])
@@ -665,6 +681,12 @@ class WCTEvidenceGNNCore(nn.Module):
         smooth_kernel_and_pad: tuple[torch.Tensor, tuple[int, int, int, int]],
     ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
         self._validate_single_pass_windowed_supported()
+        batch_size = w_real.shape[0]
+        num_edges = self.src_idx.numel()
+        if layout.n_windows == 0:
+            empty = w_real.new_empty(batch_size, num_edges, 0, self.nfreqs)
+            return empty if self.use_mag else None, empty, empty
+
         mag, xwt_real, xwt_imag, auto1, auto2 = self._full_edge_wct_maps(
             w_real,
             w_imag,
@@ -672,6 +694,22 @@ class WCTEvidenceGNNCore(nn.Module):
             compute_mag=self.use_mag,
         )
         mean_mag = self._window_mean(mag, layout) if mag is not None else None
+
+        if self._single_pass_windowed_strided_supported():
+            smooth_cross, coh, _ = self._smooth_wct_maps(
+                xwt_real,
+                xwt_imag,
+                auto1,
+                auto2,
+                smooth_kernel_and_pad,
+                stride=(self.window_size, 1),
+            )
+            if coh.shape[2] != layout.n_windows:
+                raise RuntimeError(
+                    "Strided single_pass_windowed produced "
+                    f"{coh.shape[2]} windows, expected {layout.n_windows}."
+                )
+            return mean_mag, torch.angle(smooth_cross), coh
 
         smooth_cross, coh_by_time, smooth_kernel = self._smooth_wct_maps(
             xwt_real,
@@ -688,9 +726,6 @@ class WCTEvidenceGNNCore(nn.Module):
             )
 
         batch_size, num_edges, _, nfreqs = coh_by_time.shape
-        if layout.n_windows == 0:
-            empty = coh_by_time.new_empty(batch_size, num_edges, 0, nfreqs)
-            return mean_mag, empty, empty
 
         starts = torch.tensor(layout.starts, device=coh_by_time.device)
         offsets = torch.arange(positions_per_window, device=coh_by_time.device)

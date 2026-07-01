@@ -150,6 +150,36 @@ def test_window_compute_modes_match_for_exact_windowed_config(use_mag: bool) -> 
         assert density == pytest.approx(sequential_density, abs=1e-7)
 
 
+def test_single_pass_windowed_fallback_matches_chunked_for_shorter_kernel() -> None:
+    batch_inputs = _random_wct_batch(n_time=96)
+    core = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        coherence_threshold=0.0,
+        phase_threshold_deg=-180.0,
+        window_size=32,
+        smooth_kernel_size=(9, 3),
+        use_mag=False,
+        use_ang=True,
+        use_raw=True,
+        use_freq=True,
+        use_time=True,
+        model_init_seed=23,
+        window_compute_mode="chunked",
+        max_windows_per_chunk=2,
+    )
+    core.eval()
+
+    with torch.no_grad():
+        chunked_logits, chunked_density = core(*batch_inputs)
+        core.window_compute_mode = "single_pass_windowed"
+        windowed_logits, windowed_density = core(*batch_inputs)
+
+    assert torch.allclose(windowed_logits, chunked_logits, rtol=1e-5, atol=1e-5)
+    assert windowed_density == pytest.approx(chunked_density, abs=1e-7)
+
+
 def test_wct_window_features_can_skip_magnitude_without_changing_phase_or_coh() -> None:
     generator = torch.Generator().manual_seed(31)
     src_r = torch.randn(2, 6, 16, 4, generator=generator)
