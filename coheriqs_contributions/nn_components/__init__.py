@@ -14,7 +14,7 @@ from .configs import (
     SeedConfig,
 )
 from .init import initialize_module, scoped_torch_init_seed
-from .norms import build_norm_1d, build_norm_2d, build_norm_dense
+from .norms import AxisNorm, build_norm_1d, build_norm_2d, build_norm_dense
 from .regularization import DropPath
 from .residual import ResidualWrapper
 from .seed import set_reproducible_seed
@@ -22,6 +22,7 @@ from .seed import set_reproducible_seed
 
 __all__ = [
     "ActConfig",
+    "AxisNorm",
     "Conv1dConfig",
     "Conv2dConfig",
     "DenseMLPConfig",

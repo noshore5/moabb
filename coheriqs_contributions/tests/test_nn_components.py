@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from coheriqs_contributions.nn_components import (
     ActConfig,
+    AxisNorm,
     Conv1dConfig,
     Conv2dConfig,
     DenseMLPConfig,
@@ -24,6 +25,15 @@ from coheriqs_contributions.nn_components import (
     scoped_torch_init_seed,
     set_reproducible_seed,
 )
+
+
+def _manual_axis_norm(
+    x: torch.Tensor,
+    reduce_dims: tuple[int, ...],
+    eps: float = 1e-5,
+) -> torch.Tensor:
+    var, mean = torch.var_mean(x, dim=reduce_dims, keepdim=True, correction=0)
+    return (x - mean) * torch.rsqrt(var + eps)
 
 
 def test_dense_mlp_residual_projection_shape() -> None:
@@ -93,6 +103,132 @@ def test_norm_factories_preserve_layouts() -> None:
     assert dense_norm(torch.randn(2, 5)).shape == (2, 5)
     assert norm1d(torch.randn(2, 4, 6)).shape == (2, 4, 6)
     assert norm2d(torch.randn(2, 3, 4, 5)).shape == (2, 3, 4, 5)
+
+
+def test_axis_norm_spectrogram_stats_and_running_eval() -> None:
+    x = torch.arange(4 * 3 * 5 * 2, dtype=torch.float32).reshape(4, 3, 5, 2)
+    x = x / 10.0
+    layer = AxisNorm(
+        num_dims=4,
+        reduce_dims=(0, 2),
+        dim_sizes={1: 3, 3: 2},
+        track_running_stats=True,
+    )
+
+    y = layer(x)
+
+    assert torch.allclose(
+        y.mean(dim=(0, 2), keepdim=True),
+        torch.zeros(1, 3, 1, 2),
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        y.var(dim=(0, 2), keepdim=True, correction=0),
+        torch.ones(1, 3, 1, 2),
+        atol=1e-4,
+    )
+    batch_var, batch_mean = torch.var_mean(
+        x,
+        dim=(0, 2),
+        keepdim=True,
+        correction=0,
+    )
+    assert torch.allclose(layer.running_mean, batch_mean * layer.momentum)
+    assert torch.allclose(
+        layer.running_var,
+        torch.ones_like(batch_var).lerp(batch_var, layer.momentum),
+    )
+
+    layer.eval()
+    x_eval = x + 1.0
+    expected_eval = (x_eval - layer.running_mean) * torch.rsqrt(
+        layer.running_var + layer.eps
+    )
+    assert torch.allclose(layer(x_eval), expected_eval)
+
+
+@pytest.mark.parametrize(
+    ("layer", "x", "reduce_dims"),
+    [
+        (
+            AxisNorm(
+                num_dims=4,
+                reduce_dims=(0, 2, 3),
+                stat_dims=(1,),
+                affine_dims=(1,),
+                dim_sizes={1: 3},
+            ),
+            torch.randn(2, 3, 4, 5),
+            (0, 2, 3),
+        ),
+        (
+            AxisNorm(
+                num_dims=4,
+                reduce_dims=(1, 2, 3),
+                stat_dims=(),
+                affine_dims=(1, 2, 3),
+                dim_sizes={1: 3, 2: 4, 3: 5},
+            ),
+            torch.randn(2, 3, 4, 5),
+            (1, 2, 3),
+        ),
+        (
+            AxisNorm(
+                num_dims=4,
+                reduce_dims=(2, 3),
+                stat_dims=(0, 1),
+                affine_dims=(1,),
+                dim_sizes={1: 3},
+            ),
+            torch.randn(2, 3, 4, 5),
+            (2, 3),
+        ),
+    ],
+    ids=["batch2d", "layer2d", "instance2d"],
+)
+def test_axis_norm_matches_manual_special_cases(
+    layer: AxisNorm,
+    x: torch.Tensor,
+    reduce_dims: tuple[int, ...],
+) -> None:
+    assert torch.allclose(layer(x), _manual_axis_norm(x, reduce_dims))
+
+
+def test_axis_norm_rejects_invalid_configs_and_shapes() -> None:
+    with pytest.raises(ValueError, match="batch_dim"):
+        AxisNorm(num_dims=4, reduce_dims=(1, 2, 3), track_running_stats=True)
+
+    with pytest.raises(ValueError, match="out of range"):
+        AxisNorm(num_dims=4, reduce_dims=(4,))
+
+    with pytest.raises(ValueError, match="unique"):
+        AxisNorm(num_dims=4, reduce_dims=(0, -4))
+
+    with pytest.raises(ValueError, match="dim_sizes"):
+        AxisNorm(num_dims=4, reduce_dims=(0, 2), affine_dims=(1,), dim_sizes={})
+
+    layer = AxisNorm(
+        num_dims=4,
+        reduce_dims=(0, 2),
+        dim_sizes={1: 3, 3: 2},
+        affine=False,
+    )
+    with pytest.raises(ValueError, match="dimension 3"):
+        layer(torch.randn(2, 3, 4, 5))
+
+
+def test_axis_norm_gradients_flow() -> None:
+    x = torch.randn(2, 3, 4, requires_grad=True)
+    layer = AxisNorm(num_dims=3, reduce_dims=(0, 2), dim_sizes={1: 3})
+
+    layer(x).square().mean().backward()
+
+    assert x.grad is not None
+    assert layer.weight is not None
+    assert layer.bias is not None
+    assert layer.weight.grad is not None
+    assert layer.bias.grad is not None
+    assert torch.isfinite(x.grad).all()
 
 
 def test_drop_path_train_eval_behavior() -> None:

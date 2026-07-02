@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from .configs import InitConfig
-from .norms import RMSNorm
+from .norms import AxisNorm, RMSNorm
 
 
 _ALLOWED_MODES = {
@@ -202,6 +202,7 @@ def _has_affine_norm_parameters(module: nn.Module) -> bool:
             nn.BatchNorm2d,
             nn.GroupNorm,
             nn.LayerNorm,
+            AxisNorm,
             RMSNorm,
         ),
     )
