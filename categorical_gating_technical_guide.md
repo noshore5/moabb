@@ -205,6 +205,83 @@ y = shortcut(x) + residual_scale * update
 
 Optional per-path `gamma_i` can be added later, but final selection should usually be based on `alpha`, not on raw `abs(gamma_i)`.
 
+### 4.1 Optimizing the selection logits
+
+`alpha` is a learnable parameter, but it must not be trained the same way as branch weights. Three rules matter.
+
+#### Do not let selection minimize training loss alone
+
+If `alpha` and branch weights are updated by the same training-loss gradient in the same step, the selector optimizes training fit. It will then prefer whichever branch drives training loss down fastest, usually the highest-capacity or loudest branch. That is memorization, not generalizable usefulness, and it directly contradicts the goal in section 4 of separating usefulness from scale.
+
+The established fix (DARTS-style bi-level optimization) trains weights on the training split and `alpha` on a held-out validation split, in alternating steps:
+
+```text
+step A: update branch weights on a training minibatch
+step B: update alpha on a validation minibatch
+```
+
+For parameterized branches (kernel selection, path selection, same-config seed selection), prefer validation-split updates for `alpha`. For parameter-free activation selection, joint training on the training loss is usually acceptable and simpler.
+
+#### Give `alpha` its own optimizer parameter group
+
+Selection logits usually need a different (often higher) learning rate than conv/linear weights so they can move within the search budget. Put `alpha` in a dedicated parameter group.
+
+#### Use zero weight decay on `alpha`
+
+Weight decay pulls parameters toward zero. Zero logits mean a uniform softmax, so weight-decayed logits are silently biased toward staying uncommitted or toward an arbitrary attractor. This corrupts the selection signal and is a common silent bug.
+
+```text
+alpha parameter group:
+    weight_decay = 0
+    separate (often larger) learning rate
+    trained on validation split for parameterized branches
+```
+
+#### Two independent settings
+
+These two behaviors should be toggleable separately, not bundled into one flag:
+
+```text
+alpha_update_split: "train" | "val"
+    "train": alpha is updated on the same training minibatch as weights
+    "val":   alpha is updated on a held-out validation minibatch (bi-level)
+
+alpha_optim: "shared" | "separate"
+    "shared":   alpha shares the main optimizer group
+    "separate": alpha is placed in its own optimizer group with
+                weight_decay = 0 and its own learning rate
+```
+
+Recommended defaults:
+
+```text
+parameter-free activation selection:
+    alpha_update_split = "train"
+    alpha_optim        = "separate"   (still keep zero weight decay)
+
+parameterized branch selection (kernel/path/seed):
+    alpha_update_split = "val"
+    alpha_optim        = "separate"
+```
+
+#### Responsibility split
+
+This is a shared contract, not one owner:
+
+```text
+component:
+    exposes alpha (selection_parameters()) so it can be isolated
+    declares the intended alpha_update_split and alpha_optim settings
+    does NOT own the data split or the optimizer
+
+trainer:
+    reads those settings
+    builds the separate optimizer group (zero weight decay) if requested
+    feeds validation minibatches for alpha if val-split is requested
+```
+
+A `nn.Module` cannot own a data split or an optimizer, so the trainer must enforce these. The component's job is only to expose `alpha` and carry the declared settings so the wiring is unambiguous for whoever builds the training loop.
+
 ---
 
 ## 5. Soft selection
@@ -384,6 +461,39 @@ output = hard_output with gradients from soft_output
 ```
 
 This requires computing all candidate outputs.
+
+#### Exact straight-through estimator
+
+Prose is not enough here; this is exactly where implementations introduce subtle bugs. Pin the estimator explicitly.
+
+```python
+# w_hard: one-hot weights [K] (selected branch = 1, else 0)
+# w_soft: softmax((alpha + g) / tau) [K], differentiable in alpha
+# both index the same K candidates in the same order
+w = w_hard + (w_soft - w_soft.detach())
+output = sum_i w[i] * candidate_i(x)
+```
+
+Why this works:
+
+```text
+forward:
+    (w_soft - w_soft.detach()) is numerically zero
+    so the forward value equals w_hard (true one-hot execution)
+
+backward:
+    w_hard is a constant, w_soft.detach() has no gradient
+    so gradient flows only through w_soft
+    every candidate receives gradient proportional to its soft weight
+```
+
+That soft gradient path is what keeps rarely-selected parameterized branches training.
+
+Correctness traps:
+
+- Do not add a second `detach()` around `w_hard` in a way that removes the straight-through path for the logits. The logits get their gradient through `w_soft`; `w_hard` is treated as a constant offset.
+- All `candidate_i(x)` must actually be evaluated, so `soft_all` is incompatible with lazy single-branch evaluation.
+- For `selected_only`, the forward is the same one-hot combination `sum_i w_hard[i] * candidate_i(x)`, and the straight-through `w_hard + (w_soft - w_soft.detach())` is applied to the gate weights so the logits still get a surrogate gradient, but non-selected branch parameters receive no gradient.
 
 #### Useful for
 
@@ -1366,6 +1476,47 @@ rare branches never improve:
     undertraining, need soft_all backward or exploration floor
 ```
 
+### Falsification criterion (optional, recommended)
+
+This is an optional evaluation practice, not required v1 module behavior. It is strongly recommended before trusting any selection result.
+
+Logging alone does not tell you whether the selector learned anything useful. The selector will always commit to something, even when candidates are statistically indistinguishable. Define the null explicitly and test it.
+
+A gate has not learned anything useful if the argmax-forced model's validation performance is within noise of both:
+
+```text
+- a randomly-frozen-index model
+- the single best hand-picked (frozen) candidate
+```
+
+Concretely, after search, evaluate each candidate frozen individually. If `argmax` is not reliably better than the best fixed candidate and better than a random fixed candidate, the gate added complexity for no gain. Simplify to a fixed choice or stop.
+
+This is especially important on small datasets, where the difference in validation loss between candidates is often within noise.
+
+### Seed-stability check (small-data / EEG regime) (optional, recommended)
+
+This is an optional evaluation practice, not required v1 module behavior. It is strongly recommended in the small-data / EEG regime.
+
+On small data (for example EEG with hundreds of trials, or MOABB cross-session / cross-subject splits), a single search run cannot distinguish a real inductive-bias preference from fitting noise.
+
+Run the search across several global seeds and/or folds and record the argmax index per selectable site.
+
+```text
+if the winning index is stable across seeds/folds:
+    the selection reflects a real preference
+
+if the winning index flips across seeds/folds:
+    the selector is fitting noise, do not report "the data prefers op X"
+```
+
+Useful summaries:
+
+- per-site selection agreement (fraction of seeds/folds choosing the modal index)
+- entropy of the argmax index distribution across seeds/folds
+- whether within-session winners disagree with cross-subject winners
+
+Only trust and report a selection that is stable across seeds and across the relevant MOABB split.
+
 ---
 
 ## 29. Recommended v1 components
@@ -1448,30 +1599,33 @@ Use for:
 
 ---
 
-### 29.5 `SelectPathResidual`
+### 29.5 Residual path selection (composition recipe, not a new component)
 
-Residual wrapper around selectable update paths.
+There is no dedicated `SelectPathResidual` component in v1. Residual path selection is expressed by composing the existing library `ResidualWrapper` around a `SelectPath`:
 
-Responsibilities:
+```python
+ResidualWrapper(branch=SelectPath([ZeroUpdate, ConvBlock, ...]), cfg=...)
+```
 
-- compute shortcut path
-- select or mix residual update path
-- add shortcut and update
-- support projection shortcut if shape changes
-- support residual scale
-- ensure zero-update semantics are correct
+`ResidualWrapper` already owns the shortcut (identity or projection), residual scale, `rezero`, `layer_scale`, `drop_path`, norm positions, and shape-mismatch checking. `SelectPath` only needs to select among same-output-shape update candidates, so a single shortcut/projection is sufficient.
 
-Conceptual formula:
+Conceptual formula (handled by `ResidualWrapper`):
 
 ```text
 same shape:
-    y = x + selected_update(x)
+    y = x + scale * SelectPath(x)
 
 shape-changing:
-    y = projection(x) + selected_update(x)
+    y = projection(x) + scale * SelectPath(x)
 ```
 
-The no-op candidate should be `ZeroUpdate`, not `Identity`.
+Rules:
+
+- the no-op candidate is `ZeroUpdate`, not `Identity` (if selected, `y = x`)
+- set `cfg.drop_path = 0` during search to avoid double stochasticity (see section 36.6)
+- do not reimplement residual logic; reuse `ResidualWrapper`
+
+Export is handled by the tree-walking exporter, which replaces the inner `SelectPath` with its `export()` result and leaves the surrounding `ResidualWrapper` intact (see section 36.5).
 
 ---
 
@@ -1487,7 +1641,9 @@ Suggested fields:
 num_choices
 mode
 temperature
-scope
+scope                 # "layer" | "channel"
+num_features          # required when scope="channel" (see section 36.4)
+channel_dim           # default 1 (conv); -1 for dense
 logits_init
 eval_mode
 exploration_epsilon
@@ -1495,6 +1651,8 @@ cost_weight
 entropy_weight
 gradient_mode
 frozen_index
+alpha_update_split    # "train" | "val"  (declared intent; trainer enforces)
+alpha_optim           # "shared" | "separate" (separate => own group, weight_decay=0)
 ```
 
 Keep defaults simple.
@@ -1502,6 +1660,10 @@ Keep defaults simple.
 Default mode can be `soft`.
 
 Default logits initialization should be uniform.
+
+`alpha_update_split` and `alpha_optim` are declared training settings, not
+things the module executes itself (see section 4.1). The module carries them so
+the trainer can build the correct optimizer groups and feed the correct split.
 
 ### `CategoricalGate`
 
@@ -1518,6 +1680,11 @@ set_temperature(value)
 
 freeze(index=None)
     switches to frozen/argmax behavior
+
+selection_parameters()
+    returns the alpha logits so the trainer can place them in a
+    separate optimizer group (zero weight decay, own learning rate;
+    see section 4.1)
 
 extra_loss(gate_info)
     optional entropy/cost helper if configured
@@ -1569,17 +1736,17 @@ optional branch output norm
 export selected path
 ```
 
-### `SelectPathResidual`
+### Residual path selection (composition, no new interface)
 
-Suggested behavior:
+Not a separate component. Compose the existing `ResidualWrapper` around a `SelectPath`:
 
 ```text
-shortcut = identity_or_projection(x)
-update = SelectPath(x)
-output = shortcut + residual_scale * update
+ResidualWrapper(branch=SelectPath([ZeroUpdate, ...]), cfg=...)
+
+output = shortcut(x) + residual_scale * SelectPath(x)
 ```
 
-Should require explicit projection if shape changes.
+`ResidualWrapper` provides the shortcut/projection, residual scale, and shape checks. No new class or config is introduced (see section 29.5).
 
 ---
 
@@ -1835,16 +2002,21 @@ Add:
 
 Require candidate outputs to be compatible.
 
-### Step 5: implement `SelectPathResidual`
+### Step 5: document residual path selection via composition
 
-Build a residual wrapper using `SelectPath`.
+Do not build a separate residual component. Residual path selection is the existing `ResidualWrapper` composed around a `SelectPath` (see sections 29.5 and 36.6):
+
+```python
+ResidualWrapper(branch=SelectPath([ZeroUpdate, ...]), cfg=...)
+```
 
 Rules:
 
-- shape match allows identity shortcut
-- shape change requires projection shortcut
+- shape match allows identity shortcut; shape change requires a projection shortcut
+  (both provided by `ResidualWrapper`)
 - no-op candidate is `ZeroUpdate`
-- residual scale is separate from selection logits
+- residual scale is `ResidualWrapper`'s job, separate from selection logits
+- set `cfg.drop_path = 0` during search
 
 ### Step 6: add logging helpers
 
@@ -1870,8 +2042,36 @@ Expected export behavior:
 ```text
 SelectableActivation -> selected activation
 SelectPath -> selected candidate path
-SelectPathResidual -> residual block with selected update
+ResidualWrapper(SelectPath) -> ResidualWrapper with the inner SelectPath replaced by its selected branch
 ```
+
+Allow manual frozen index for ablations.
+
+#### Export by extracting the selected submodule
+
+Export must produce an ordinary module that computes only the winning branch, not the supernet run in argmax mode (which keeps all K branches in memory and gives no efficiency win, defeating sections 27 and 32).
+
+Because candidates are stored as real registered `nn.Module`s (see the implementation contract in section 36), export does not need to rebuild a module from config or `load_state_dict`. The winning branch already exists as a trained submodule, so export just extracts it:
+
+```text
+SelectPath.export():
+    k* = argmax(alpha), or the frozen index
+    module = deepcopy(candidates[k*])
+    if a branch-output norm wrapped candidate k* during search:
+        include that same branch-norm (numeric fidelity)
+    drop the other candidates and the gate
+    return module
+```
+
+For a residual site (`ResidualWrapper(branch=SelectPath(...))`), a tree-walking exporter replaces the inner `SelectPath` with its `export()` result and leaves the surrounding `ResidualWrapper` (shortcut, residual scale, norms) intact. No residual reconstruction is needed.
+
+Weight transplantation is automatic because the returned module is the same trained object (deep-copied), not a re-initialized one.
+
+After export, re-estimate BatchNorm running statistics with a forward pass over training data before fine-tuning (search-time BN stats are stale; see sections 24 and 33).
+
+To support this, each selectable component must keep the branch-output norm paired with its branch (for example `SelectPath` holds `(branch, branch_norm)` pairs) so the extracted module stays numerically faithful.
+
+Add a test that the exported module reproduces the supernet's argmax-mode output on a fixed batch, within BatchNorm-stat tolerance.
 
 Allow manual frozen index for ablations.
 
@@ -1888,8 +2088,10 @@ Minimum tests:
 - hard modes produce one-hot forward weights
 - soft mode gives dense weights
 - `soft_all` backward can propagate gradients to non-selected candidates
+- `soft_all` forward value equals the one-hot (hard) execution, not the soft mixture
 - `selected_only` backward does not unexpectedly train non-selected branches
 - argmax/frozen can avoid computing unselected expensive candidates if lazy evaluation is implemented
+- exported module reproduces supernet argmax-mode output on a fixed batch, within BatchNorm-stat tolerance
 
 ### Step 9: document recommended training lifecycle
 
@@ -1916,8 +2118,10 @@ CategoricalGate
 CategoricalChoice
 SelectableActivation
 SelectPath
-SelectPathResidual
+ZeroUpdate
 ```
+
+Residual path selection is not a separate component; it is `ResidualWrapper(branch=SelectPath(...))` (see section 29.5).
 
 With:
 
@@ -1939,7 +2143,15 @@ exploration floor
 entropy logging
 optional cost loss
 branch output normalization
-export/freeze support
+export/freeze support (weight-transplanting)
+alpha exposure + declared alpha_update_split / alpha_optim settings
+```
+
+Optional but recommended evaluation practices (not required module behavior):
+
+```text
+falsification criterion (argmax vs best-fixed and random-fixed candidates)
+seed-stability check across seeds / MOABB folds
 ```
 
 Leave these for later:
@@ -1962,3 +2174,114 @@ The guiding principle:
 v1 should make local categorical choices easy, inspectable, and exportable.
 It should not try to become a full architecture-search framework.
 ```
+
+---
+
+## 36. Implementation contract
+
+This section pins the concrete decisions an agent must not guess. It resolves the ambiguities left open by the conceptual sections above. Where it conflicts with earlier prose, this section wins.
+
+### 36.1 File layout
+
+Follow the one-concept-per-file convention already used in `nn_components`.
+
+```text
+nn_components/selectable.py
+    all runtime logic and the GateInfo container:
+        ZeroUpdate
+        GateInfo
+        CategoricalGate
+        CategoricalChoice
+        SelectableActivation
+        SelectPath
+    (no SelectPathResidual: residual path selection is
+     ResidualWrapper(branch=SelectPath(...)); see section 29.5)
+
+nn_components/configs.py
+    all config dataclasses (consistent with existing configs living here):
+        CategoricalGateConfig
+        any SelectPathConfig
+
+nn_components/__init__.py
+    export the new public classes and configs
+```
+
+Config dataclasses go in `configs.py`, not in `selectable.py`, because every other config in the package lives there. `GateInfo` stays in `selectable.py` because it is a runtime return value, not a config.
+
+### 36.2 Candidate API
+
+Candidates are passed as callables (`nn.Module`s are callable).
+
+```text
+- candidates are registered in an nn.ModuleList so their parameters are
+  always tracked and checkpointed, even when not invoked on a given forward
+- invocation is lazy per mode:
+      soft, gumbel_soft, gumbel_hard(soft_all backward): call all candidates
+      argmax, frozen, gumbel_hard(selected_only backward): call only the selected candidate
+- registration is never lazy; only invocation is
+```
+
+This is what makes the exported/inference path compute a single branch while search-time dense modes compute all branches.
+
+### 36.3 `GateInfo` schema
+
+`CategoricalGate.forward` returns `(weights, GateInfo)`. `GateInfo` is a lightweight dataclass in `selectable.py` (not frozen, because it holds live tensors).
+
+```python
+@dataclass
+class GateInfo:
+    logits: Tensor                 # raw alpha, shape [*scope, K], differentiable
+    probs: Tensor                  # softmax(alpha), [*scope, K], differentiable
+    weights: Tensor                # combine weights used this forward, [*scope, K]
+    entropy: Tensor                # scalar, mean over scope, differentiable
+    temperature: float
+    mode: str                      # soft | gumbel_soft | gumbel_hard | argmax | frozen
+    gradient_mode: str | None      # selected_only | soft_all | None
+    selected_index: Tensor | None  # [*scope] for hard/argmax/frozen, else None
+    expected_cost: Tensor | None   # sum_i probs_i * cost_i, or None
+    exploration_epsilon: float | None
+```
+
+Rule: differentiable fields (`logits`, `probs`, `entropy`) stay attached so optional entropy/cost losses can use them. Logging code is responsible for detaching before recording.
+
+### 36.4 Scope and channel axis
+
+```text
+scope = "layer"
+    logits shape [K]
+    one choice for the whole tensor
+
+scope = "channel"
+    logits shape [num_features, K]
+    requires num_features
+    channel_dim default = 1   (Conv1d [B,C,T], Conv2d [B,C,H,W])
+    channel_dim = -1          (dense [B, ..., F])
+
+per-element scope
+    not in v1
+```
+
+For channel scope, the combine step reshapes per-channel weights to broadcast over all non-channel dims (for example `[C, K]` becomes a `[1, C, 1]` weight per candidate on `[B, C, T]`). Channel-scope candidates must preserve the channel dimension.
+
+### 36.5 Export
+
+Export extracts the selected submodule; it does not rebuild from config. See the export block in section 34, Step 7.
+
+```text
+SelectPath.export():
+    k* = argmax(alpha) or frozen index
+    return deepcopy(candidates[k*]) plus its branch-output norm if one was applied
+then re-estimate BatchNorm running stats over training data before fine-tuning
+```
+
+For a residual site, a tree-walking exporter replaces the inner `SelectPath` with `SelectPath.export()` and leaves the surrounding `ResidualWrapper` (shortcut, residual scale, norms) intact. No residual reconstruction is needed.
+
+Components must keep each branch paired with its branch-output norm (e.g. `SelectPath` holds `(branch, branch_norm)` pairs) so the extracted module stays numerically faithful.
+
+### 36.6 Composition with existing residual/regularization
+
+Residual path selection is composition, not a new component: `ResidualWrapper(branch=SelectPath(...))`. `ResidualWrapper` provides the shortcut/projection, residual scale, `rezero`, `layer_scale`, norm positions, and shape checks; `SelectPath` provides the update-candidate selection. Do not reimplement residual logic.
+
+Broader composition with `ResidualWrapper` and `DropPath` is left to the network composer; the selectable components do not enforce it.
+
+One caveat to document (not enforce): do not stack `drop_path` on a gated residual during search. Combining stochastic path-dropping with stochastic Gumbel selection is double stochasticity that can destabilize the selector. Set `cfg.drop_path = 0` on a `ResidualWrapper` wrapping a `SelectPath` during search.
