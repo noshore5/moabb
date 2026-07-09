@@ -1,4 +1,14 @@
-"""Categorical gates and selectable neural-network components."""
+"""Categorical gates and selectable neural-network components.
+
+Selectable components are search-time supernet modules: they keep all
+candidate branches plus a gate. After training/search, evaluate or freeze the
+chosen gates, then call :func:`export_selectable_modules` to deep-copy the
+model and replace selectable modules with ordinary selected branches. Export is
+not the same as ``eval()``: ``eval()`` only changes runtime mode, while export
+changes the module structure and the resulting ``state_dict`` layout. If the
+exported model contains BatchNorm or other stateful layers, recalibrate those
+statistics or fine-tune before saving the inference artifact.
+"""
 
 from __future__ import annotations
 
@@ -61,13 +71,7 @@ class CategoricalGate(nn.Module):
         self.alpha_update_split = cfg.alpha_update_split
         self.alpha_optim = cfg.alpha_optim
 
-        if self.scope == "layer":
-            shape = (self.num_choices,)
-        else:
-            if self.num_features is None:
-                raise ValueError("num_features is required when scope='channel'.")
-            shape = (self.num_features, self.num_choices)
-        self.logits = nn.Parameter(torch.full(shape, float(cfg.logits_init)))
+        self.logits = nn.Parameter(_init_logits(cfg))
 
     def forward(
         self,
@@ -303,6 +307,19 @@ class CategoricalChoice(nn.Module):
             gate_info = self.last_gate_info
         return self.gate.extra_loss(gate_info)
 
+    def export(self) -> nn.Module:
+        """Deep-copy the selected trained candidate without reinitializing it."""
+
+        index = self.gate.export_index()
+        candidate = self.candidates[index]
+        exported = (
+            candidate.export()
+            if hasattr(candidate, "export")
+            else deepcopy(candidate)
+        )
+        _replace_selectable_children(exported)
+        return exported
+
     def _should_compute_all(self, gate_info: GateInfo) -> bool:
         if gate_info.mode in {"soft", "gumbel_soft"}:
             return True
@@ -396,8 +413,9 @@ class SelectableActivation(nn.Module):
         return output
 
     def export(self) -> nn.Module:
-        index = self.choice.gate.export_index()
-        return deepcopy(self.choice.candidates[index])
+        """Deep-copy the selected activation without reinitializing weights."""
+
+        return self.choice.export()
 
     def selection_parameters(self) -> tuple[nn.Parameter, ...]:
         return self.choice.selection_parameters()
@@ -447,8 +465,9 @@ class SelectPath(nn.Module):
             cfg.candidate_costs if cfg is not None else None
         )
 
-        norms = _normalize_branch_norms(
+        norms = _resolve_branch_norms(
             branch_norms,
+            cfg,
             len(path_candidates),
             include_zero=include_zero,
         )
@@ -480,11 +499,9 @@ class SelectPath(nn.Module):
         return output
 
     def export(self) -> nn.Module:
-        index = self.choice.gate.export_index()
-        candidate = self.choice.candidates[index]
-        if not isinstance(candidate, _PathCandidate):
-            return deepcopy(candidate)
-        return candidate.export()
+        """Deep-copy the selected path and its paired branch norm if present."""
+
+        return self.choice.export()
 
     def selection_parameters(self) -> tuple[nn.Parameter, ...]:
         return self.choice.selection_parameters()
@@ -508,9 +525,18 @@ class SelectPath(nn.Module):
 
 
 def export_selectable_modules(module: nn.Module) -> nn.Module:
-    """Deep-copy a module tree and replace selectable components with exports."""
+    """Deep-copy a module tree and replace selectable components.
 
-    if isinstance(module, (SelectPath, SelectableActivation)):
+    The exported copy contains ordinary selected branches, not gates plus
+    dormant candidates. This is the structural deployment step after search;
+    calling ``eval()`` alone can make gate decisions deterministic but still
+    keeps every candidate and gate parameter in the model. Because export
+    removes unselected modules, the supernet and exported ``state_dict`` layouts
+    are intentionally different. Keep a separate search checkpoint when audit,
+    continued search, or alternate frozen choices matter.
+    """
+
+    if isinstance(module, (CategoricalChoice, SelectPath, SelectableActivation)):
         exported_root = module.export()
         _replace_selectable_children(exported_root)
         return exported_root
@@ -538,9 +564,33 @@ class _PathCandidate(nn.Module):
         return nn.Sequential(branch, deepcopy(self.norm))
 
 
+class _BranchOutputNorm(nn.Module):
+    def __init__(self, kind: str, *, eps: float = 1e-5) -> None:
+        super().__init__()
+        if kind not in {"rms", "layer"}:
+            raise ValueError("kind must be 'rms' or 'layer'.")
+        if float(eps) <= 0.0:
+            raise ValueError("eps must be positive.")
+        self.kind = kind
+        self.eps = float(eps)
+
+    def forward(self, x: Tensor) -> Tensor:
+        if x.ndim < 2:
+            raise ValueError("branch output normalization expects rank >= 2.")
+        reduce_dims = tuple(range(1, x.ndim))
+        if self.kind == "rms":
+            scale = torch.rsqrt(x.pow(2).mean(dim=reduce_dims, keepdim=True) + self.eps)
+            return x * scale
+        var, mean = torch.var_mean(x, dim=reduce_dims, keepdim=True, correction=0)
+        return (x - mean) * torch.rsqrt(var + self.eps)
+
+    def extra_repr(self) -> str:
+        return f"kind={self.kind!r}, eps={self.eps}"
+
+
 def _replace_selectable_children(module: nn.Module) -> None:
     for name, child in list(module.named_children()):
-        if isinstance(child, (SelectPath, SelectableActivation)):
+        if isinstance(child, (CategoricalChoice, SelectPath, SelectableActivation)):
             replacement = child.export()
             _replace_selectable_children(replacement)
             setattr(module, name, replacement)
@@ -567,6 +617,35 @@ def _make_gate(
             "candidates were provided."
         )
     return CategoricalGate(gate)
+
+
+def _init_logits(cfg: CategoricalGateConfig) -> Tensor:
+    shape = _logit_shape(cfg)
+    if isinstance(cfg.logits_init, (int, float)):
+        return torch.full(shape, float(cfg.logits_init), dtype=torch.float32)
+
+    try:
+        values = torch.tensor(cfg.logits_init, dtype=torch.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "logits_init must be a scalar or a tuple matching the gate shape."
+        ) from exc
+
+    if tuple(values.shape) == shape:
+        return values.clone()
+    if tuple(values.shape) == (int(cfg.num_choices),) and cfg.scope == "channel":
+        return values.expand(shape).clone()
+    raise ValueError(
+        f"logits_init has shape {tuple(values.shape)}, expected {shape}."
+    )
+
+
+def _logit_shape(cfg: CategoricalGateConfig) -> tuple[int, ...]:
+    if cfg.scope == "layer":
+        return (int(cfg.num_choices),)
+    if cfg.num_features is None:
+        raise ValueError("channel scope requires num_features.")
+    return (int(cfg.num_features), int(cfg.num_choices))
 
 
 def _make_activation(candidate: str | ActConfig | nn.Module) -> nn.Module:
@@ -630,23 +709,32 @@ def _normalize_dim(dim: int, ndim: int) -> int:
     return dim % ndim
 
 
-def _normalize_branch_norms(
+def _resolve_branch_norms(
     branch_norms: Sequence[nn.Module | None] | None,
+    cfg: SelectPathConfig | None,
     num_candidates_without_zero: int,
     *,
     include_zero: bool,
 ) -> list[nn.Module | None]:
     final_count = num_candidates_without_zero + int(include_zero)
-    if branch_norms is None:
+    if branch_norms is not None:
+        norms = list(branch_norms)
+        if include_zero and len(norms) == num_candidates_without_zero:
+            norms = [None, *norms]
+        if len(norms) != final_count:
+            raise ValueError(
+                f"branch_norms must have {final_count} entries, got {len(norms)}."
+            )
+        return norms
+
+    if cfg is None or cfg.branch_norm == "none":
         return [None] * final_count
-    norms = list(branch_norms)
-    if include_zero and len(norms) == num_candidates_without_zero:
-        norms = [None, *norms]
-    if len(norms) != final_count:
-        raise ValueError(
-            f"branch_norms must have {final_count} entries, got {len(norms)}."
-        )
-    return norms
+    if cfg.branch_norm not in {"rms", "layer"}:
+        raise ValueError("branch_norm must be 'none', 'rms', or 'layer'.")
+    return [
+        _BranchOutputNorm(cfg.branch_norm, eps=cfg.branch_norm_eps)
+        for _ in range(final_count)
+    ]
 
 
 def _prepend_zero_cost(

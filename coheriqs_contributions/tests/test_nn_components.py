@@ -7,6 +7,7 @@ import torch.nn as nn
 from coheriqs_contributions.nn_components import (
     ActConfig,
     AxisNorm,
+    CategoricalChoice,
     CategoricalGate,
     CategoricalGateConfig,
     Conv1dConfig,
@@ -19,6 +20,7 @@ from coheriqs_contributions.nn_components import (
     ResidualConfig,
     ResidualWrapper,
     SelectPath,
+    SelectPathConfig,
     SelectableActivation,
     SeedConfig,
     ZeroUpdate,
@@ -66,6 +68,19 @@ class _CountingAdd(nn.Module):
 class _TrimLast(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x[..., :-1]
+
+
+class _ChoiceContainer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.choice = CategoricalChoice(
+            [_CountingAdd(1.0), _CountingAdd(2.0)],
+            CategoricalGateConfig(num_choices=2, mode="frozen", frozen_index=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        result = self.choice(x)
+        return result[0] if isinstance(result, tuple) else result
 
 
 def test_dense_mlp_residual_projection_shape() -> None:
@@ -318,6 +333,43 @@ def test_categorical_gate_eval_mode_is_deterministic_argmax() -> None:
     assert second_info.selected_index.item() == 1
 
 
+def test_categorical_gate_tuple_logits_init_selects_expected_argmax() -> None:
+    gate = CategoricalGate(
+        CategoricalGateConfig(
+            num_choices=3,
+            mode="argmax",
+            eval_mode="same",
+            logits_init=(0.0, 2.0, 1.0),
+        )
+    )
+
+    weights, info = gate()
+
+    assert info.selected_index is not None
+    assert info.selected_index.item() == 1
+    assert torch.equal(weights, torch.tensor([0.0, 1.0, 0.0], dtype=weights.dtype))
+
+
+def test_channel_scope_logits_init_tuple_broadcasts_to_features() -> None:
+    gate = CategoricalGate(
+        CategoricalGateConfig(
+            num_choices=2,
+            scope="channel",
+            num_features=3,
+            logits_init=(0.0, 1.0),
+        )
+    )
+
+    expected = torch.tensor([[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]])
+
+    assert torch.equal(gate.logits, expected)
+
+
+def test_invalid_logits_init_shape_raises_clear_error() -> None:
+    with pytest.raises(ValueError, match="logits_init has shape"):
+        CategoricalGate(CategoricalGateConfig(num_choices=3, logits_init=(0.0, 1.0)))
+
+
 def test_selectable_activation_layer_scope_exports_selected_activation() -> None:
     activation = SelectableActivation(
         ("identity", "relu"),
@@ -327,6 +379,21 @@ def test_selectable_activation_layer_scope_exports_selected_activation() -> None
 
     assert torch.equal(activation(x), torch.tensor([0.0, 2.0]))
     assert torch.equal(activation.export()(x), torch.tensor([0.0, 2.0]))
+
+
+def test_categorical_choice_export_matches_selected_candidate() -> None:
+    choice = CategoricalChoice(
+        [_CountingAdd(1.0), _CountingAdd(2.0)],
+        CategoricalGateConfig(num_choices=2, mode="frozen", frozen_index=1),
+    )
+    x = torch.ones(2, 3)
+
+    y, info = choice(x)
+    exported = choice.export()
+
+    assert info.selected_index is not None
+    assert not isinstance(exported, CategoricalChoice)
+    assert torch.equal(exported(x), y)
 
 
 def test_select_path_argmax_is_lazy_and_export_matches_argmax() -> None:
@@ -357,6 +424,36 @@ def test_select_path_shape_mismatch_raises_clear_error() -> None:
 
     with pytest.raises(ValueError, match="candidate outputs"):
         path(torch.randn(2, 3, 4))
+
+
+def test_select_path_config_branch_norm_exports_with_selected_branch() -> None:
+    path = SelectPath(
+        [_Scale(2.0)],
+        CategoricalGateConfig(num_choices=1, mode="frozen", frozen_index=0),
+        cfg=SelectPathConfig(branch_norm="rms"),
+    )
+    x = torch.ones(2, 3)
+
+    y = path(x)
+    exported = path.export()
+
+    assert not torch.allclose(y, x * 2.0)
+    assert torch.allclose(exported(x), y)
+
+
+def test_select_path_explicit_branch_norms_still_work_with_zero_update() -> None:
+    path = SelectPath(
+        [_Scale(2.0)],
+        CategoricalGateConfig(num_choices=2, mode="frozen", frozen_index=1),
+        branch_norms=[nn.LayerNorm(3, elementwise_affine=False)],
+        include_zero_update=True,
+    )
+    x = torch.tensor([[1.0, 2.0, 3.0]])
+
+    y = path(x)
+
+    assert torch.allclose(path.export()(x), y)
+    assert not torch.allclose(y, x * 2.0)
 
 
 def test_hard_gumbel_soft_all_forward_is_hard_but_trains_all_branches() -> None:
@@ -456,6 +553,19 @@ def test_export_selectable_modules_replaces_residual_inner_select_path() -> None
     assert isinstance(exported, ResidualWrapper)
     assert not isinstance(exported.branch, SelectPath)
     assert torch.equal(exported(torch.ones(2, 3)), torch.ones(2, 3) * 4.0)
+
+
+def test_export_selectable_modules_replaces_nested_categorical_choice() -> None:
+    container = _ChoiceContainer()
+
+    exported = export_selectable_modules(container)
+
+    assert isinstance(container.choice, CategoricalChoice)
+    assert not isinstance(exported.choice, CategoricalChoice)
+    assert torch.equal(
+        exported(torch.ones(2, 3)),
+        container(torch.ones(2, 3)),
+    )
 
 
 def test_zero_last_initialization_zeros_final_projection() -> None:

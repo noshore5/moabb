@@ -13,6 +13,8 @@ GateGradientMode = Literal["selected_only", "soft_all"]
 GateEvalMode = Literal["same", "argmax", "frozen"]
 AlphaUpdateSplit = Literal["train", "val"]
 AlphaOptim = Literal["shared", "separate"]
+LogitsInit = float | tuple[float, ...] | tuple[tuple[float, ...], ...]
+BranchOutputNormKind = Literal["none", "rms", "layer"]
 InitMode = Literal[
     "torch_default",
     "auto",
@@ -104,7 +106,7 @@ class CategoricalGateConfig:
     scope: GateScope = "layer"
     num_features: int | None = None
     channel_dim: int = 1
-    logits_init: float = 0.0
+    logits_init: LogitsInit = 0.0
     eval_mode: GateEvalMode = "argmax"
     exploration_epsilon: float | None = None
     cost_weight: float = 0.0
@@ -121,6 +123,8 @@ class SelectPathConfig:
 
     include_zero_update: bool = False
     candidate_costs: tuple[float, ...] | None = None
+    branch_norm: BranchOutputNormKind = "none"
+    branch_norm_eps: float = 1e-5
 
 
 @dataclass(frozen=True)
