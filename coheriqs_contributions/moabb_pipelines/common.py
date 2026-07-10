@@ -1259,6 +1259,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             int(self.batch_size),
             float(self.last_batch_min_ratio),
         )
+        eligible_train_batches = _count_eligible_tensor_batches(
+            train_loader, min_batch_size
+        )
         train_selector_specs = _filter_selector_specs(
             selector_specs,
             alpha_update_split="train",
@@ -1279,9 +1282,16 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             alpha_update_split="val",
         )
         alpha_val_iter = iter(val_loader) if use_val_alpha_updates else None
+        train_batch_suffix = ""
+        if eligible_train_batches < len(train_loader):
+            train_batch_suffix = (
+                f" ({len(train_loader) - eligible_train_batches} loader batch(s) "
+                f"skipped by last_batch_min_ratio)"
+            )
         self._vprint(
             1,
-            f"[Train] start epochs={self.epochs} batches/epoch={len(train_loader)} "
+            f"[Train] start epochs={self.epochs} "
+            f"batches/epoch={eligible_train_batches}{train_batch_suffix} "
             f"batch_size={self.batch_size} device={self.device_}",
         )
         prev_loss = None
@@ -1311,7 +1321,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 val_alpha_specs
             )
 
-            for step_idx, batch in enumerate(train_loader, start=1):
+            for batch in train_loader:
                 if not _batch_meets_min_size(batch, min_batch_size):
                     continue
                 *batch_inputs, batch_y = batch
@@ -1383,7 +1393,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     self._vprint(
                         2,
                         f"[Train][Epoch {epoch + 1}/{self.epochs}] "
-                        f"step={step_idx}/{len(train_loader)} "
+                        f"step={n_batches}/{eligible_train_batches} "
                         f"loss={float(loss.item()):.6f} "
                         f"running_loss={running_loss:.6f} "
                         f"running_acc={running_acc:.4f} "
