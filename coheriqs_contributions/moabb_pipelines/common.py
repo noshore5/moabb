@@ -466,26 +466,28 @@ def torch_parameter_hashes(
     model: nn.Module,
     *,
     precision: float = 1e-6,
-) -> tuple[dict[str, str], str]:
-    """Return tolerance-aware hashes for model parameters and the full model."""
+) -> tuple[dict[str, str], str, str]:
+    """Return tolerance-aware parameter hashes and value/name model hashes."""
 
     if not np.isfinite(precision) or precision <= 0:
         raise ValueError("precision must be a finite positive number.")
 
     parameter_hashes = {}
-    model_hasher = hashlib.blake2b(digest_size=16)
+    value_model_hasher = hashlib.blake2b(digest_size=16)
+    named_model_hasher = hashlib.blake2b(digest_size=16)
     for name, param in model.named_parameters():
         param_hasher = hashlib.blake2b(digest_size=16)
-        metadata = f"{name}|{tuple(param.shape)}|{param.dtype}|{precision:.17g}"
+        metadata = f"{tuple(param.shape)}|{param.dtype}|{precision:.17g}"
         param_hasher.update(metadata.encode("utf-8"))
         param_hasher.update(_quantized_parameter_bytes(param, precision))
         digest = param_hasher.hexdigest()
         parameter_hashes[name] = digest
-        model_hasher.update(name.encode("utf-8"))
-        model_hasher.update(b"\0")
-        model_hasher.update(bytes.fromhex(digest))
+        value_model_hasher.update(bytes.fromhex(digest))
+        named_model_hasher.update(name.encode("utf-8"))
+        named_model_hasher.update(b"\0")
+        named_model_hasher.update(bytes.fromhex(digest))
 
-    return parameter_hashes, model_hasher.hexdigest()
+    return parameter_hashes, value_model_hasher.hexdigest(), named_model_hasher.hexdigest()
 
 
 def print_torch_parameter_hashes(
@@ -496,7 +498,7 @@ def print_torch_parameter_hashes(
 ) -> None:
     """Print reproducible per-parameter and global model fingerprints."""
 
-    parameter_hashes, model_hash = torch_parameter_hashes(
+    parameter_hashes, value_model_hash, named_model_hash = torch_parameter_hashes(
         model,
         precision=precision,
     )
@@ -506,8 +508,9 @@ def print_torch_parameter_hashes(
         flush=True,
     )
     for name, digest in parameter_hashes.items():
-        print(f"[{header}] {name}: hash={digest}", flush=True)
-    print(f"[{header}] model_hash={model_hash}", flush=True)
+        print(f"[{header}] {name}: weight_hash={digest}", flush=True)
+    print(f"[{header}] weight_model_hash={value_model_hash}", flush=True)
+    print(f"[{header}] named_model_hash={named_model_hash}", flush=True)
 
 
 def print_torch_custom_model_summary(

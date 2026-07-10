@@ -831,6 +831,31 @@ def test_select_message_mlp_duplicate_explicit_seed_reuses_initialization() -> N
     _assert_parameters_equal(branches[0], branches[1])
 
 
+def test_parameter_hashes_are_value_based_for_duplicate_selectable_candidates() -> None:
+    core = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        message_dim=5,
+        model_init_seed=23,
+        message_init_seed=29,
+        select_message_mlp=[
+            {"init_seed": 101},
+            {"init_seed": 101},
+        ],
+    )
+
+    hashes, _, _ = torch_parameter_hashes(core)
+
+    for suffix in ["1.weight", "1.bias", "4.weight", "4.bias"]:
+        first_name = f"message_mlp.choice.candidates.0.branch.{suffix}"
+        second_name = f"message_mlp.choice.candidates.1.branch.{suffix}"
+        assert (
+            hashes[first_name]
+            == hashes[second_name]
+        )
+
+
 def test_select_message_mlp_missing_seeds_consume_message_seed_stream() -> None:
     without_explicit = WCTEvidenceGNNCore(
         n_channels=3,
@@ -1317,21 +1342,35 @@ def test_parameter_hashes_track_reproducible_initialization(capsys) -> None:
     first = WCTEvidenceGNNCore(3, 4, 2, model_init_seed=23)
     second = WCTEvidenceGNNCore(3, 4, 2, model_init_seed=23)
 
-    first_hashes, first_model_hash = torch_parameter_hashes(first)
-    second_hashes, second_model_hash = torch_parameter_hashes(second)
+    first_hashes, first_weight_model_hash, first_named_model_hash = torch_parameter_hashes(
+        first
+    )
+    (
+        second_hashes,
+        second_weight_model_hash,
+        second_named_model_hash,
+    ) = torch_parameter_hashes(second)
     assert first_hashes == second_hashes
-    assert first_model_hash == second_model_hash
+    assert first_weight_model_hash == second_weight_model_hash
+    assert first_named_model_hash == second_named_model_hash
 
     with torch.no_grad():
         next(second.parameters()).view(-1)[0].add_(1e-4)
-    changed_hashes, changed_model_hash = torch_parameter_hashes(second)
+    (
+        changed_hashes,
+        changed_weight_model_hash,
+        changed_named_model_hash,
+    ) = torch_parameter_hashes(second)
     assert changed_hashes != first_hashes
-    assert changed_model_hash != first_model_hash
+    assert changed_weight_model_hash != first_weight_model_hash
+    assert changed_named_model_hash != first_named_model_hash
 
     print_torch_parameter_hashes(first, header="HashTest")
     output = capsys.readouterr().out
     assert all(name in output for name in first_hashes)
-    assert f"model_hash={first_model_hash}" in output
+    assert "weight_hash=" in output
+    assert f"weight_model_hash={first_weight_model_hash}" in output
+    assert f"named_model_hash={first_named_model_hash}" in output
 
 
 def _assert_parameters_equal(first: nn.Module, second: nn.Module) -> None:
