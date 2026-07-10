@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 from sklearn.model_selection import ParameterGrid
+from torch.utils.data import DataLoader, TensorDataset
 
 from coheriqs_contributions.moabb_pipelines.common import (
+    TorchEEGClassifier,
+    _collect_selector_training_specs,
+    _selector_extra_loss,
+    _selector_gate_modules,
+    _selector_params,
     augment_paired_cwt_batch,
     print_torch_custom_model_summary,
     print_torch_parameter_hashes,
@@ -19,10 +26,135 @@ from coheriqs_contributions.moabb_pipelines.wct_evidence_gnn_classifier import (
     WCTEvidenceGNNClassifier,
     WCTEvidenceGNNCore,
 )
+from coheriqs_contributions.nn_components import CategoricalGateConfig, SelectPath
 
 
 def _linear_layers(module: nn.Module) -> list[nn.Linear]:
     return [m for m in module.modules() if isinstance(m, nn.Linear)]
+
+
+def _select_path_branches(path: SelectPath) -> list[nn.Module]:
+    return [candidate.branch for candidate in path.choice.candidates]
+
+
+class _ToySelectorModel(nn.Module):
+    def __init__(
+        self,
+        *,
+        n_classes: int,
+        selector_mode: str,
+        gate_mode: str,
+        eval_mode: str = "same",
+        entropy_weight: float = 0.0,
+        frozen_index: int | None = None,
+    ) -> None:
+        super().__init__()
+        alpha_optim = "shared" if selector_mode == "shared_train" else "separate"
+        alpha_update_split = "val" if selector_mode == "separate_val" else "train"
+        gate = CategoricalGateConfig(
+            num_choices=2,
+            mode=gate_mode,
+            eval_mode=eval_mode,
+            entropy_weight=entropy_weight,
+            frozen_index=frozen_index,
+            alpha_optim=alpha_optim,
+            alpha_update_split=alpha_update_split,
+        )
+        self.selector = SelectPath(
+            [
+                nn.Linear(2, n_classes),
+                nn.Sequential(nn.Linear(2, 3), nn.GELU(), nn.Linear(3, n_classes)),
+            ],
+            gate,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.selector(x)
+
+
+class _ToySelectorEstimator(TorchEEGClassifier):
+    def __init__(
+        self,
+        *,
+        selector_mode: str = "separate_train",
+        gate_mode: str = "soft",
+        eval_mode: str = "same",
+        entropy_weight: float = 0.0,
+        frozen_index: int | None = None,
+        epochs: int = 1,
+        batch_size: int = 2,
+        learning_rate: float = 0.01,
+        weight_decay: float = 0.0,
+        validation_split: float | None = 0.5,
+        seed: int | None = 7,
+        last_batch_min_ratio: float = 0.0,
+        selector_alpha_val_update_rate: float = 1.0,
+        verbose: int = 0,
+    ) -> None:
+        self.selector_mode = selector_mode
+        self.gate_mode = gate_mode
+        self.eval_mode = eval_mode
+        self.entropy_weight = entropy_weight
+        self.frozen_index = frozen_index
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.validation_split = validation_split
+        self.seed = seed
+        self.last_batch_min_ratio = last_batch_min_ratio
+        self.selector_alpha_val_update_rate = selector_alpha_val_update_rate
+        self.verbose = verbose
+        self._init_torch_classifier(
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            validation_split=validation_split,
+            seed=seed,
+            last_batch_min_ratio=last_batch_min_ratio,
+            selector_alpha_val_update_rate=selector_alpha_val_update_rate,
+            use_class_weights=False,
+            verbose=verbose,
+            device="cpu",
+        )
+
+    def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):
+        del fit, train_idx
+        return X.reshape(X.shape[0], -1).astype(np.float32)
+
+    def _build_model_from_features(self, features, n_classes: int, **kwargs) -> nn.Module:
+        del features, kwargs
+        return _ToySelectorModel(
+            n_classes=n_classes,
+            selector_mode=self.selector_mode,
+            gate_mode=self.gate_mode,
+            eval_mode=self.eval_mode,
+            entropy_weight=self.entropy_weight,
+            frozen_index=self.frozen_index,
+        )
+
+
+def _toy_eeg_data() -> tuple[np.ndarray, np.ndarray]:
+    X = np.array(
+        [
+            [[-1.0, -0.5]],
+            [[1.0, 0.5]],
+            [[-0.8, -0.6]],
+            [[0.8, 0.6]],
+            [[-0.6, -1.0]],
+            [[0.6, 1.0]],
+            [[-1.2, -0.4]],
+            [[1.2, 0.4]],
+        ],
+        dtype=np.float32,
+    )
+    y = np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.int64)
+    return X, y
+
+
+def _selector_num_forwards(history: list[list[dict[str, object]]]) -> int:
+    return int(history[0][0]["num_forwards"])
 
 
 def _random_wct_batch(
@@ -82,6 +214,8 @@ def test_component_controls_are_sklearn_parameter_grid_friendly() -> None:
     estimator = WCTEvidenceGNNClassifier()
 
     assert estimator.get_params()["component_profile"] == "legacy"
+    assert estimator.get_params()["last_batch_min_ratio"] == 0.0
+    assert estimator.get_params()["selector_alpha_val_update_rate"] == 1.0
     estimator.set_params(message_layer_norm=True)
     assert estimator.message_layer_norm is True
 
@@ -90,6 +224,75 @@ def test_component_controls_are_sklearn_parameter_grid_friendly() -> None:
         {"message_layer_norm": False},
         {"message_layer_norm": True},
     ]
+
+
+def test_select_message_mlp_controls_are_grid_friendly_and_build_select_path() -> None:
+    estimator = WCTEvidenceGNNClassifier(seed=23, hidden_dim=7, message_dim=5)
+    params = next(
+        iter(
+            ParameterGrid(
+                {
+                    "select_message_mlp": [
+                        [
+                            {"init_seed": 101},
+                            {
+                                "init_seed": 202,
+                                "message_dim": 6,
+                                "message_layer_norm": True,
+                            },
+                        ]
+                    ],
+                    "select_message_mlp_gate": [
+                        {"mode": "soft", "eval_mode": "same"},
+                    ],
+                    "message_mlp_selector_mode": ["separate_val"],
+                }
+            )
+        )
+    )
+
+    estimator.set_params(**params)
+
+    assert estimator.get_params()["select_message_mlp"] == params["select_message_mlp"]
+    assert estimator.get_params()["select_message_mlp_gate"] == {
+        "mode": "soft",
+        "eval_mode": "same",
+    }
+    assert estimator.get_params()["message_mlp_selector_mode"] == "separate_val"
+
+    core = estimator._build_model(n_channels=3, n_classes=2)
+    assert isinstance(core.message_mlp, SelectPath)
+    assert core.message_mlp.gate.alpha_optim == "separate"
+    assert core.message_mlp.gate.alpha_update_split == "val"
+
+    output = core.message_mlp(torch.randn(2, 6, 4, core.payload_dim))
+    assert output.shape == (2, 6, 4, 7)
+
+    branches = _select_path_branches(core.message_mlp)
+    assert not any(isinstance(layer, nn.LayerNorm) for layer in branches[0].modules())
+    assert any(isinstance(layer, nn.LayerNorm) for layer in branches[1].modules())
+
+
+@pytest.mark.parametrize(
+    ("candidate", "match"),
+    [
+        ({"in_features": 3}, "shape-derived"),
+        ({"out_features": 3}, "shape-derived"),
+        ({"message_dim": 5, "hidden_features": 5}, "both 'message_dim'"),
+        ({"seed_key": "branch-a"}, "Unsupported"),
+    ],
+)
+def test_select_message_mlp_rejects_invalid_candidate_keys(
+    candidate: dict,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        WCTEvidenceGNNCore(
+            n_channels=3,
+            nfreqs=4,
+            n_classes=2,
+            select_message_mlp=[candidate],
+        )
 
 
 def test_window_compute_controls_are_sklearn_parameter_grid_friendly() -> None:
@@ -328,6 +531,32 @@ def test_wct_evidence_custom_model_summary_prints_mode_and_memory(capsys) -> Non
     assert "approx_memory=" in output
 
 
+def test_wct_evidence_summary_includes_selectable_message_mlp_diagnostics(
+    capsys,
+) -> None:
+    core = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        select_message_mlp=[
+            {"init_seed": 101},
+            {"init_seed": 202, "message_dim": 6},
+        ],
+        select_message_mlp_gate={"mode": "soft", "eval_mode": "same"},
+        message_mlp_selector_mode="separate_val",
+    )
+
+    print_torch_custom_model_summary(core, header="Evidence")
+    output = capsys.readouterr().out
+
+    assert "selectable message_mlp" in output
+    assert "candidates=2" in output
+    assert "selector_optimizer_mode=separate_val" in output
+    assert "initial_probs=" in output
+    assert "entropy=" in output
+    assert "candidate_params=" in output
+
+
 def test_run_wct_gnn_evidence_config_smoke_matches_grid() -> None:
     from coheriqs_contributions import run_wct_gnn
 
@@ -347,6 +576,11 @@ def test_run_wct_gnn_evidence_config_smoke_matches_grid() -> None:
     assert estimator.use_mag is False
     assert estimator.window_compute_mode == params["window_compute_mode"]
     assert estimator.max_windows_per_chunk == params["max_windows_per_chunk"]
+    assert estimator.last_batch_min_ratio == params["last_batch_min_ratio"]
+    assert (
+        estimator.selector_alpha_val_update_rate
+        == params["selector_alpha_val_update_rate"]
+    )
     assert core._resolve_window_compute_mode() == params["window_compute_mode"]
 
     with torch.no_grad():
@@ -576,6 +810,453 @@ def test_component_seed_grid_propagates_independently_to_core() -> None:
     _assert_parameters_equal(reference.classifier, different_message.classifier)
     _assert_parameters_equal(reference.message_mlp, different_readout.message_mlp)
     _assert_parameters_differ(reference.classifier, different_readout.classifier)
+
+
+def test_select_message_mlp_duplicate_explicit_seed_reuses_initialization() -> None:
+    core = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        message_dim=5,
+        model_init_seed=23,
+        message_init_seed=29,
+        select_message_mlp=[
+            {"init_seed": 101},
+            {"init_seed": 101},
+        ],
+    )
+
+    branches = _select_path_branches(core.message_mlp)
+
+    _assert_parameters_equal(branches[0], branches[1])
+
+
+def test_select_message_mlp_missing_seeds_consume_message_seed_stream() -> None:
+    without_explicit = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        message_dim=5,
+        model_init_seed=23,
+        message_init_seed=29,
+        select_message_mlp=[
+            {},
+            {},
+        ],
+    )
+    with_explicit_between = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        message_dim=5,
+        model_init_seed=23,
+        message_init_seed=29,
+        select_message_mlp=[
+            {},
+            {"init_seed": 101},
+            {},
+        ],
+    )
+
+    without_branches = _select_path_branches(without_explicit.message_mlp)
+    with_branches = _select_path_branches(with_explicit_between.message_mlp)
+
+    _assert_parameters_equal(with_branches[0], without_branches[0])
+    _assert_parameters_equal(with_branches[2], without_branches[1])
+    _assert_parameters_differ(without_branches[0], without_branches[1])
+
+
+@pytest.mark.parametrize(
+    "selector_mode",
+    ["shared_train", "separate_train", "separate_val"],
+)
+def test_selector_optimizer_grouping_respects_message_mlp_selector_mode(
+    selector_mode: str,
+) -> None:
+    estimator = WCTEvidenceGNNClassifier(
+        seed=23,
+        weight_decay=0.125,
+        message_mlp_selector_mode=selector_mode,
+        select_message_mlp=[
+            {"init_seed": 101},
+            {"init_seed": 202},
+        ],
+    )
+    estimator.model_ = estimator._build_model(n_channels=3, n_classes=2)
+    selector_param_ids = {
+        id(param) for param in estimator.model_.message_mlp.selection_parameters()
+    }
+
+    optimizer, alpha_optimizer, _ = estimator._build_training_optimizers()
+    train_group_by_selector = [
+        group
+        for group in optimizer.param_groups
+        if any(id(param) in selector_param_ids for param in group["params"])
+    ]
+    alpha_group_by_selector = []
+    if alpha_optimizer is not None:
+        alpha_group_by_selector = [
+            group
+            for group in alpha_optimizer.param_groups
+            if any(id(param) in selector_param_ids for param in group["params"])
+        ]
+
+    if selector_mode == "shared_train":
+        assert alpha_optimizer is None
+        assert len(train_group_by_selector) == 1
+        assert train_group_by_selector[0]["weight_decay"] == pytest.approx(0.125)
+    elif selector_mode == "separate_train":
+        assert alpha_optimizer is None
+        assert len(train_group_by_selector) == 1
+        assert train_group_by_selector[0]["weight_decay"] == 0.0
+    else:
+        assert train_group_by_selector == []
+        assert len(alpha_group_by_selector) == 1
+        assert alpha_group_by_selector[0]["weight_decay"] == 0.0
+
+
+def test_training_without_selectors_keeps_selector_histories_empty() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_train",
+        gate_mode="soft",
+        epochs=1,
+        batch_size=2,
+        validation_split=0.5,
+    )
+    estimator._build_model_from_features = lambda features, n_classes, **kwargs: nn.Linear(
+        features.shape[-1],
+        n_classes,
+    )
+
+    estimator.fit(X, y)
+
+    assert estimator.selector_train_history_ == []
+    assert estimator.selector_val_history_ == []
+    assert estimator.selector_alpha_val_history_ == []
+
+
+def test_default_last_batch_ratio_keeps_small_remainder_batches() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_train",
+        epochs=1,
+        batch_size=3,
+        validation_split=0.5,
+        last_batch_min_ratio=0.0,
+    )
+
+    estimator.fit(X, y)
+
+    assert _selector_num_forwards(estimator.selector_train_history_) == 2
+
+
+def test_last_batch_ratio_one_skips_undersized_train_and_alpha_batches() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_val",
+        epochs=1,
+        batch_size=3,
+        validation_split=0.5,
+        last_batch_min_ratio=1.0,
+    )
+
+    estimator.fit(X, y)
+
+    assert _selector_num_forwards(estimator.selector_train_history_) == 1
+    assert _selector_num_forwards(estimator.selector_alpha_val_history_) == 1
+
+
+def test_last_batch_ratio_errors_when_no_train_batch_is_eligible() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_train",
+        epochs=1,
+        batch_size=16,
+        validation_split=0.5,
+        last_batch_min_ratio=1.0,
+    )
+
+    with pytest.raises(ValueError, match="no eligible training batches"):
+        estimator.fit(X, y)
+
+
+def test_last_batch_ratio_errors_when_no_val_alpha_batch_is_eligible() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_val",
+        epochs=1,
+        batch_size=4,
+        validation_split=0.25,
+        last_batch_min_ratio=1.0,
+        selector_alpha_val_update_rate=1.0,
+    )
+
+    with pytest.raises(ValueError, match="eligible validation batch"):
+        estimator.fit(X, y)
+
+
+def test_val_alpha_allows_validation_smaller_than_batch_when_ratio_allows() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_val",
+        epochs=1,
+        batch_size=16,
+        validation_split=0.5,
+        last_batch_min_ratio=0.0,
+        selector_alpha_val_update_rate=1.0,
+    )
+
+    estimator.fit(X, y)
+
+    assert _selector_num_forwards(estimator.selector_train_history_) == 1
+    assert _selector_num_forwards(estimator.selector_alpha_val_history_) == 1
+
+
+def test_selector_alpha_val_update_rate_half_updates_every_other_step() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_val",
+        epochs=1,
+        batch_size=1,
+        validation_split=0.5,
+        selector_alpha_val_update_rate=0.5,
+    )
+
+    estimator.fit(X, y)
+
+    assert _selector_num_forwards(estimator.selector_train_history_) == 4
+    assert _selector_num_forwards(estimator.selector_alpha_val_history_) == 2
+
+
+def test_selector_alpha_val_update_rate_above_one_runs_multiple_alpha_steps() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_val",
+        epochs=1,
+        batch_size=1,
+        validation_split=0.5,
+        selector_alpha_val_update_rate=2.0,
+    )
+
+    estimator.fit(X, y)
+
+    assert _selector_num_forwards(estimator.selector_train_history_) == 4
+    assert _selector_num_forwards(estimator.selector_alpha_val_history_) == 8
+
+
+def test_selector_alpha_val_update_rate_zero_disables_val_alpha_updates() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_val",
+        epochs=1,
+        batch_size=2,
+        validation_split=None,
+        selector_alpha_val_update_rate=0.0,
+    )
+
+    estimator.fit(X, y)
+
+    assert estimator.selector_alpha_val_history_ == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"last_batch_min_ratio": -0.1}, "last_batch_min_ratio"),
+        ({"last_batch_min_ratio": 1.1}, "last_batch_min_ratio"),
+        ({"selector_alpha_val_update_rate": -0.1}, "selector_alpha_val_update_rate"),
+    ],
+)
+def test_batch_control_params_are_validated(kwargs: dict, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        _ToySelectorEstimator(**kwargs)
+
+
+def test_single_shared_selectable_message_mlp_matches_original_mlp_forward() -> None:
+    original = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        hidden_dim=7,
+        message_dim=5,
+        model_init_seed=23,
+        message_init_seed=29,
+    )
+    selectable = WCTEvidenceGNNCore(
+        n_channels=3,
+        nfreqs=4,
+        n_classes=2,
+        hidden_dim=7,
+        message_dim=5,
+        model_init_seed=23,
+        message_init_seed=29,
+        select_message_mlp=[{"init_seed": 29}],
+        select_message_mlp_gate={"mode": "soft", "eval_mode": "same"},
+        message_mlp_selector_mode="shared_train",
+    )
+
+    payload = torch.randn(2, 6, 4, original.payload_dim)
+    original_out = original.message_mlp(payload)
+    selectable_out = selectable.message_mlp(payload)
+
+    assert torch.equal(original_out, selectable_out)
+
+
+def test_selector_histories_are_populated_after_synthetic_train_loop() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_val",
+        entropy_weight=0.01,
+        epochs=1,
+        batch_size=2,
+        validation_split=0.5,
+    )
+
+    estimator.fit(X, y)
+
+    assert len(estimator.selector_train_history_) == 1
+    assert len(estimator.selector_val_history_) == 1
+    assert len(estimator.selector_alpha_val_history_) == 1
+
+    train_summary = estimator.selector_train_history_[0][0]
+    val_summary = estimator.selector_val_history_[0][0]
+    alpha_summary = estimator.selector_alpha_val_history_[0][0]
+    assert train_summary["name"] == "selector"
+    assert val_summary["name"] == "selector"
+    assert alpha_summary["name"] == "selector"
+    assert len(train_summary["probs_mean"]) == 2
+    assert len(train_summary["logits_mean"]) == 2
+    assert train_summary["entropy_mean"] >= 0.0
+    assert alpha_summary["alpha_update_split"] == "val"
+
+
+@pytest.mark.parametrize(
+    ("gate_mode", "frozen_index"),
+    [
+        ("gumbel_hard", None),
+        ("argmax", None),
+        ("frozen", 1),
+    ],
+)
+def test_selector_history_records_selected_counts_for_hard_modes(
+    gate_mode: str,
+    frozen_index: int | None,
+) -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_train",
+        gate_mode=gate_mode,
+        frozen_index=frozen_index,
+        epochs=1,
+        batch_size=2,
+        validation_split=0.5,
+    )
+
+    estimator.fit(X, y)
+
+    summary = estimator.selector_train_history_[0][0]
+    assert "selected_counts" in summary
+    assert sum(summary["selected_counts"]) > 0
+    assert "selected_fractions" in summary
+    assert sum(summary["selected_fractions"]) == pytest.approx(1.0)
+    if frozen_index is not None:
+        assert summary["selected_counts"][frozen_index] > 0
+        assert summary["selected_fractions"][frozen_index] == pytest.approx(1.0)
+
+
+def test_train_selector_extra_loss_excludes_separate_val_regularization() -> None:
+    model = _ToySelectorModel(
+        n_classes=2,
+        selector_mode="separate_val",
+        gate_mode="soft",
+        entropy_weight=10.0,
+    )
+    logits = model(torch.randn(4, 2))
+    base_loss = logits.sum() * 0.0
+    selector_specs = _collect_selector_training_specs(model)
+
+    train_extra_loss = _selector_extra_loss(
+        selector_specs,
+        base_loss,
+        alpha_update_split="train",
+    )
+    val_extra_loss = _selector_extra_loss(
+        selector_specs,
+        base_loss,
+        alpha_optim="separate",
+        alpha_update_split="val",
+    )
+
+    assert train_extra_loss.item() == pytest.approx(0.0)
+    assert val_extra_loss.item() > 0.0
+
+
+def test_validation_alpha_update_does_not_touch_non_alpha_grads_or_state() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_val",
+        gate_mode="soft",
+        epochs=1,
+        batch_size=4,
+        validation_split=0.5,
+    )
+    features = estimator._prepare_features(X, fit=True)
+    estimator.device_ = torch.device("cpu")
+    estimator.classes_ = np.unique(y)
+    estimator.model_ = estimator._build_model_from_features(
+        features,
+        n_classes=2,
+        device=estimator.device_,
+    ).to(estimator.device_)
+
+    _, alpha_optimizer, selector_specs = estimator._build_training_optimizers()
+    assert alpha_optimizer is not None
+    val_alpha_specs = [
+        spec
+        for spec in selector_specs
+        if spec.alpha_optim == "separate" and spec.alpha_update_split == "val"
+    ]
+    alpha_params = _selector_params(
+        val_alpha_specs,
+        alpha_optim="separate",
+        alpha_update_split="val",
+    )
+    alpha_param_ids = {id(param) for param in alpha_params}
+    gate_modules = _selector_gate_modules(
+        val_alpha_specs,
+        alpha_optim="separate",
+        alpha_update_split="val",
+    )
+    loader = DataLoader(
+        TensorDataset(
+            torch.from_numpy(features).float(),
+            torch.from_numpy(y).long(),
+        ),
+        batch_size=4,
+        shuffle=False,
+    )
+
+    estimator._update_selector_alpha_from_validation(
+        val_loader=loader,
+        val_iter=iter(loader),
+        alpha_optimizer=alpha_optimizer,
+        criterion=nn.CrossEntropyLoss(),
+        selector_specs=val_alpha_specs,
+        alpha_params=alpha_params,
+        gate_modules=gate_modules,
+    )
+
+    non_alpha_params = [
+        param
+        for param in estimator.model_.parameters()
+        if id(param) not in alpha_param_ids
+    ]
+    assert all(param.grad is None for param in non_alpha_params)
+    assert {
+        id(param)
+        for param in alpha_optimizer.state
+    }.issubset(alpha_param_ids)
 
 
 def test_model_init_seed_reproduces_unspecified_components() -> None:

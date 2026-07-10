@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import random
+from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 import sys
 import time
@@ -71,6 +74,348 @@ def set_seed(seed: int | None) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+@dataclass(frozen=True)
+class _SelectorTrainingSpec:
+    name: str
+    module: nn.Module
+    gate: nn.Module
+    params: tuple[nn.Parameter, ...]
+    alpha_optim: str
+    alpha_update_split: str
+
+
+def _collect_selector_training_specs(model: nn.Module) -> list[_SelectorTrainingSpec]:
+    specs: list[_SelectorTrainingSpec] = []
+    seen_param_ids: set[int] = set()
+
+    for name, module in model.named_modules():
+        selection_parameters = getattr(module, "selection_parameters", None)
+        if not callable(selection_parameters):
+            continue
+
+        params = []
+        for param in selection_parameters():
+            if not isinstance(param, nn.Parameter) or not param.requires_grad:
+                continue
+            param_id = id(param)
+            if param_id in seen_param_ids:
+                continue
+            seen_param_ids.add(param_id)
+            params.append(param)
+
+        if not params:
+            continue
+
+        gate = getattr(module, "gate", module)
+        alpha_optim = getattr(gate, "alpha_optim", "shared")
+        alpha_update_split = getattr(gate, "alpha_update_split", "train")
+        if alpha_optim not in {"shared", "separate"}:
+            raise ValueError("selector alpha_optim must be 'shared' or 'separate'.")
+        if alpha_update_split not in {"train", "val"}:
+            raise ValueError("selector alpha_update_split must be 'train' or 'val'.")
+
+        specs.append(
+            _SelectorTrainingSpec(
+                name=name or module.__class__.__name__,
+                module=module,
+                gate=gate,
+                params=tuple(params),
+                alpha_optim=alpha_optim,
+                alpha_update_split=alpha_update_split,
+            )
+        )
+
+    return specs
+
+
+def _selector_spec_matches(
+    spec: _SelectorTrainingSpec,
+    *,
+    alpha_optim: str | None = None,
+    alpha_update_split: str | None = None,
+) -> bool:
+    if alpha_optim is not None and spec.alpha_optim != alpha_optim:
+        return False
+    if alpha_update_split is not None and spec.alpha_update_split != alpha_update_split:
+        return False
+    return True
+
+
+def _filter_selector_specs(
+    specs: Sequence[_SelectorTrainingSpec],
+    *,
+    alpha_optim: str | None = None,
+    alpha_update_split: str | None = None,
+) -> tuple[_SelectorTrainingSpec, ...]:
+    return tuple(
+        spec
+        for spec in specs
+        if _selector_spec_matches(
+            spec,
+            alpha_optim=alpha_optim,
+            alpha_update_split=alpha_update_split,
+        )
+    )
+
+
+def _selector_params(
+    specs: Sequence[_SelectorTrainingSpec],
+    *,
+    alpha_optim: str | None = None,
+    alpha_update_split: str | None = None,
+) -> tuple[nn.Parameter, ...]:
+    params: list[nn.Parameter] = []
+    for spec in _filter_selector_specs(
+        specs,
+        alpha_optim=alpha_optim,
+        alpha_update_split=alpha_update_split,
+    ):
+        params.extend(spec.params)
+    return tuple(params)
+
+
+def _selector_gate_modules(
+    specs: Sequence[_SelectorTrainingSpec],
+    *,
+    alpha_optim: str | None = None,
+    alpha_update_split: str | None = None,
+) -> tuple[nn.Module, ...]:
+    modules: list[nn.Module] = []
+    seen_module_ids: set[int] = set()
+    for spec in _filter_selector_specs(
+        specs,
+        alpha_optim=alpha_optim,
+        alpha_update_split=alpha_update_split,
+    ):
+        module_id = id(spec.gate)
+        if module_id in seen_module_ids:
+            continue
+        seen_module_ids.add(module_id)
+        modules.append(spec.gate)
+    return tuple(modules)
+
+
+def _selector_extra_loss(
+    specs: Sequence[_SelectorTrainingSpec],
+    reference: torch.Tensor,
+    *,
+    alpha_optim: str | None = None,
+    alpha_update_split: str | None = None,
+) -> torch.Tensor:
+    loss = reference.new_zeros(())
+    for spec in _filter_selector_specs(
+        specs,
+        alpha_optim=alpha_optim,
+        alpha_update_split=alpha_update_split,
+    ):
+        extra_loss = getattr(spec.module, "extra_loss", None)
+        if callable(extra_loss):
+            loss = loss + extra_loss()
+    return loss
+
+
+def _new_selector_diagnostic_accumulators(
+    specs: Sequence[_SelectorTrainingSpec],
+) -> dict[int, dict[str, object]]:
+    return {
+        id(spec.module): {
+            "spec": spec,
+            "count": 0,
+            "probs_sum": None,
+            "logits_sum": None,
+            "entropy_sum": 0.0,
+            "expected_cost_sum": None,
+            "selected_counts": None,
+            "last_mode": None,
+            "last_gradient_mode": None,
+            "last_temperature": None,
+            "last_exploration_epsilon": None,
+        }
+        for spec in specs
+    }
+
+
+def _selector_last_gate_info(spec: _SelectorTrainingSpec):
+    return getattr(spec.module, "last_gate_info", None)
+
+
+def _mean_over_scope_last_dim(value: torch.Tensor) -> torch.Tensor:
+    detached = value.detach().float().cpu()
+    if detached.ndim == 0:
+        return detached.reshape(1)
+    return detached.reshape(-1, int(detached.shape[-1])).mean(dim=0)
+
+
+def _record_selector_diagnostics(
+    accumulators: dict[int, dict[str, object]],
+    specs: Sequence[_SelectorTrainingSpec],
+) -> None:
+    for spec in specs:
+        gate_info = _selector_last_gate_info(spec)
+        if gate_info is None:
+            continue
+        accumulator = accumulators.get(id(spec.module))
+        if accumulator is None:
+            continue
+
+        probs = _mean_over_scope_last_dim(gate_info.probs)
+        logits = _mean_over_scope_last_dim(gate_info.logits)
+        accumulator["count"] = int(accumulator["count"]) + 1
+        accumulator["probs_sum"] = (
+            probs
+            if accumulator["probs_sum"] is None
+            else accumulator["probs_sum"] + probs
+        )
+        accumulator["logits_sum"] = (
+            logits
+            if accumulator["logits_sum"] is None
+            else accumulator["logits_sum"] + logits
+        )
+        accumulator["entropy_sum"] = float(accumulator["entropy_sum"]) + float(
+            gate_info.entropy.detach().float().mean().cpu().item()
+        )
+        if gate_info.expected_cost is not None:
+            expected_cost = float(
+                gate_info.expected_cost.detach().float().mean().cpu().item()
+            )
+            accumulator["expected_cost_sum"] = (
+                expected_cost
+                if accumulator["expected_cost_sum"] is None
+                else float(accumulator["expected_cost_sum"]) + expected_cost
+            )
+        if gate_info.selected_index is not None:
+            selected = gate_info.selected_index.detach().reshape(-1).cpu().long()
+            num_choices = int(getattr(spec.gate, "num_choices", probs.numel()))
+            counts = torch.bincount(selected, minlength=num_choices)
+            accumulator["selected_counts"] = (
+                counts
+                if accumulator["selected_counts"] is None
+                else accumulator["selected_counts"] + counts
+            )
+        accumulator["last_mode"] = gate_info.mode
+        accumulator["last_gradient_mode"] = gate_info.gradient_mode
+        accumulator["last_temperature"] = float(gate_info.temperature)
+        accumulator["last_exploration_epsilon"] = gate_info.exploration_epsilon
+
+
+def _finalize_selector_diagnostics(
+    accumulators: dict[int, dict[str, object]],
+) -> list[dict[str, object]]:
+    summaries: list[dict[str, object]] = []
+    for accumulator in accumulators.values():
+        count = int(accumulator["count"])
+        if count == 0:
+            continue
+
+        spec = accumulator["spec"]
+        probs_mean = (accumulator["probs_sum"] / count).tolist()
+        logits_mean = (accumulator["logits_sum"] / count).tolist()
+        summary: dict[str, object] = {
+            "name": spec.name,
+            "alpha_optim": spec.alpha_optim,
+            "alpha_update_split": spec.alpha_update_split,
+            "num_forwards": count,
+            "mode": accumulator["last_mode"],
+            "gradient_mode": accumulator["last_gradient_mode"],
+            "temperature": accumulator["last_temperature"],
+            "exploration_epsilon": accumulator["last_exploration_epsilon"],
+            "probs_mean": [float(value) for value in probs_mean],
+            "logits_mean": [float(value) for value in logits_mean],
+            "entropy_mean": float(accumulator["entropy_sum"]) / count,
+        }
+        if accumulator["expected_cost_sum"] is not None:
+            summary["expected_cost_mean"] = (
+                float(accumulator["expected_cost_sum"]) / count
+            )
+        if accumulator["selected_counts"] is not None:
+            selected_counts = accumulator["selected_counts"].tolist()
+            total = max(sum(int(value) for value in selected_counts), 1)
+            summary["selected_counts"] = [int(value) for value in selected_counts]
+            summary["selected_fractions"] = [
+                float(value) / float(total) for value in selected_counts
+            ]
+        summaries.append(summary)
+    return summaries
+
+
+def _format_selector_values(values: Sequence[float]) -> str:
+    return "[" + ", ".join(f"{float(value):.3f}" for value in values) + "]"
+
+
+def _min_accepted_batch_size(batch_size: int, last_batch_min_ratio: float) -> int:
+    return max(1, int(math.ceil(int(batch_size) * float(last_batch_min_ratio))))
+
+
+def _batch_sample_count(batch) -> int:
+    if isinstance(batch, torch.Tensor):
+        return int(batch.shape[0])
+    if isinstance(batch, (list, tuple)):
+        for item in reversed(batch):
+            if isinstance(item, torch.Tensor):
+                return int(item.shape[0])
+    raise ValueError("Batch must contain at least one tensor with a sample dimension.")
+
+
+def _batch_meets_min_size(batch, min_batch_size: int) -> bool:
+    return _batch_sample_count(batch) >= int(min_batch_size)
+
+
+def _count_eligible_tensor_batches(loader: DataLoader, min_batch_size: int) -> int:
+    dataset_size = len(loader.dataset)
+    batch_size = loader.batch_size
+    if batch_size is None:
+        return sum(1 for batch in loader if _batch_meets_min_size(batch, min_batch_size))
+    full_batches, remainder = divmod(int(dataset_size), int(batch_size))
+    return full_batches + (1 if remainder >= int(min_batch_size) else 0)
+
+
+def _optimizer_parameters(optimizer) -> list[nn.Parameter]:
+    params: list[nn.Parameter] = []
+    for group in optimizer.param_groups:
+        params.extend(group["params"])
+    return params
+
+
+@contextmanager
+def _temporarily_requires_grad(
+    params: Sequence[nn.Parameter],
+    requires_grad: bool,
+):
+    states = [(param, param.requires_grad) for param in params]
+    for param, _ in states:
+        param.requires_grad_(requires_grad)
+    try:
+        yield
+    finally:
+        for param, old_requires_grad in states:
+            param.requires_grad_(old_requires_grad)
+
+
+@contextmanager
+def _selector_alpha_update_scope(
+    model: nn.Module,
+    alpha_params: Sequence[nn.Parameter],
+    gate_modules: Sequence[nn.Module],
+):
+    module_states = [(module, module.training) for module in model.modules()]
+    param_states = [(param, param.requires_grad) for param in model.parameters()]
+    alpha_param_ids = {id(param) for param in alpha_params}
+
+    model.eval()
+    for gate in gate_modules:
+        gate.train()
+    for param in model.parameters():
+        param.requires_grad_(id(param) in alpha_param_ids)
+
+    try:
+        yield
+    finally:
+        for param, requires_grad in param_states:
+            param.requires_grad_(requires_grad)
+        for module, training in module_states:
+            module.train(training)
 
 
 def safe_roc_auc(
@@ -590,6 +935,8 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         device: str = "auto",
         seed: int | None = 42,
         use_class_weights: bool = False,
+        last_batch_min_ratio: float = 0.0,
+        selector_alpha_val_update_rate: float = 1.0,
         verbose: int = 0,
     ) -> None:
         self.epochs = epochs
@@ -603,7 +950,10 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.device = device
         self.seed = seed
         self.use_class_weights = use_class_weights
+        self.last_batch_min_ratio = last_batch_min_ratio
+        self.selector_alpha_val_update_rate = selector_alpha_val_update_rate
         self.verbose = verbose
+        self._validate_batch_control_params()
 
         self.model_ = None
         self.classes_ = None
@@ -618,6 +968,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.val_loss_history_ = []
         self.val_accuracy_history_ = []
         self.val_roc_auc_history_ = []
+        self.selector_train_history_ = []
+        self.selector_val_history_ = []
+        self.selector_alpha_val_history_ = []
         self.edge_density_history_ = []
         self.best_epoch_ = None
         self.best_val_loss_ = None
@@ -625,6 +978,64 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     def _vprint(self, level: int, message: str) -> None:
         if self.verbose >= level:
             print(message, flush=True)
+
+    def _validate_batch_control_params(self) -> None:
+        last_batch_min_ratio = float(self.last_batch_min_ratio)
+        if (
+            not np.isfinite(last_batch_min_ratio)
+            or last_batch_min_ratio < 0.0
+            or last_batch_min_ratio > 1.0
+        ):
+            raise ValueError("last_batch_min_ratio must be in [0.0, 1.0].")
+
+        selector_alpha_val_update_rate = float(self.selector_alpha_val_update_rate)
+        if (
+            not np.isfinite(selector_alpha_val_update_rate)
+            or selector_alpha_val_update_rate < 0.0
+        ):
+            raise ValueError("selector_alpha_val_update_rate must be >= 0.0.")
+
+        self.last_batch_min_ratio = last_batch_min_ratio
+        self.selector_alpha_val_update_rate = selector_alpha_val_update_rate
+
+    def _log_selector_diagnostics(
+        self,
+        *,
+        split: str,
+        epoch: int,
+        summaries: Sequence[dict[str, object]],
+    ) -> None:
+        if self.verbose < 2:
+            return
+        for summary in summaries:
+            probs = summary.get("probs_mean", [])
+            logits = summary.get("logits_mean", [])
+            argmax = int(np.argmax(probs)) if probs else None
+            parts = [
+                f"[Selector][{split}][Epoch {epoch + 1}/{self.epochs}]",
+                str(summary["name"]),
+                f"mode={summary.get('mode')}",
+                f"grad={summary.get('gradient_mode')}",
+                f"alpha={summary.get('alpha_optim')}/{summary.get('alpha_update_split')}",
+                f"temp={float(summary.get('temperature')):.4g}",
+                f"entropy={float(summary.get('entropy_mean')):.4f}",
+                f"argmax={argmax}",
+                f"probs={_format_selector_values(probs)}",
+                f"logits={_format_selector_values(logits)}",
+            ]
+            if summary.get("exploration_epsilon") is not None:
+                parts.append(f"epsilon={summary.get('exploration_epsilon')}")
+            if summary.get("expected_cost_mean") is not None:
+                parts.append(
+                    f"expected_cost={float(summary['expected_cost_mean']):.4f}"
+                )
+            if summary.get("selected_counts") is not None:
+                parts.append(f"selected_counts={summary['selected_counts']}")
+                parts.append(
+                    "selected_fractions="
+                    f"{_format_selector_values(summary['selected_fractions'])}"
+                )
+            self._vprint(2, " ".join(parts))
 
     def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):
         raise NotImplementedError
@@ -665,6 +1076,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
 
     def fit(self, X, y, validation_groups: np.ndarray | None = None, metadata=None):
         X = validate_eeg_X(X)
+        self._validate_batch_control_params()
         set_seed(self.seed)
         self.device_ = resolve_torch_device(self.device)
 
@@ -732,15 +1144,93 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             print_torch_parameter_hashes(self.model_, header=model_label)
             print_torch_custom_model_summary(self.model_, header=model_label)
 
-        optimizer = optim.AdamW(
-            self.model_.parameters(),
-            lr=self.learning_rate,
-            weight_decay=self.weight_decay,
+        optimizer, alpha_optimizer, selector_specs = self._build_training_optimizers()
+        use_val_alpha_updates = (
+            alpha_optimizer is not None
+            and float(self.selector_alpha_val_update_rate) > 0.0
         )
+        min_batch_size = _min_accepted_batch_size(
+            int(self.batch_size),
+            float(self.last_batch_min_ratio),
+        )
+        if _count_eligible_tensor_batches(train_loader, min_batch_size) == 0:
+            raise ValueError(
+                "last_batch_min_ratio leaves no eligible training batches. "
+                "Reduce last_batch_min_ratio or batch_size."
+            )
+        if use_val_alpha_updates and val_loader is None:
+            raise ValueError(
+                "Validation-split selector alpha updates require a non-empty "
+                "validation loader. Enable validation_split or use "
+                "message_mlp_selector_mode='separate_train'."
+            )
+        if (
+            use_val_alpha_updates
+            and val_loader is not None
+            and _count_eligible_tensor_batches(val_loader, min_batch_size) == 0
+        ):
+            raise ValueError(
+                "Validation-split selector alpha updates require at least one "
+                "eligible validation batch. Reduce last_batch_min_ratio or "
+                "batch_size, or set selector_alpha_val_update_rate=0.0."
+            )
         criterion = self._criterion(y_idx[train_idx])
         self._reset_histories()
-        self._train_loop(train_loader, val_loader, optimizer, criterion, n_classes)
+        self._train_loop(
+            train_loader,
+            val_loader,
+            optimizer,
+            criterion,
+            n_classes,
+            selector_specs=selector_specs,
+            alpha_optimizer=alpha_optimizer,
+        )
         return self
+
+    def _build_training_optimizers(self):
+        if self.model_ is None:
+            raise ValueError("Model has not been built yet.")
+
+        selector_specs = _collect_selector_training_specs(self.model_)
+        separate_train_params = _selector_params(
+            selector_specs,
+            alpha_optim="separate",
+            alpha_update_split="train",
+        )
+        separate_val_params = _selector_params(
+            selector_specs,
+            alpha_optim="separate",
+            alpha_update_split="val",
+        )
+        separate_param_ids = {
+            id(param) for param in (*separate_train_params, *separate_val_params)
+        }
+        regular_params = [
+            param
+            for param in self.model_.parameters()
+            if param.requires_grad and id(param) not in separate_param_ids
+        ]
+
+        param_groups = []
+        if regular_params:
+            param_groups.append(
+                {"params": regular_params, "weight_decay": self.weight_decay}
+            )
+        if separate_train_params:
+            param_groups.append(
+                {"params": list(separate_train_params), "weight_decay": 0.0}
+            )
+        if not param_groups:
+            raise ValueError("No trainable parameters were found.")
+
+        optimizer = optim.AdamW(param_groups, lr=self.learning_rate)
+        alpha_optimizer = None
+        if separate_val_params:
+            alpha_optimizer = optim.AdamW(
+                [{"params": list(separate_val_params), "weight_decay": 0.0}],
+                lr=self.learning_rate,
+            )
+        return optimizer, alpha_optimizer, selector_specs
 
     def _train_loop(
         self,
@@ -749,7 +1239,43 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         optimizer,
         criterion,
         n_classes: int,
+        *,
+        selector_specs: Sequence[_SelectorTrainingSpec] | None = None,
+        alpha_optimizer=None,
     ) -> None:
+        selector_specs = [] if selector_specs is None else list(selector_specs)
+        use_val_alpha_updates = (
+            alpha_optimizer is not None
+            and float(self.selector_alpha_val_update_rate) > 0.0
+        )
+        if use_val_alpha_updates and val_loader is None:
+            raise ValueError(
+                "Validation-split selector alpha updates require a validation loader."
+            )
+        min_batch_size = _min_accepted_batch_size(
+            int(self.batch_size),
+            float(self.last_batch_min_ratio),
+        )
+        train_selector_specs = _filter_selector_specs(
+            selector_specs,
+            alpha_update_split="train",
+        )
+        val_alpha_specs = _filter_selector_specs(
+            selector_specs,
+            alpha_optim="separate",
+            alpha_update_split="val",
+        )
+        val_alpha_params = _selector_params(
+            val_alpha_specs,
+            alpha_optim="separate",
+            alpha_update_split="val",
+        )
+        val_alpha_gates = _selector_gate_modules(
+            val_alpha_specs,
+            alpha_optim="separate",
+            alpha_update_split="val",
+        )
+        alpha_val_iter = iter(val_loader) if use_val_alpha_updates else None
         self._vprint(
             1,
             f"[Train] start epochs={self.epochs} batches/epoch={len(train_loader)} "
@@ -762,6 +1288,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         best_epoch = -1
         best_val_loss = float("inf")
         no_improve_epochs = 0
+        alpha_val_update_credit = 0.0
 
         for epoch in range(self.epochs):
             epoch_start = time.perf_counter()
@@ -774,22 +1301,59 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             n_seen = 0
             epoch_targets = []
             epoch_probas = []
+            train_selector_accumulators = _new_selector_diagnostic_accumulators(
+                selector_specs
+            )
+            alpha_val_selector_accumulators = _new_selector_diagnostic_accumulators(
+                val_alpha_specs
+            )
 
             for step_idx, batch in enumerate(train_loader, start=1):
+                if not _batch_meets_min_size(batch, min_batch_size):
+                    continue
                 *batch_inputs, batch_y = batch
                 batch_inputs = tuple(x.to(self.device_) for x in batch_inputs)
                 batch_y = batch_y.to(self.device_)
 
                 step_start = time.perf_counter()
-                optimizer.zero_grad()
-                logits, aux_value = self._model_forward(batch_inputs)
-                loss = criterion(logits, batch_y)
+                optimizer.zero_grad(set_to_none=True)
+                with _temporarily_requires_grad(val_alpha_params, False):
+                    logits, aux_value = self._model_forward(batch_inputs)
+                    _record_selector_diagnostics(
+                        train_selector_accumulators,
+                        selector_specs,
+                    )
+                    loss = criterion(logits, batch_y)
+                    # Train batches regularize only selectors updated on train.
+                    loss = loss + _selector_extra_loss(train_selector_specs, loss)
                 loss.backward()
                 if self.grad_clip_norm is not None and float(self.grad_clip_norm) > 0.0:
                     torch.nn.utils.clip_grad_norm_(
-                        self.model_.parameters(), max_norm=float(self.grad_clip_norm)
+                        _optimizer_parameters(optimizer),
+                        max_norm=float(self.grad_clip_norm),
                     )
                 optimizer.step()
+                if use_val_alpha_updates:
+                    if val_loader is None or alpha_val_iter is None:
+                        raise RuntimeError("alpha validation loader is not initialized.")
+                    alpha_val_update_credit += float(
+                        self.selector_alpha_val_update_rate
+                    )
+                    while alpha_val_update_credit + 1e-12 >= 1.0:
+                        alpha_val_iter = self._update_selector_alpha_from_validation(
+                            val_loader=val_loader,
+                            val_iter=alpha_val_iter,
+                            alpha_optimizer=alpha_optimizer,
+                            criterion=criterion,
+                            selector_specs=val_alpha_specs,
+                            alpha_params=val_alpha_params,
+                            gate_modules=val_alpha_gates,
+                            diagnostic_accumulators=alpha_val_selector_accumulators,
+                            min_batch_size=min_batch_size,
+                        )
+                        alpha_val_update_credit -= 1.0
+                        if abs(alpha_val_update_credit) < 1e-12:
+                            alpha_val_update_credit = 0.0
 
                 loss_sum += float(loss.item())
                 n_batches += 1
@@ -824,6 +1388,11 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                         f"rate={rate:.2f} samples/s",
                     )
 
+            if n_batches == 0:
+                raise RuntimeError(
+                    "No eligible training batches were processed. Reduce "
+                    "last_batch_min_ratio or batch_size."
+                )
             avg_loss = loss_sum / max(1, n_batches)
             avg_acc = n_correct / max(1, n_seen)
             avg_auc = safe_roc_auc(
@@ -837,6 +1406,26 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             self.train_loss_history_.append(avg_loss)
             self.train_accuracy_history_.append(avg_acc)
             self.train_roc_auc_history_.append(avg_auc)
+            train_selector_summary = _finalize_selector_diagnostics(
+                train_selector_accumulators
+            )
+            if selector_specs:
+                self.selector_train_history_.append(train_selector_summary)
+                self._log_selector_diagnostics(
+                    split="train",
+                    epoch=epoch,
+                    summaries=train_selector_summary,
+                )
+            alpha_val_selector_summary = _finalize_selector_diagnostics(
+                alpha_val_selector_accumulators
+            )
+            if use_val_alpha_updates:
+                self.selector_alpha_val_history_.append(alpha_val_selector_summary)
+                self._log_selector_diagnostics(
+                    split="alpha_val",
+                    epoch=epoch,
+                    summaries=alpha_val_selector_summary,
+                )
 
             loss_delta = 0.0 if prev_loss is None else (prev_loss - avg_loss)
             acc_delta = 0.0 if prev_acc is None else (avg_acc - prev_acc)
@@ -847,12 +1436,23 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
 
             val_suffix = ""
             if val_loader is not None:
-                val_loss, val_acc, val_auc = self._evaluate_loader(
-                    val_loader, criterion, n_classes
+                val_loss, val_acc, val_auc, val_selector_summary = self._evaluate_loader(
+                    val_loader,
+                    criterion,
+                    n_classes,
+                    selector_specs=selector_specs,
+                    return_selector_summary=True,
                 )
                 self.val_loss_history_.append(val_loss)
                 self.val_accuracy_history_.append(val_acc)
                 self.val_roc_auc_history_.append(val_auc)
+                if selector_specs:
+                    self.selector_val_history_.append(val_selector_summary)
+                    self._log_selector_diagnostics(
+                        split="val",
+                        epoch=epoch,
+                        summaries=val_selector_summary,
+                    )
                 val_suffix = (
                     f" val_loss={val_loss:.6f} val_acc={val_acc:.4f} "
                     f"val_roc_auc={fmt_metric(val_auc)}"
@@ -900,9 +1500,73 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 f"(val_loss={best_val_loss:.6f})",
             )
 
+    def _update_selector_alpha_from_validation(
+        self,
+        *,
+        val_loader: DataLoader,
+        val_iter,
+        alpha_optimizer,
+        criterion,
+        selector_specs: Sequence[_SelectorTrainingSpec],
+        alpha_params: Sequence[nn.Parameter],
+        gate_modules: Sequence[nn.Module],
+        diagnostic_accumulators: dict[int, dict[str, object]] | None = None,
+        min_batch_size: int = 1,
+    ):
+        max_attempts = len(val_loader)
+        if max_attempts <= 0:
+            raise RuntimeError("alpha validation loader is empty.")
+        for _ in range(max_attempts):
+            try:
+                batch = next(val_iter)
+            except StopIteration:
+                val_iter = iter(val_loader)
+                batch = next(val_iter)
+            if _batch_meets_min_size(batch, min_batch_size):
+                break
+        else:
+            raise RuntimeError(
+                "No validation-alpha batch meets last_batch_min_ratio."
+            )
+
+        *batch_inputs, batch_y = batch
+        batch_inputs = tuple(x.to(self.device_) for x in batch_inputs)
+        batch_y = batch_y.to(self.device_)
+
+        alpha_optimizer.zero_grad(set_to_none=True)
+        with _selector_alpha_update_scope(self.model_, alpha_params, gate_modules):
+            logits, _ = self._model_forward(batch_inputs)
+            if diagnostic_accumulators is not None:
+                _record_selector_diagnostics(diagnostic_accumulators, selector_specs)
+            loss = criterion(logits, batch_y)
+            # Validation-alpha batches regularize only validation-updated selectors.
+            loss = loss + _selector_extra_loss(selector_specs, loss)
+            loss.backward()
+        alpha_optimizer.step()
+        alpha_optimizer.zero_grad(set_to_none=True)
+        alpha_param_ids = {id(param) for param in alpha_params}
+        for param in self.model_.parameters():
+            if id(param) not in alpha_param_ids:
+                param.grad = None
+
+        return val_iter
+
     def _evaluate_loader(
-        self, loader: DataLoader, criterion: nn.Module, n_classes: int
-    ) -> tuple[float, float, float | None]:
+        self,
+        loader: DataLoader,
+        criterion: nn.Module,
+        n_classes: int,
+        *,
+        selector_specs: Sequence[_SelectorTrainingSpec] | None = None,
+        return_selector_summary: bool = False,
+    ) -> tuple[float, float, float | None] | tuple[
+        float,
+        float,
+        float | None,
+        list[dict[str, object]],
+    ]:
+        selector_specs = [] if selector_specs is None else list(selector_specs)
+        selector_accumulators = _new_selector_diagnostic_accumulators(selector_specs)
         self.model_.eval()
         loss_sum = 0.0
         n_batches = 0
@@ -916,7 +1580,10 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 batch_inputs = tuple(x.to(self.device_) for x in batch_inputs)
                 batch_y = batch_y.to(self.device_)
                 logits, _ = self._model_forward(batch_inputs)
+                _record_selector_diagnostics(selector_accumulators, selector_specs)
                 loss = criterion(logits, batch_y)
+                # Validation reports the full regularized objective.
+                loss = loss + _selector_extra_loss(selector_specs, loss)
                 loss_sum += float(loss.item())
                 n_batches += 1
                 preds = torch.argmax(logits, dim=1)
@@ -925,11 +1592,14 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 y_all.append(batch_y.detach().cpu().numpy())
                 p_all.append(torch.softmax(logits.detach(), dim=1).cpu().numpy())
 
-        return (
+        result = (
             loss_sum / max(1, n_batches),
             n_correct / max(1, n_seen),
             safe_roc_auc(np.concatenate(y_all), np.concatenate(p_all), n_classes),
         )
+        if return_selector_summary:
+            return (*result, _finalize_selector_diagnostics(selector_accumulators))
+        return result
 
     def _predict_logits(self, X) -> np.ndarray:
         if self.model_ is None or self.device_ is None:

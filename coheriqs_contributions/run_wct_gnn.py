@@ -136,6 +136,11 @@ def _make_wct_evidence_gnn():
         smooth_kernel_sigma=(None, None),
         window_compute_mode="sequential",
         max_windows_per_chunk=None,
+        select_message_mlp=None,
+        select_message_mlp_gate=None,
+        message_mlp_selector_mode="shared_train",
+        selector_alpha_val_update_rate=1.0,
+        last_batch_min_ratio=0.0,
         verbose=3,
     )
 
@@ -363,6 +368,22 @@ PIPELINE_PARAM_GRIDS = {
         "seed": [42],
         # "message_init_seed": [43],
         # "readout_init_seed": [44],
+        "select_message_mlp": [
+            None,
+            # To enable selectable message MLP candidates, replace None with:
+            # [
+            #     {"init_seed": 101},
+            #     {
+            #         "init_seed": 202,
+            #         "message_dim": 16,
+            #         "message_layer_norm": True,
+            #     },
+            # ],
+        ],
+        "select_message_mlp_gate": [None],
+        "message_mlp_selector_mode": ["separate_train"],
+        "last_batch_min_ratio": [0.0],
+        "selector_alpha_val_update_rate": [1.0],
         "epochs": [150],
         "normalize_input": [True],
         "learning_rate": [1e-3],
