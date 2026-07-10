@@ -89,6 +89,9 @@ class _ToySelectorEstimator(TorchEEGClassifier):
         seed: int | None = 7,
         last_batch_min_ratio: float = 0.0,
         selector_alpha_val_update_rate: float = 1.0,
+        optimizer_step_batch_size: int | None = None,
+        optimizer_step_batch_mode: str = "credit",
+        optimizer_step_remainder_policy: str = "flush",
         verbose: int = 0,
     ) -> None:
         self.selector_mode = selector_mode
@@ -104,6 +107,9 @@ class _ToySelectorEstimator(TorchEEGClassifier):
         self.seed = seed
         self.last_batch_min_ratio = last_batch_min_ratio
         self.selector_alpha_val_update_rate = selector_alpha_val_update_rate
+        self.optimizer_step_batch_size = optimizer_step_batch_size
+        self.optimizer_step_batch_mode = optimizer_step_batch_mode
+        self.optimizer_step_remainder_policy = optimizer_step_remainder_policy
         self.verbose = verbose
         self._init_torch_classifier(
             epochs=epochs,
@@ -114,6 +120,9 @@ class _ToySelectorEstimator(TorchEEGClassifier):
             seed=seed,
             last_batch_min_ratio=last_batch_min_ratio,
             selector_alpha_val_update_rate=selector_alpha_val_update_rate,
+            optimizer_step_batch_size=optimizer_step_batch_size,
+            optimizer_step_batch_mode=optimizer_step_batch_mode,
+            optimizer_step_remainder_policy=optimizer_step_remainder_policy,
             use_class_weights=False,
             verbose=verbose,
             device="cpu",
@@ -216,6 +225,9 @@ def test_component_controls_are_sklearn_parameter_grid_friendly() -> None:
     assert estimator.get_params()["component_profile"] == "legacy"
     assert estimator.get_params()["last_batch_min_ratio"] == 0.0
     assert estimator.get_params()["selector_alpha_val_update_rate"] == 1.0
+    assert estimator.get_params()["optimizer_step_batch_size"] is None
+    assert estimator.get_params()["optimizer_step_batch_mode"] == "credit"
+    assert estimator.get_params()["optimizer_step_remainder_policy"] == "flush"
     estimator.set_params(message_layer_norm=True)
     assert estimator.message_layer_norm is True
 
@@ -1085,12 +1097,113 @@ def test_selector_alpha_val_update_rate_zero_disables_val_alpha_updates() -> Non
     assert estimator.selector_alpha_val_history_ == []
 
 
+def test_default_optimizer_step_batch_size_matches_technical_batch_size() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        epochs=1,
+        batch_size=2,
+        validation_split=None,
+    )
+
+    estimator.fit(X[:6], y[:6])
+
+    assert estimator.optimizer_step_batch_size is None
+    assert estimator.optimizer_step_count_history_ == [3]
+
+
+def test_optimizer_step_batch_credit_tracks_excess_without_reusing_gradients() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        epochs=1,
+        batch_size=2,
+        validation_split=None,
+        optimizer_step_batch_size=3,
+        optimizer_step_batch_mode="credit",
+        optimizer_step_remainder_policy="drop",
+    )
+
+    estimator.fit(X[:6], y[:6])
+
+    # Three 2-sample technical batches produce two distinct optimizer updates:
+    # one from four pending gradient samples, then one from two.
+    assert estimator.optimizer_step_count_history_ == [2]
+
+
+def test_optimizer_step_batch_split_hits_exact_boundaries() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        epochs=1,
+        batch_size=4,
+        validation_split=None,
+        optimizer_step_batch_size=2,
+        optimizer_step_batch_mode="split",
+        optimizer_step_remainder_policy="drop",
+    )
+
+    estimator.fit(X, y)
+
+    assert estimator.optimizer_step_count_history_ == [4]
+    assert _selector_num_forwards(estimator.selector_train_history_) == 4
+
+
+@pytest.mark.parametrize(
+    ("remainder_policy", "epochs", "expected_steps"),
+    [
+        ("flush", 1, [2]),
+        ("drop", 1, [1]),
+        ("carry", 2, [1, 1]),
+    ],
+)
+def test_optimizer_step_remainder_policies(
+    remainder_policy: str,
+    epochs: int,
+    expected_steps: list[int],
+) -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        epochs=epochs,
+        batch_size=2,
+        validation_split=None,
+        optimizer_step_batch_size=4,
+        optimizer_step_remainder_policy=remainder_policy,
+    )
+
+    estimator.fit(X[:5], y[:5])
+
+    assert estimator.optimizer_step_count_history_ == expected_steps
+
+
+def test_selector_alpha_val_update_rate_counts_main_optimizer_updates() -> None:
+    X, y = _toy_eeg_data()
+    estimator = _ToySelectorEstimator(
+        selector_mode="separate_val",
+        epochs=1,
+        batch_size=1,
+        validation_split=0.5,
+        selector_alpha_val_update_rate=0.5,
+        optimizer_step_batch_size=2,
+    )
+
+    estimator.fit(X, y)
+
+    assert estimator.optimizer_step_count_history_ == [2]
+    assert _selector_num_forwards(estimator.selector_alpha_val_history_) == 1
+
+
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
         ({"last_batch_min_ratio": -0.1}, "last_batch_min_ratio"),
         ({"last_batch_min_ratio": 1.1}, "last_batch_min_ratio"),
         ({"selector_alpha_val_update_rate": -0.1}, "selector_alpha_val_update_rate"),
+        ({"optimizer_step_batch_size": 0}, "optimizer_step_batch_size"),
+        ({"optimizer_step_batch_size": 1.5}, "optimizer_step_batch_size"),
+        ({"optimizer_step_batch_mode": "unknown"}, "optimizer_step_batch_mode"),
+        ({"optimizer_step_remainder_policy": "unknown"}, "remainder_policy"),
+        (
+            {"batch_size": 2, "optimizer_step_batch_size": 1},
+            "at least batch_size",
+        ),
     ],
 )
 def test_batch_control_params_are_validated(kwargs: dict, match: str) -> None:

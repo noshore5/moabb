@@ -378,6 +378,19 @@ def _optimizer_parameters(optimizer) -> list[nn.Parameter]:
     return params
 
 
+def _slice_tensor_batch(batch, start: int, end: int):
+    return tuple(
+        item[start:end] if isinstance(item, torch.Tensor) else item for item in batch
+    )
+
+
+def _scale_optimizer_gradients(optimizer, factor: float) -> None:
+    with torch.no_grad():
+        for parameter in _optimizer_parameters(optimizer):
+            if parameter.grad is not None:
+                parameter.grad.mul_(factor)
+
+
 @contextmanager
 def _temporarily_requires_grad(
     params: Sequence[nn.Parameter],
@@ -940,6 +953,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         use_class_weights: bool = False,
         last_batch_min_ratio: float = 0.0,
         selector_alpha_val_update_rate: float = 1.0,
+        optimizer_step_batch_size: int | None = None,
+        optimizer_step_batch_mode: str = "credit",
+        optimizer_step_remainder_policy: str = "flush",
         verbose: int = 0,
     ) -> None:
         self.epochs = epochs
@@ -955,6 +971,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.use_class_weights = use_class_weights
         self.last_batch_min_ratio = last_batch_min_ratio
         self.selector_alpha_val_update_rate = selector_alpha_val_update_rate
+        self.optimizer_step_batch_size = optimizer_step_batch_size
+        self.optimizer_step_batch_mode = optimizer_step_batch_mode
+        self.optimizer_step_remainder_policy = optimizer_step_remainder_policy
         self.verbose = verbose
         self._validate_batch_control_params()
 
@@ -975,6 +994,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.selector_val_history_ = []
         self.selector_alpha_val_history_ = []
         self.edge_density_history_ = []
+        self.optimizer_step_count_history_ = []
         self.best_epoch_ = None
         self.best_val_loss_ = None
 
@@ -998,8 +1018,35 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         ):
             raise ValueError("selector_alpha_val_update_rate must be >= 0.0.")
 
+        optimizer_step_batch_size = self.optimizer_step_batch_size
+        if optimizer_step_batch_size is not None and (
+            isinstance(optimizer_step_batch_size, bool)
+            or not isinstance(optimizer_step_batch_size, (int, np.integer))
+            or int(optimizer_step_batch_size) <= 0
+        ):
+            raise ValueError("optimizer_step_batch_size must be a positive integer or None.")
+        if self.optimizer_step_batch_mode not in {"credit", "split"}:
+            raise ValueError("optimizer_step_batch_mode must be 'credit' or 'split'.")
+        if self.optimizer_step_remainder_policy not in {"flush", "drop", "carry"}:
+            raise ValueError(
+                "optimizer_step_remainder_policy must be 'flush', 'drop', or 'carry'."
+            )
+        if (
+            self.optimizer_step_batch_mode == "credit"
+            and optimizer_step_batch_size is not None
+            and int(optimizer_step_batch_size) < int(self.batch_size)
+        ):
+            raise ValueError(
+                "optimizer_step_batch_size must be at least batch_size in credit mode."
+            )
+
         self.last_batch_min_ratio = last_batch_min_ratio
         self.selector_alpha_val_update_rate = selector_alpha_val_update_rate
+
+    def _effective_optimizer_step_batch_size(self) -> int:
+        if self.optimizer_step_batch_size is None:
+            return int(self.batch_size)
+        return int(self.optimizer_step_batch_size)
 
     def _log_selector_diagnostics(
         self,
@@ -1247,6 +1294,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         alpha_optimizer=None,
     ) -> None:
         selector_specs = [] if selector_specs is None else list(selector_specs)
+        optimizer_step_batch_size = self._effective_optimizer_step_batch_size()
+        optimizer_step_batch_mode = self.optimizer_step_batch_mode
+        remainder_policy = self.optimizer_step_remainder_policy
         use_val_alpha_updates = (
             alpha_optimizer is not None
             and float(self.selector_alpha_val_update_rate) > 0.0
@@ -1292,7 +1342,10 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             1,
             f"[Train] start epochs={self.epochs} "
             f"batches/epoch={eligible_train_batches}{train_batch_suffix} "
-            f"batch_size={self.batch_size} device={self.device_}",
+            f"batch_size={self.batch_size} "
+            f"optimizer_step_batch_size={optimizer_step_batch_size} "
+            f"optimizer_step_batch_mode={optimizer_step_batch_mode} "
+            f"device={self.device_}",
         )
         prev_loss = None
         prev_acc = None
@@ -1302,6 +1355,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         best_val_loss = float("inf")
         no_improve_epochs = 0
         alpha_val_update_credit = 0.0
+        pending_gradient_samples = 0
+        optimizer_sample_credit = 0
+        optimizer.zero_grad(set_to_none=True)
 
         for epoch in range(self.epochs):
             epoch_start = time.perf_counter()
@@ -1320,32 +1376,30 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             alpha_val_selector_accumulators = _new_selector_diagnostic_accumulators(
                 val_alpha_specs
             )
+            optimizer_steps = 0
 
-            for batch in train_loader:
-                if not _batch_meets_min_size(batch, min_batch_size):
-                    continue
-                *batch_inputs, batch_y = batch
-                batch_inputs = tuple(x.to(self.device_) for x in batch_inputs)
-                batch_y = batch_y.to(self.device_)
+            def take_optimizer_step() -> None:
+                nonlocal alpha_val_iter
+                nonlocal alpha_val_update_credit
+                nonlocal optimizer_steps
+                nonlocal pending_gradient_samples
 
-                step_start = time.perf_counter()
-                optimizer.zero_grad(set_to_none=True)
-                with _temporarily_requires_grad(val_alpha_params, False):
-                    logits, aux_value = self._model_forward(batch_inputs)
-                    _record_selector_diagnostics(
-                        train_selector_accumulators,
-                        selector_specs,
-                    )
-                    loss = criterion(logits, batch_y)
-                    # Train batches regularize only selectors updated on train.
-                    loss = loss + _selector_extra_loss(train_selector_specs, loss)
-                loss.backward()
+                if pending_gradient_samples <= 0:
+                    return
+                _scale_optimizer_gradients(
+                    optimizer,
+                    1.0 / float(pending_gradient_samples),
+                )
                 if self.grad_clip_norm is not None and float(self.grad_clip_norm) > 0.0:
                     torch.nn.utils.clip_grad_norm_(
                         _optimizer_parameters(optimizer),
                         max_norm=float(self.grad_clip_norm),
                     )
                 optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                pending_gradient_samples = 0
+                optimizer_steps += 1
+
                 if use_val_alpha_updates:
                     if val_loader is None or alpha_val_iter is None:
                         raise RuntimeError("alpha validation loader is not initialized.")
@@ -1368,10 +1422,69 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                         if abs(alpha_val_update_credit) < 1e-12:
                             alpha_val_update_credit = 0.0
 
-                loss_sum += float(loss.item())
+            for batch in train_loader:
+                if not _batch_meets_min_size(batch, min_batch_size):
+                    continue
+                batch = tuple(x.to(self.device_) for x in batch)
+                batch_size = _batch_sample_count(batch)
+
+                step_start = time.perf_counter()
+                weighted_loss = 0.0
+                weighted_aux = 0.0
+                aux_samples = 0
+                logits_parts = []
+                batch_y_parts = []
+                start = 0
+                while start < batch_size:
+                    if optimizer_step_batch_mode == "split":
+                        slice_size = min(
+                            optimizer_step_batch_size - pending_gradient_samples,
+                            batch_size - start,
+                        )
+                    else:
+                        slice_size = batch_size
+                    batch_slice = _slice_tensor_batch(batch, start, start + slice_size)
+                    *batch_inputs, batch_y = batch_slice
+                    with _temporarily_requires_grad(val_alpha_params, False):
+                        logits, aux_value = self._model_forward(tuple(batch_inputs))
+                        _record_selector_diagnostics(
+                            train_selector_accumulators,
+                            selector_specs,
+                        )
+                        loss = criterion(logits, batch_y)
+                        # Train batches regularize only selectors updated on train.
+                        loss = loss + _selector_extra_loss(train_selector_specs, loss)
+                    (loss * slice_size).backward()
+                    pending_gradient_samples += slice_size
+                    weighted_loss += float(loss.item()) * slice_size
+                    logits_parts.append(logits.detach())
+                    batch_y_parts.append(batch_y.detach())
+                    if aux_value is not None:
+                        weighted_aux += aux_value * slice_size
+                        aux_samples += slice_size
+
+                    if optimizer_step_batch_mode == "split":
+                        if pending_gradient_samples == optimizer_step_batch_size:
+                            take_optimizer_step()
+                    start += slice_size
+                    if optimizer_step_batch_mode == "credit":
+                        break
+
+                if optimizer_step_batch_mode == "credit":
+                    optimizer_sample_credit += batch_size
+                    if optimizer_sample_credit >= optimizer_step_batch_size:
+                        # Preserve excess credit for later batches; never replay one
+                        # batch's gradients to manufacture multiple optimizer steps.
+                        take_optimizer_step()
+                        optimizer_sample_credit -= optimizer_step_batch_size
+
+                technical_loss = weighted_loss / batch_size
+                logits = torch.cat(logits_parts, dim=0)
+                batch_y = torch.cat(batch_y_parts, dim=0)
+                loss_sum += technical_loss
                 n_batches += 1
-                if aux_value is not None:
-                    aux_sum += aux_value
+                if aux_samples:
+                    aux_sum += weighted_aux / aux_samples
                     aux_count += 1
                 preds = torch.argmax(logits, dim=1)
                 n_correct += int((preds == batch_y).sum().item())
@@ -1389,17 +1502,30 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                         np.concatenate(epoch_probas, axis=0),
                         n_classes,
                     )
-                    rate = batch_y.numel() / max(time.perf_counter() - step_start, 1e-6)
+                    rate = batch_size / max(time.perf_counter() - step_start, 1e-6)
                     self._vprint(
                         2,
                         f"[Train][Epoch {epoch + 1}/{self.epochs}] "
                         f"step={n_batches}/{eligible_train_batches} "
-                        f"loss={float(loss.item()):.6f} "
+                        f"loss={technical_loss:.6f} "
                         f"running_loss={running_loss:.6f} "
                         f"running_acc={running_acc:.4f} "
                         f"running_roc_auc={fmt_metric(running_auc)} "
                         f"rate={rate:.2f} samples/s",
                     )
+
+            if remainder_policy == "flush":
+                take_optimizer_step()
+                optimizer_sample_credit = 0
+            elif remainder_policy == "drop":
+                optimizer.zero_grad(set_to_none=True)
+                pending_gradient_samples = 0
+                optimizer_sample_credit = 0
+            elif epoch == self.epochs - 1:
+                # Carry is only meaningful when another epoch can consume it.
+                optimizer.zero_grad(set_to_none=True)
+                pending_gradient_samples = 0
+                optimizer_sample_credit = 0
 
             if n_batches == 0:
                 raise RuntimeError(
@@ -1419,6 +1545,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             self.train_loss_history_.append(avg_loss)
             self.train_accuracy_history_.append(avg_acc)
             self.train_roc_auc_history_.append(avg_auc)
+            self.optimizer_step_count_history_.append(optimizer_steps)
             train_selector_summary = _finalize_selector_diagnostics(
                 train_selector_accumulators
             )
@@ -1487,7 +1614,8 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 f"acc={avg_acc:.4f} (delta {acc_delta:+.4f}) "
                 f"roc_auc={fmt_metric(avg_auc)} "
                 f"(delta {fmt_metric(auc_delta) if auc_delta is not None else 'n/a'})"
-                f"{aux_suffix} epoch_time={epoch_time:.2f}s{val_suffix}",
+                f" optimizer_steps={optimizer_steps}{aux_suffix} "
+                f"epoch_time={epoch_time:.2f}s{val_suffix}",
             )
 
             if (
@@ -1502,6 +1630,10 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     f"best epoch={best_epoch} best_val_loss={best_val_loss:.6f}",
                 )
                 break
+
+        # An early-stopped carry policy also has no subsequent epoch to consume it.
+        if pending_gradient_samples > 0:
+            optimizer.zero_grad(set_to_none=True)
 
         if val_loader is not None and best_state is not None:
             self.model_.load_state_dict(best_state)
