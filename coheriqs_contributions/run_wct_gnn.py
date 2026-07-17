@@ -363,7 +363,7 @@ PIPELINE_PARAM_GRIDS = {
         "seed": [42],
         # "message_init_seed": [43],
         # "readout_init_seed": [44],
-        "epochs": [150],
+        "epochs": [10],
         "normalize_input": [True],
         "learning_rate": [1e-3],
         "weight_decay": [1e-2],
