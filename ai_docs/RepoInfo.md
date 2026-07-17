@@ -7,7 +7,8 @@ MOABB LeftRightImagery (BNCI2014-001) CWT/WCT/XWT GNN + baselines.
 - Run scripts / pytest from: **repo root** (imports). Edit code under
   `coheriqs_contributions/`.
 - Environment: `moabb-env-win`
-- Main run: `python coheriqs_contributions/run_wct_gnn.py --subjects 1`
+- Main run: `python coheriqs_contributions/run_wct_gnn.py --subjects 1 --pipeline WCT-Evidence-GNN`
+or `bash coheriqs_contributions/run_canonical_wct_evidence_gnn.sh` from repo root.
 - Tests: `pytest coheriqs_contributions/tests -q`
 
 ## Paths (open only when needed)
@@ -25,3 +26,8 @@ MOABB LeftRightImagery (BNCI2014-001) CWT/WCT/XWT GNN + baselines.
 - `Coherent_Multiplex/utils/coherence_utils.py` — fcwt CWT / coherence. Open
   only when changing the wavelet transform itself; classifiers call it via
   `common.py`.
+
+## Chores
+
+- Keep `run_canonical_wct_evidence_gnn.sh` in sync with `run_wct_gnn.py` —
+  when the active run profile changes - update the arguments accordingly.
