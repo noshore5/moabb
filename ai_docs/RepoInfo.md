@@ -6,7 +6,7 @@ MOABB LeftRightImagery (BNCI2014-001) CWT/WCT/XWT GNN + baselines.
   elsewhere (`Coherent_Multiplex/`, upstream `moabb/`).
 - Run scripts / pytest from: **repo root** (imports). Edit code under
   `coheriqs_contributions/`.
-- Environment: `moabb-env-win`
+- Environment: venvs live at repo root and are (usually) named as `moabb-env-win` (Windows) / `moabb-env` (Unix).
 - Main run: `python coheriqs_contributions/run_wct_gnn.py --subjects 1 --pipeline WCT-Evidence-GNN`
 or `bash coheriqs_contributions/run_canonical_setup.sh` from repo root.
 - Tests: `pytest coheriqs_contributions/tests -q`

@@ -1,1 +1,4 @@
 notebooks/* linguist-documentation
+
+# Shell scripts must stay LF (CRLF breaks shebang: bash\r)
+*.sh text eol=lf
