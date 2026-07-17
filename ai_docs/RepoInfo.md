@@ -8,7 +8,7 @@ MOABB LeftRightImagery (BNCI2014-001) CWT/WCT/XWT GNN + baselines.
   `coheriqs_contributions/`.
 - Environment: `moabb-env-win`
 - Main run: `python coheriqs_contributions/run_wct_gnn.py --subjects 1 --pipeline WCT-Evidence-GNN`
-or `bash coheriqs_contributions/run_canonical_wct_evidence_gnn.sh` from repo root.
+or `bash coheriqs_contributions/run_canonical_setup.sh` from repo root.
 - Tests: `pytest coheriqs_contributions/tests -q`
 
 ## Paths (open only when needed)
@@ -29,5 +29,5 @@ or `bash coheriqs_contributions/run_canonical_wct_evidence_gnn.sh` from repo roo
 
 ## Chores
 
-- Keep `run_canonical_wct_evidence_gnn.sh` in sync with `run_wct_gnn.py` —
+- Keep `run_canonical_setup.sh` in sync with `run_wct_gnn.py` —
   when the active run profile changes - update the arguments accordingly.

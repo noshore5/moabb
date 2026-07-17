@@ -10,8 +10,8 @@ program and gates: `ai_docs/wct_gnn_rnd/`.
   change upstream `moabb/` only when the contribution genuinely belongs there.
 - Launch and pytest from the **repo root**. `run_wct_gnn.py` puts the root on
   `sys.path`; the contributions tree is not an installable package.
-- `coheriqs_contributions/run_canonical_wct_evidence_gnn.sh` — maintained script
-  wrapper for the canonical WCT-Evidence-GNN run; update when the active
+- `coheriqs_contributions/run_canonical_setup.sh` — maintained script
+  wrapper for the canonical experimental setup; update when the active
   experimental CLI profile changes.
 
 ## Argument / config threading

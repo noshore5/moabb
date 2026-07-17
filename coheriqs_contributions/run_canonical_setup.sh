@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Canonical WCT-Evidence-GNN run (subject 1).
+# Canonical experimental setup (subject 1, WCT-Evidence-GNN).
 # Lives in coheriqs_contributions/ next to run_wct_gnn.py.
 #
 # Keep this script aligned with the current canonical experimental CLI.
@@ -8,8 +8,8 @@
 #
 # Safe to invoke from repo root or coheriqs_contributions/ (cwd does not matter).
 # Usage (with moabb-env-win active):
-#   bash coheriqs_contributions/run_canonical_wct_evidence_gnn.sh
-#   bash run_canonical_wct_evidence_gnn.sh   # when cwd is coheriqs_contributions/
+#   bash coheriqs_contributions/run_canonical_setup.sh
+#   bash run_canonical_setup.sh   # when cwd is coheriqs_contributions/
 
 set -euo pipefail
 
