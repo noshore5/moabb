@@ -7,6 +7,14 @@ from typing import Literal
 
 
 ActivationKind = Literal["identity", "relu", "gelu", "silu", "elu", "tanh"] | None
+GateMode = Literal["soft", "gumbel_soft", "gumbel_hard", "argmax", "frozen"]
+GateScope = Literal["layer", "channel"]
+GateGradientMode = Literal["selected_only", "soft_all"]
+GateEvalMode = Literal["same", "argmax", "frozen"]
+AlphaUpdateSplit = Literal["train", "val"]
+AlphaOptim = Literal["shared", "separate"]
+LogitsInit = float | tuple[float, ...] | tuple[tuple[float, ...], ...]
+BranchOutputNormKind = Literal["none", "rms", "layer"]
 InitMode = Literal[
     "torch_default",
     "auto",
@@ -82,6 +90,41 @@ class ResidualConfig:
     layer_scale: float | None = None
     rezero: bool = False
     drop_path: float = 0.0
+
+
+@dataclass(frozen=True)
+class CategoricalGateConfig:
+    """Learned categorical selector settings.
+
+    ``alpha_update_split`` and ``alpha_optim`` are declared training intent.
+    The trainer is responsible for optimizer grouping and data split handling.
+    """
+
+    num_choices: int
+    mode: GateMode = "soft"
+    temperature: float = 1.0
+    scope: GateScope = "layer"
+    num_features: int | None = None
+    channel_dim: int = 1
+    logits_init: LogitsInit = 0.0
+    eval_mode: GateEvalMode = "argmax"
+    exploration_epsilon: float | None = None
+    cost_weight: float = 0.0
+    entropy_weight: float = 0.0
+    gradient_mode: GateGradientMode = "soft_all"
+    frozen_index: int | None = None
+    alpha_update_split: AlphaUpdateSplit = "train"
+    alpha_optim: AlphaOptim = "separate"
+
+
+@dataclass(frozen=True)
+class SelectPathConfig:
+    """Optional path-selection conveniences layered on top of a gate config."""
+
+    include_zero_update: bool = False
+    candidate_costs: tuple[float, ...] | None = None
+    branch_norm: BranchOutputNormKind = "none"
+    branch_norm_eps: float = 1e-5
 
 
 @dataclass(frozen=True)

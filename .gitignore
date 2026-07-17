@@ -142,3 +142,8 @@ examples/tutorials/*.mat
 
 results/results*
 /moabb/tests/test_pipelines/*.lock
+*.mat
+.codex/
+AGENTS.md
+agents_workflow_docs/
+ai_docs/excluded/

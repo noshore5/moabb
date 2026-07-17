@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -14,26 +15,32 @@ from coheriqs_contributions.moabb_pipelines.common import make_gaussian_weight2d
 try:
     from coheriqs_contributions.nn_components import (
         ActConfig,
+        CategoricalGateConfig,
         Conv1dConfig,
         Conv2dConfig,
         DenseMLPConfig,
         InitConfig,
         NormConfig,
         RegConfig,
+        ResidualConfig,
+        SelectPath,
         build_dense_mlp,
         build_conv1d_block,
         build_conv2d_block,
-        scoped_torch_init_seed, ResidualConfig,
-)
+        scoped_torch_init_seed,
+    )
 except ModuleNotFoundError:
     from nn_components import (
         ActConfig,
+        CategoricalGateConfig,
         Conv1dConfig,
         Conv2dConfig,
         DenseMLPConfig,
         InitConfig,
         NormConfig,
         RegConfig,
+        ResidualConfig,
+        SelectPath,
         build_conv1d_block,
         build_dense_mlp,
         build_conv2d_block,
@@ -63,6 +70,11 @@ WCT_EVIDENCE_WINDOW_COMPUTE_MODES = (
     "single_pass_continuous",
     "chunked",
     "sequential",
+)
+MESSAGE_MLP_SELECTOR_MODES = (
+    "shared_train",
+    "separate_train",
+    "separate_val",
 )
 DEFAULT_MAX_WINDOWS_PER_CHUNK = 4
 
@@ -131,6 +143,20 @@ def _format_bytes(n_bytes: int) -> str:
     return f"{value:.2f} GiB"
 
 
+def _format_number_list(values: Sequence[float]) -> str:
+    return "[" + ", ".join(f"{float(value):.3f}" for value in values) + "]"
+
+
+def _selector_mode_from_gate(gate) -> str:
+    if gate.alpha_optim == "shared" and gate.alpha_update_split == "train":
+        return "shared_train"
+    if gate.alpha_optim == "separate" and gate.alpha_update_split == "train":
+        return "separate_train"
+    if gate.alpha_optim == "separate" and gate.alpha_update_split == "val":
+        return "separate_val"
+    return f"{gate.alpha_optim}_{gate.alpha_update_split}"
+
+
 def _conv1d_length(length: int, *, kernel_size: int, stride: int) -> int:
     return ((int(length) - int(kernel_size)) // int(stride)) + 1
 
@@ -160,6 +186,9 @@ class WCTEvidenceGNNCore(nn.Module):
         model_init_seed: int | None = None,
         message_init_seed: int | None = None,
         readout_init_seed: int | None = None,
+        select_message_mlp: list[dict] | None = None,
+        select_message_mlp_gate: dict | None = None,
+        message_mlp_selector_mode: str = "separate_train",
 
         feature_conv_kernel_size: int = 5,
         feature_conv_pool_size: int = 4,
@@ -209,6 +238,11 @@ class WCTEvidenceGNNCore(nn.Module):
             )
         if max_windows_per_chunk is not None and max_windows_per_chunk <= 0:
             raise ValueError("max_windows_per_chunk must be > 0 or None.")
+        if message_mlp_selector_mode not in MESSAGE_MLP_SELECTOR_MODES:
+            raise ValueError(
+                "message_mlp_selector_mode must be one of "
+                f"{MESSAGE_MLP_SELECTOR_MODES}."
+            )
 
         self.n_channels = n_channels
         self.nfreqs = nfreqs
@@ -297,6 +331,9 @@ class WCTEvidenceGNNCore(nn.Module):
                 hidden_features=message_dim,
                 out_features=hidden_dim,
                 init_seed=message_init_seed,
+                select_message_mlp=select_message_mlp,
+                select_message_mlp_gate=select_message_mlp_gate,
+                message_mlp_selector_mode=message_mlp_selector_mode,
             )
             readout_dim = (
                 hidden_dim * n_channels if readout_mode == "flatten" else hidden_dim
@@ -361,6 +398,7 @@ class WCTEvidenceGNNCore(nn.Module):
             f"padding_mode={self.padding_mode}",
             flush=True,
         )
+        self._print_selectable_message_mlp_summary(header)
 
         context = self._summary_context
         if context is None:
@@ -410,6 +448,37 @@ class WCTEvidenceGNNCore(nn.Module):
                 f"approx_memory={_format_bytes(numel * dtype_bytes)}",
                 flush=True,
             )
+
+    def _print_selectable_message_mlp_summary(self, header: str) -> None:
+        if not isinstance(self.message_mlp, SelectPath):
+            return
+
+        gate = self.message_mlp.gate
+        probs = gate.probabilities().detach().float().cpu()
+        probs_by_candidate = probs.reshape(-1, int(probs.shape[-1])).mean(dim=0)
+        entropy = -(
+            probs
+            * probs.clamp_min(torch.finfo(probs.dtype).tiny).log()
+        ).sum(dim=-1).mean()
+        candidate_params = [
+            sum(int(param.numel()) for param in candidate.parameters())
+            for candidate in self.message_mlp.choice.candidates
+        ]
+        selector_mode = _selector_mode_from_gate(gate)
+        print(
+            f"[{header}] WCTEvidence selectable message_mlp "
+            f"candidates={len(candidate_params)} "
+            f"selector_optimizer_mode={selector_mode} "
+            f"alpha={gate.alpha_optim}/{gate.alpha_update_split} "
+            f"mode={gate.mode} eval_mode={gate.eval_mode} "
+            f"gradient_mode={gate.gradient_mode} "
+            f"temperature={gate.temperature:.4g} "
+            f"exploration_epsilon={gate.exploration_epsilon} "
+            f"initial_probs={_format_number_list(probs_by_candidate.tolist())} "
+            f"entropy={float(entropy.item()):.4f} "
+            f"candidate_params={candidate_params}",
+            flush=True,
+        )
 
     def _estimate_feature_time_steps(self, n_time: int) -> int:
         length = int(n_time)
@@ -1217,10 +1286,18 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         early_stopping_patience: int | None = None,
         device: str = "auto",
         seed: int = 42,
+        last_batch_min_ratio: float = 0.0,
+        selector_alpha_val_update_rate: float = 1.0,
+        optimizer_step_batch_size: int | None = None,
+        optimizer_step_batch_mode: Literal["credit", "split"] = "credit",
+        optimizer_step_remainder_policy: Literal["flush", "drop", "carry"] = "flush",
         component_profile: str = "legacy",
         message_layer_norm: bool = False,
         message_init_seed: int | None = None,
         readout_init_seed: int | None = None,
+        select_message_mlp: list[dict] | None = None,
+        select_message_mlp_gate: dict | None = None,
+        message_mlp_selector_mode: str = "separate_train",
         feature_conv_kernel_size: int = 5,
         feature_conv_pool_size: int = 4,
         feature_conv_intermediate_channels: int | None  = None,
@@ -1256,6 +1333,9 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
         self.message_layer_norm = message_layer_norm
         self.message_init_seed = message_init_seed
         self.readout_init_seed = readout_init_seed
+        self.select_message_mlp = select_message_mlp
+        self.select_message_mlp_gate = select_message_mlp_gate
+        self.message_mlp_selector_mode = message_mlp_selector_mode
         self.feature_conv_kernel_size = feature_conv_kernel_size
         self.feature_conv_pool_size = feature_conv_pool_size
         self.feature_conv_intermediate_channels = feature_conv_intermediate_channels
@@ -1289,6 +1369,11 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             early_stopping_patience=early_stopping_patience,
             device=device,
             seed=seed,
+            last_batch_min_ratio=last_batch_min_ratio,
+            selector_alpha_val_update_rate=selector_alpha_val_update_rate,
+            optimizer_step_batch_size=optimizer_step_batch_size,
+            optimizer_step_batch_mode=optimizer_step_batch_mode,
+            optimizer_step_remainder_policy=optimizer_step_remainder_policy,
             verbose=verbose,
         )
 
@@ -1329,6 +1414,9 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             model_init_seed=self.seed,
             message_init_seed=self.message_init_seed,
             readout_init_seed=self.readout_init_seed,
+            select_message_mlp=self.select_message_mlp,
+            select_message_mlp_gate=self.select_message_mlp_gate,
+            message_mlp_selector_mode=self.message_mlp_selector_mode,
             feature_conv_kernel_size=self.feature_conv_kernel_size,
             feature_conv_pool_size=self.feature_conv_pool_size,
             feature_conv_intermediate_channels=self.feature_conv_intermediate_channels,
@@ -1411,17 +1499,209 @@ def _build_message_mlp(
     hidden_features: int,
     out_features: int,
     init_seed: int | None,
+    select_message_mlp: list[dict] | None,
+    select_message_mlp_gate: dict | None,
+    message_mlp_selector_mode: str,
 ) -> nn.Module:
-    return build_dense_mlp(
-        DenseMLPConfig(
-            depth=2,
+    if select_message_mlp is not None:
+        return _build_selectable_message_mlp(
+            message_layer_norm=message_layer_norm,
             in_features=in_features,
             hidden_features=hidden_features,
             out_features=out_features,
-            activation=ActConfig(kind="gelu"),
+            init_seed=init_seed,
+            select_message_mlp=select_message_mlp,
+            select_message_mlp_gate=select_message_mlp_gate,
+            message_mlp_selector_mode=message_mlp_selector_mode,
+        )
+    return _build_single_message_mlp(
+        message_layer_norm=message_layer_norm,
+        in_features=in_features,
+        hidden_features=hidden_features,
+        out_features=out_features,
+        depth=2,
+        activation="gelu",
+        dropout=0.0,
+        init_mode="torch_default",
+        init_seed=init_seed,
+    )
+
+
+_MESSAGE_MLP_CANDIDATE_KEYS = {
+    "activation",
+    "depth",
+    "dropout",
+    "hidden_features",
+    "init_mode",
+    "init_seed",
+    "message_dim",
+    "message_layer_norm",
+}
+_MESSAGE_MLP_SHAPE_KEYS = {"hidden_dim", "in_features", "out_features"}
+_MESSAGE_MLP_GATE_KEYS = {
+    "entropy_weight",
+    "eval_mode",
+    "exploration_epsilon",
+    "frozen_index",
+    "gradient_mode",
+    "logits_init",
+    "mode",
+    "temperature",
+}
+
+
+def _build_selectable_message_mlp(
+    *,
+    message_layer_norm: bool,
+    in_features: int,
+    hidden_features: int,
+    out_features: int,
+    init_seed: int | None,
+    select_message_mlp: Sequence[dict],
+    select_message_mlp_gate: dict | None,
+    message_mlp_selector_mode: str,
+) -> nn.Module:
+    if isinstance(select_message_mlp, (str, bytes)) or not isinstance(
+        select_message_mlp,
+        Sequence,
+    ):
+        raise ValueError("select_message_mlp must be a non-empty list of dicts.")
+    if len(select_message_mlp) == 0:
+        raise ValueError("select_message_mlp must contain at least one candidate.")
+
+    # Missing candidate init_seed values consume this active stream in order;
+    # explicit candidate seeds use a nested fork and do not advance it.
+    with scoped_torch_init_seed(init_seed):
+        candidates = [
+            _build_message_mlp_candidate(
+                candidate,
+                candidate_index=index,
+                message_layer_norm=message_layer_norm,
+                in_features=in_features,
+                hidden_features=hidden_features,
+                out_features=out_features,
+            )
+            for index, candidate in enumerate(select_message_mlp)
+        ]
+
+    gate = _build_message_mlp_gate(
+        num_choices=len(candidates),
+        select_message_mlp_gate=select_message_mlp_gate,
+        message_mlp_selector_mode=message_mlp_selector_mode,
+    )
+    return SelectPath(candidates, gate)
+
+
+def _build_message_mlp_candidate(
+    candidate: dict,
+    *,
+    candidate_index: int,
+    message_layer_norm: bool,
+    in_features: int,
+    hidden_features: int,
+    out_features: int,
+) -> nn.Module:
+    if not isinstance(candidate, dict):
+        raise ValueError(
+            "select_message_mlp candidates must be dicts; "
+            f"candidate {candidate_index} has type {type(candidate).__name__}."
+        )
+
+    shape_keys = sorted(set(candidate).intersection(_MESSAGE_MLP_SHAPE_KEYS))
+    if shape_keys:
+        raise ValueError(
+            "select_message_mlp candidates must not override shape-derived keys: "
+            f"{shape_keys}."
+        )
+    unknown = sorted(set(candidate).difference(_MESSAGE_MLP_CANDIDATE_KEYS))
+    if unknown:
+        raise ValueError(
+            f"Unsupported select_message_mlp candidate keys: {unknown}."
+        )
+    if "message_dim" in candidate and "hidden_features" in candidate:
+        raise ValueError(
+            "select_message_mlp candidate cannot set both 'message_dim' and "
+            "'hidden_features'."
+        )
+
+    candidate_hidden = candidate.get(
+        "hidden_features",
+        candidate.get("message_dim", hidden_features),
+    )
+    return _build_single_message_mlp(
+        message_layer_norm=bool(
+            candidate.get("message_layer_norm", message_layer_norm)
+        ),
+        in_features=in_features,
+        hidden_features=int(candidate_hidden),
+        out_features=out_features,
+        depth=int(candidate.get("depth", 2)),
+        activation=candidate.get("activation", "gelu"),
+        dropout=float(candidate.get("dropout", 0.0)),
+        init_mode=str(candidate.get("init_mode", "torch_default")),
+        init_seed=candidate.get("init_seed"),
+    )
+
+
+def _build_message_mlp_gate(
+    *,
+    num_choices: int,
+    select_message_mlp_gate: dict | None,
+    message_mlp_selector_mode: str,
+) -> CategoricalGateConfig:
+    if message_mlp_selector_mode not in MESSAGE_MLP_SELECTOR_MODES:
+        raise ValueError(
+            "message_mlp_selector_mode must be one of "
+            f"{MESSAGE_MLP_SELECTOR_MODES}."
+        )
+    gate_overrides = {}
+    if select_message_mlp_gate is not None:
+        if not isinstance(select_message_mlp_gate, dict):
+            raise ValueError("select_message_mlp_gate must be a dict or None.")
+        unknown = sorted(set(select_message_mlp_gate).difference(_MESSAGE_MLP_GATE_KEYS))
+        if unknown:
+            raise ValueError(f"Unsupported select_message_mlp_gate keys: {unknown}.")
+        gate_overrides = dict(select_message_mlp_gate)
+
+    alpha_optim = (
+        "shared" if message_mlp_selector_mode == "shared_train" else "separate"
+    )
+    alpha_update_split = (
+        "val" if message_mlp_selector_mode == "separate_val" else "train"
+    )
+    return CategoricalGateConfig(
+        num_choices=num_choices,
+        alpha_optim=alpha_optim,
+        alpha_update_split=alpha_update_split,
+        **gate_overrides,
+    )
+
+
+def _build_single_message_mlp(
+    *,
+    message_layer_norm: bool,
+    in_features: int,
+    hidden_features: int,
+    out_features: int,
+    depth: int,
+    activation,
+    dropout: float,
+    init_mode: str,
+    init_seed: int | None,
+) -> nn.Module:
+    activation_cfg = (
+        activation if isinstance(activation, ActConfig) else ActConfig(kind=activation)
+    )
+    return build_dense_mlp(
+        DenseMLPConfig(
+            depth=depth,
+            in_features=in_features,
+            hidden_features=hidden_features,
+            out_features=out_features,
+            activation=activation_cfg,
             norm=NormConfig(kind="layer" if message_layer_norm else None, affine=True),
-            regularization=RegConfig(dropout=0.0),
-            init=InitConfig(mode="torch_default"),
+            regularization=RegConfig(dropout=dropout),
+            init=InitConfig(mode=init_mode),
         ),
         # residual=ResidualConfig(norm_position="sandwich", shortcut="auto", rezero=True),
         init_seed=init_seed,

@@ -268,6 +268,11 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         early_stopping_patience: int | None = None,
         device: str = "auto",
         seed: int = 42,
+        last_batch_min_ratio: float = 0.0,
+        selector_alpha_val_update_rate: float = 1.0,
+        optimizer_step_batch_size: int | None = None,
+        optimizer_step_batch_mode: str = "credit",
+        optimizer_step_remainder_policy: str = "flush",
         verbose: int = 0,
     ) -> None:
         self.sampling_rate = sampling_rate
@@ -300,6 +305,11 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             early_stopping_patience=early_stopping_patience,
             device=device,
             seed=seed,
+            last_batch_min_ratio=last_batch_min_ratio,
+            selector_alpha_val_update_rate=selector_alpha_val_update_rate,
+            optimizer_step_batch_size=optimizer_step_batch_size,
+            optimizer_step_batch_mode=optimizer_step_batch_mode,
+            optimizer_step_remainder_policy=optimizer_step_remainder_policy,
             use_class_weights=False,
             verbose=verbose,
         )

@@ -136,6 +136,14 @@ def _make_wct_evidence_gnn():
         smooth_kernel_sigma=(None, None),
         window_compute_mode="sequential",
         max_windows_per_chunk=None,
+        select_message_mlp=None,
+        select_message_mlp_gate=None,
+        message_mlp_selector_mode="shared_train",
+        selector_alpha_val_update_rate=1.0,
+        last_batch_min_ratio=0.0,
+        optimizer_step_batch_size=None,
+        optimizer_step_batch_mode="credit",
+        optimizer_step_remainder_policy="flush",
         verbose=3,
     )
 
@@ -363,10 +371,39 @@ PIPELINE_PARAM_GRIDS = {
         "seed": [42],
         # "message_init_seed": [43],
         # "readout_init_seed": [44],
-        "epochs": [10],
+        "select_message_mlp": [
+            # None,  # To enable selectable message MLP candidates, replace None with:
+            [
+                {"init_seed": 101},
+                {
+                    "init_seed": 103,
+                    # "message_dim": 16,
+                    # "message_layer_norm": True,
+                },
+                {"init_seed": 104},
+
+            ],
+        ],
+        "select_message_mlp_gate": [
+            # None,
+            {"mode": "gumbel_hard"}
+        ],
+        "message_mlp_selector_mode": [
+            # "shared_train",
+            # "separate_train",
+            "separate_val",
+        ],
+        "selector_alpha_val_update_rate": [0.5],
+
+        "last_batch_min_ratio": [0.5],
+        "optimizer_step_batch_size": [None],
+        "optimizer_step_batch_mode": ["credit"],
+        "optimizer_step_remainder_policy": ["carry"],
+
+        "epochs": [180],
         "normalize_input": [True],
-        "learning_rate": [1e-3],
-        "weight_decay": [1e-2],
+        "learning_rate": [1.0e-3],
+        "weight_decay": [1.0e-2],
         "noise_augmentation_enabled": [True],
         "noise_apply_prob": [1.0],
         "noise_strength": [0.15],
@@ -378,7 +415,7 @@ PIPELINE_PARAM_GRIDS = {
         "use_mag": [False],
         "use_ang": [False],
         "max_windows_per_chunk": [1],
-        "window_compute_mode": ["chunked"],
+        "window_compute_mode": ["single_pass_continuous"],
         "verbose": [2],
 
     },
