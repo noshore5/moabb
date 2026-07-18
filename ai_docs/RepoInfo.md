@@ -10,6 +10,10 @@ MOABB LeftRightImagery (BNCI2014-001) CWT/WCT/XWT GNN + baselines.
 - Main run: `python coheriqs_contributions/run_wct_gnn.py --subjects 1 --pipeline WCT-Evidence-GNN`
 or `bash coheriqs_contributions/run_canonical_setup.sh` from repo root.
 - Tests: `pytest coheriqs_contributions/tests -q`
+- Subject scope: default `--subjects 1` for frequent/component testing; `1 2 3 4`
+  for batch whole-pipeline checks. Subjects 5–9 are held back until approved.
+  Read/update `ai_docs/experimental_policy.md` (scope rules + exploitation tracker)
+  before choosing subjects.
 
 ## Paths (open only when needed)
 
