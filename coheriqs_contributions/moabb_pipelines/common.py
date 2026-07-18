@@ -478,7 +478,7 @@ def print_torch_parameter_summary(model: nn.Module, header: str = "Model") -> No
 def torch_parameter_hashes(
     model: nn.Module,
     *,
-    precision: float = 1e-6,
+    precision: float = 1e-5,
 ) -> tuple[dict[str, str], str, str]:
     """Return tolerance-aware parameter hashes and value/name model hashes."""
 
@@ -507,7 +507,7 @@ def print_torch_parameter_hashes(
     model: nn.Module,
     header: str = "Model",
     *,
-    precision: float = 1e-6,
+    precision: float = 1e-5,
 ) -> None:
     """Print reproducible per-parameter and global model fingerprints."""
 
