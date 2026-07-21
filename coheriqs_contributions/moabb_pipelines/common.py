@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import random
 from contextlib import contextmanager
 from copy import deepcopy
@@ -547,19 +548,38 @@ def _quantized_parameter_bytes(param: torch.Tensor, precision: float) -> bytes:
 
 def resolve_coherence_utils():
     repo_root = Path(__file__).resolve().parents[2]
-    coherent_root = repo_root / "Coherent_Multiplex"
-    if coherent_root.exists():
-        coherent_root_str = str(coherent_root)
-        if coherent_root_str not in sys.path:
-            sys.path.insert(0, coherent_root_str)
+    configured_root = os.environ.get("WCT_COHERENT_MULTIPLEX_ROOT")
+    coherent_root = (
+        Path(configured_root).expanduser().resolve()
+        if configured_root
+        else repo_root / "Coherent_Multiplex"
+    )
+    coherence_module = coherent_root / "utils" / "coherence_utils.py"
+    if not coherence_module.is_file():
+        raise ImportError(
+            "Coherent_Multiplex root does not contain utils/coherence_utils.py: "
+            f"{coherent_root}"
+        )
+    coherent_root_str = str(coherent_root)
+    if coherent_root_str not in sys.path:
+        sys.path.insert(0, coherent_root_str)
     try:
-        from utils.coherence_utils import coherence, transform  # type: ignore
+        from utils import coherence_utils  # type: ignore
     except Exception as exc:
         raise ImportError(
             "Could not import Coherent_Multiplex wavelet helpers. "
             "Ensure Coherent_Multiplex is present and dependencies are installed."
         ) from exc
-    return transform, coherence
+    if configured_root:
+        resolved_module = Path(coherence_utils.__file__).resolve()
+        try:
+            resolved_module.relative_to(coherent_root)
+        except ValueError as exc:
+            raise ImportError(
+                "Loaded coherence helpers from an unexpected source: "
+                f"{resolved_module}; expected a module below {coherent_root}"
+            ) from exc
+    return coherence_utils.transform, coherence_utils.coherence
 
 
 def phase_rule_deadzone_sign(

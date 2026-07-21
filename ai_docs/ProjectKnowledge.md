@@ -1,7 +1,7 @@
 # Project Knowledge
 
-Durable conventions and gotchas for `coheriqs_contributions/`. Scientific
-program and gates: `ai_docs/wct_gnn_rnd/`.
+Durable conventions and gotchas for `coheriqs_contributions/`. The conditional
+local multi-worktree project-control bundle is under `orchestration/`.
 
 ## Where work goes
 
@@ -39,8 +39,13 @@ XWT / WCT classifiers → `_BaseCWTGNNClassifier` (`xwt_phase_gnn_classifier.py`
 
 - Checkpointing uses validation **loss**; MOABB reports outer **ROC-AUC** — they
   can disagree on small val splits.
-- No on-disk CWT cache: every `fit` / `predict` recomputes CWT (noise banks add
-  another pass) — runs are slow.
+- No reusable on-disk CWT/noise-bank cache yet: every `fit` / `predict`
+  recomputes CWT (noise banks add another pass). A future cache must be
+  keyed from the actual transform inputs and configuration; fold-specific
+  normalization makes raw subject/session identity alone insufficient.
+  Per-execution MNE scratch state is deliberately not that cache.
 - Grouped validation needs groups/metadata in `fit()`; without them the trainer
   falls back to a random stratified split.
-- EEG/MOABB artifacts live under `MNE_DATA` / `MOABB_RESULTS` (outside the repo).
+- EEG/MOABB artifacts live under `MNE_DATA` / `MOABB_RESULTS`. Manual runs use
+  the user MNE configuration; managed runs isolate `MOABB_RESULTS` per execution.
+  `run_wct_gnn.py` writes uniquely suffixed HDF5 plus CSV/Markdown companions.
