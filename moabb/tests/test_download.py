@@ -4,6 +4,7 @@ import mne
 import pytest
 
 from moabb.datasets.bbci_eeg_fnirs import BaseShin2017
+from moabb.datasets import download
 from moabb.datasets.utils import dataset_list
 
 
@@ -15,6 +16,99 @@ def _get_events(raw):
     else:
         events, _ = mne.events_from_annotations(raw, verbose=False)
     return events
+
+
+def test_sanitize_path_changes_only_the_filename(tmp_path):
+    path = tmp_path / "bad:name.mat"
+
+    sanitized = download._sanitize_path(path)
+
+    assert sanitized.parent == tmp_path
+    assert sanitized.name == "bad-name.mat"
+
+
+def test_data_dl_offline_reuses_existing_data_and_rejects_missing_data(
+    monkeypatch, tmp_path
+):
+    destination = tmp_path / "dataset.mat"
+    legacy_destination = tmp_path / "legacy-dataset.mat"
+    source = "unused-offline-source"
+
+    monkeypatch.setenv("MOABB_DISABLE_DOWNLOADS", "1")
+    monkeypatch.setattr(
+        download,
+        "get_dataset_path",
+        lambda sign, path=None: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        download,
+        "_normalize_destination",
+        lambda url, root: destination,
+    )
+    monkeypatch.setattr(
+        download,
+        "_url_to_local_path",
+        lambda url, root: str(legacy_destination),
+    )
+
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("offline mode must not construct a downloader")
+
+    monkeypatch.setattr(download, "choose_downloader", fail_if_called)
+
+    original_data = b"existing dataset"
+    destination.write_bytes(original_data)
+    assert download.data_dl(source, "TEST") == str(destination)
+
+    with pytest.raises(FileNotFoundError, match="downloads are disabled"):
+        download.data_dl(source, "TEST", force_update=True)
+    assert destination.read_bytes() == original_data
+
+    destination.unlink()
+    legacy_destination.write_bytes(b"legacy dataset")
+    assert download.data_dl(source, "TEST") == str(legacy_destination)
+    assert legacy_destination.is_file()
+    assert not destination.exists()
+
+    legacy_destination.unlink()
+    with pytest.raises(FileNotFoundError, match="downloads are disabled"):
+        download.data_dl(source, "TEST")
+
+
+def test_data_path_offline_reuses_existing_data_and_rejects_missing_or_refresh(
+    monkeypatch, tmp_path
+):
+    destination = tmp_path / "dataset.mat"
+    source = "unused-offline-source"
+
+    monkeypatch.setenv("MOABB_DISABLE_DOWNLOADS", "1")
+    monkeypatch.setattr(
+        download,
+        "get_dataset_path",
+        lambda sign, path=None: str(tmp_path),
+    )
+    monkeypatch.setattr(
+        download,
+        "_url_to_local_path",
+        lambda url, root: str(destination),
+    )
+
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("offline mode must not retrieve a dataset")
+
+    monkeypatch.setattr(download, "retrieve", fail_if_called)
+
+    original_data = b"existing dataset"
+    destination.write_bytes(original_data)
+    assert download.data_path(source, "TEST") == str(destination)
+
+    with pytest.raises(FileNotFoundError, match="downloads are disabled"):
+        download.data_path(source, "TEST", force_update=True)
+    assert destination.read_bytes() == original_data
+
+    destination.unlink()
+    with pytest.raises(FileNotFoundError, match="downloads are disabled"):
+        download.data_path(source, "TEST")
 
 
 @pytest.mark.parametrize("dataset", dataset_list)

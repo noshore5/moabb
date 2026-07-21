@@ -15,7 +15,7 @@ import requests
 from mne import get_config, set_config
 from mne.datasets.utils import _get_path
 from mne.utils import _url_to_local_path, verbose, warn
-from pooch import file_hash, retrieve
+from pooch import retrieve
 from pooch.downloaders import choose_downloader
 from requests.exceptions import HTTPError
 
@@ -39,9 +39,15 @@ def _set_user_agent(downloader):
     headers.setdefault("User-Agent", get_user_agent())
 
 
+def _downloads_disabled():
+    return os.environ.get("MOABB_DISABLE_DOWNLOADS") == "1"
+
+
 def _sanitize_path(path: Path) -> Path:
+    """Sanitize path components without modifying an absolute path anchor."""
     table = {ord(c): "-" for c in ':*?"<>|'}
-    return Path(str(path).translate(table))
+    parts = path.parts[1:] if path.anchor else path.parts
+    return Path(path.anchor, *(part.translate(table) for part in parts))
 
 
 def _normalize_destination(url: str, root: Path) -> Path:
@@ -136,11 +142,19 @@ def data_path(url, sign, path=None, force_update=False, update_path=True, verbos
     destination = _url_to_local_path(url, osp.join(path, key_dest))
     # Fetch the file
     if not osp.isfile(destination) or force_update:
+        if _downloads_disabled():
+            raise FileNotFoundError(
+                "Dataset file is missing or refresh was requested while downloads "
+                f"are disabled by MOABB_DISABLE_DOWNLOADS=1: {destination}"
+            )
         if osp.isfile(destination):
             os.remove(destination)
         if not osp.isdir(osp.dirname(destination)):
             os.makedirs(osp.dirname(destination))
+        logger.info("Downloading dataset file to %s", destination)
         retrieve(url, None, path=destination)
+    else:
+        logger.info("Using existing dataset file: %s", destination)
     return destination
 
 
@@ -181,28 +195,36 @@ def data_dl(url, sign, path=None, force_update=False, verbose=None):
     destination = _sanitize_path(_normalize_destination(url, root))
     legacy_destination = _sanitize_path(Path(_url_to_local_path(url, root)))
     if legacy_destination.exists() and not destination.exists():
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            legacy_destination.replace(destination)
-        except OSError:
+        if _downloads_disabled():
             destination = legacy_destination
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                legacy_destination.replace(destination)
+            except OSError:
+                destination = legacy_destination
 
+    # Fetch the file
+    if not destination.is_file() or force_update:
+        if _downloads_disabled():
+            raise FileNotFoundError(
+                "Dataset file is missing or refresh was requested while downloads "
+                f"are disabled by MOABB_DISABLE_DOWNLOADS=1: {destination}"
+            )
+        if destination.is_file():
+            destination.unlink()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Downloading dataset file to %s", destination)
+    else:
+        logger.info("Using existing dataset file: %s", destination)
+        return str(destination)
     downloader = choose_downloader(url, progressbar=True)
     if type(downloader).__name__ in ["HTTPDownloader", "DOIDownloader"]:
         downloader.kwargs.setdefault("verify", False)
     _set_user_agent(downloader)
-
-    # Fetch the file
-    if not destination.is_file() or force_update:
-        if destination.is_file():
-            destination.unlink()
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        known_hash = None
-    else:
-        known_hash = file_hash(str(destination))
     dlpath = retrieve(
         url,
-        known_hash,
+        None,
         fname=destination.name,
         path=str(destination.parent),
         progressbar=True,
