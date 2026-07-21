@@ -1,9 +1,13 @@
 import argparse
-import sys
 from collections import defaultdict
 from copy import deepcopy
+from datetime import datetime
+import os
 from pathlib import Path
+import re
+import sys
 
+from mne import get_config
 from mne.decoding import CSP
 import pandas as pd
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
@@ -417,6 +421,7 @@ PIPELINE_PARAM_GRIDS = {
         "max_windows_per_chunk": [1],
         "window_compute_mode": ["single_pass_continuous"],
         "verbose": [2],
+        "device": ["auto"],
 
     },
     "WCT-Phase-GNN-V2": {
@@ -514,6 +519,123 @@ def _print_run_plan(subjects, selected_pipelines, pipeline_runs):
         print(f"  - {run_cfg['label']}", flush=True)
 
 
+def _safe_run_id(value):
+    """Return a filesystem-safe run identifier without hiding user mistakes."""
+    run_id = value or os.environ.get("LOCAL_ORCHESTRATION_EXECUTION_ID")
+    if run_id is None:
+        run_id = datetime.now().strftime("manual-%Y%m%d-%H%M%S-%f")
+    run_id = str(run_id)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id):
+        raise ValueError(
+            "Run ID must start with an alphanumeric character and contain only "
+            "letters, digits, dot, underscore, or hyphen."
+        )
+    return run_id
+
+
+def _configured_data_root():
+    """Report the configured root; MOABB reports each resolved dataset file."""
+    configured = (
+        os.environ.get("MNE_DATASETS_BNCI_PATH")
+        or get_config("MNE_DATASETS_BNCI_PATH")
+        or os.environ.get("MNE_DATA")
+        or get_config("MNE_DATA")
+    )
+    if configured is None:
+        configured = Path.home() / "mne_data"
+    data_root = Path(configured).expanduser().resolve()
+    print(f"[Data] configured MOABB/MNE root: {data_root}", flush=True)
+    return data_root
+
+
+def _print_moabb_result_root():
+    configured = (
+        os.environ.get("MOABB_RESULTS")
+        or get_config("MOABB_RESULTS")
+        or os.environ.get("MNE_DATA")
+        or get_config("MNE_DATA")
+        or str(Path.home() / "mne_data")
+    )
+    print(f"[Results] MOABB root: {Path(configured).expanduser().resolve()}", flush=True)
+
+
+def _markdown_table(frame, columns):
+    def clean(value):
+        return str(value).replace("|", "\\|").replace("\n", " ")
+
+    lines = [
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    for row in frame[columns].itertuples(index=False, name=None):
+        lines.append("| " + " | ".join(clean(value) for value in row) + " |")
+    return lines
+
+
+def _write_group_artifacts(
+    *,
+    evaluation,
+    group_results,
+    group_id,
+    run_id,
+    subjects,
+    eval_mode,
+    inner_group,
+    run_param_grid,
+    singleton_applied,
+    data_root,
+):
+    """Write compact human-readable companions beside MOABB's HDF5 store."""
+    hdf5_path = Path(evaluation.results.filepath).resolve()
+    artifact_dir = hdf5_path.parent
+    scores_path = artifact_dir / f"scores_{group_id}.csv"
+    summary_path = artifact_dir / f"summary_{group_id}.md"
+    group_results.to_csv(scores_path, index=False)
+
+    outer_columns = ["subject", "session", "pipeline", "score"]
+    if "best_params" in group_results.columns:
+        outer_columns.append("best_params")
+    means = (
+        group_results.groupby(["subject", "pipeline"], as_index=False)["score"]
+        .mean()
+        .rename(columns={"score": "mean_score"})
+    )
+    lines = [
+        "# WCT run summary",
+        "",
+        f"- Run ID: `{run_id}`",
+        f"- Group: `{group_id}`",
+        f"- Evaluation mode: `{eval_mode}`",
+        f"- Inner grouping: `{inner_group or 'none'}`",
+        f"- Subjects: `{', '.join(str(subject) for subject in subjects)}`",
+        f"- Configured data root: `{data_root}`",
+        f"- HDF5 store: `{hdf5_path}`",
+        f"- Scores CSV: `{scores_path}`",
+    ]
+    lines.extend(["", "## Outer-CV rows", ""])
+    lines.extend(_markdown_table(group_results, outer_columns))
+    lines.extend(["", "## Subject/pipeline means", ""])
+    lines.extend(_markdown_table(means, ["subject", "pipeline", "mean_score"]))
+    lines.extend(["", "## Run-grid configuration", ""])
+    for label, configured_grid in run_param_grid.items():
+        lines.append(f"### {label}")
+        lines.append("")
+        if label in singleton_applied:
+            lines.append("Singleton parameters applied directly:")
+            values = singleton_applied[label]
+        else:
+            lines.append("Search grid passed to MOABB:")
+            values = configured_grid
+        lines.append("")
+        for name in sorted(values):
+            lines.append(f"- `{name}`: `{values[name]!r}`")
+        lines.append("")
+    summary_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[Artifact] HDF5: {hdf5_path}", flush=True)
+    print(f"[Artifact] scores CSV: {scores_path}", flush=True)
+    print(f"[Artifact] summary: {summary_path}", flush=True)
+
+
 def _print_inner_results(inner):
     print("\n=== Inner cv_results_ ===")
     if inner.empty:
@@ -598,7 +720,16 @@ def main():
         action="store_true",
         help="Print collected inner cv_results_ summaries and split scores.",
     )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help=(
+            "Identifier used in result filenames. Managed execution supplies its "
+            "execution ID automatically; manual runs receive a timestamped ID."
+        ),
+    )
     args = parser.parse_args()
+    run_id = _safe_run_id(args.run_id)
     selected_pipelines = args.pipeline if args.pipeline else DEFAULT_PIPELINES
     pipeline_runs = _build_pipeline_runs(
         pipeline_names=selected_pipelines,
@@ -606,11 +737,14 @@ def main():
         global_hyperparam_fit_mode=args.global_hyperparam_fit,
     )
     _print_run_plan(args.subjects, selected_pipelines, pipeline_runs)
+    print(f"Run ID: {run_id}", flush=True)
 
     moabb.set_log_level("info")
 
     dataset = BNCI2014_001()
     dataset.subject_list = args.subjects
+    data_root = _configured_data_root()
+    _print_moabb_result_root()
     paradigm = LeftRightImagery(fmin=8, fmax=35)
 
     base_eval_kwargs = dict(
@@ -634,6 +768,11 @@ def main():
             flush=True,
         )
         eval_kwargs = dict(base_eval_kwargs)
+        group_id = (
+            f"{run_id}__{eval_mode}__inner-"
+            f"{str(inner_group or 'none').replace('_', '-')}"
+        )
+        eval_kwargs["suffix"] = group_id
         if inner_group is not None:
             eval_kwargs.update(
                 inner_cv_class=StratifiedGroupKFold,
@@ -684,6 +823,18 @@ def main():
             raise ValueError(f"Unsupported eval_mode='{eval_mode}'.")
         group_results = evaluation.process(pipelines, param_grid=param_grid)
         print(f"Completed group rows: {len(group_results)}", flush=True)
+        _write_group_artifacts(
+            evaluation=evaluation,
+            group_results=group_results,
+            group_id=group_id,
+            run_id=run_id,
+            subjects=args.subjects,
+            eval_mode=eval_mode,
+            inner_group=inner_group,
+            run_param_grid=run_param_grid,
+            singleton_applied=singleton_applied,
+            data_root=data_root,
+        )
         results_chunks.append(group_results)
 
         try:

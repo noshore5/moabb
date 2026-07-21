@@ -602,6 +602,58 @@ def test_run_wct_gnn_evidence_config_smoke_matches_grid() -> None:
     assert 0.0 <= edge_density <= 1.0
 
 
+def test_run_wct_gnn_writes_human_readable_result_companions(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from coheriqs_contributions import run_wct_gnn
+
+    hdf5_path = tmp_path / "results_test.hdf5"
+    hdf5_path.touch()
+    evaluation = SimpleNamespace(
+        results=SimpleNamespace(filepath=str(hdf5_path))
+    )
+    results = run_wct_gnn.pd.DataFrame(
+        {
+            "subject": [1],
+            "session": ["0train"],
+            "pipeline": ["test-pipeline"],
+            "score": [0.75],
+        }
+    )
+
+    run_wct_gnn._write_group_artifacts(
+        evaluation=evaluation,
+        group_results=results,
+        group_id="test-group",
+        run_id="test-run",
+        subjects=[1],
+        eval_mode="cross",
+        inner_group=None,
+        run_param_grid={"test-pipeline": {"batch_size": [8]}},
+        singleton_applied={"test-pipeline": {"batch_size": 8}},
+        data_root=tmp_path,
+    )
+
+    scores = tmp_path / "scores_test-group.csv"
+    summary = tmp_path / "summary_test-group.md"
+    assert scores.is_file()
+    assert summary.is_file()
+    assert "test-pipeline" in scores.read_text(encoding="utf-8")
+    summary_text = summary.read_text(encoding="utf-8")
+    assert "Run ID: `test-run`" in summary_text
+    assert "`batch_size`: `8`" in summary_text
+
+
+def test_run_wct_gnn_managed_run_id_comes_from_environment(monkeypatch) -> None:
+    from coheriqs_contributions import run_wct_gnn
+
+    monkeypatch.setenv("LOCAL_ORCHESTRATION_EXECUTION_ID", "managed-run-1")
+
+    assert run_wct_gnn._safe_run_id(None) == "managed-run-1"
+    with pytest.raises(ValueError, match="Run ID"):
+        run_wct_gnn._safe_run_id("invalid run id")
+
+
 def test_noise_augmentation_controls_are_sklearn_parameter_grid_friendly() -> None:
     estimator = WCTEvidenceGNNClassifier()
 
