@@ -1,7 +1,10 @@
 import argparse
+import ast
 from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime
+import math
+import numbers
 import os
 from pathlib import Path
 import re
@@ -436,6 +439,140 @@ PIPELINE_PARAM_GRIDS = {
 }
 
 
+def _parse_param_value(raw_value):
+    """Parse a CLI parameter value without evaluating executable code."""
+    normalized = raw_value.strip()
+    named_literals = {"true": True, "false": False, "none": None, "null": None}
+    if normalized.lower() in named_literals:
+        return named_literals[normalized.lower()]
+    try:
+        return ast.literal_eval(normalized)
+    except (SyntaxError, ValueError):
+        # Bare values such as ``auto`` and ``flatten`` are estimator strings.
+        return normalized
+
+
+def _normalize_param_names(param_names):
+    """Accept either comma-separated names or one CLI token per name."""
+    if param_names is None:
+        return None
+    normalized = [
+        name.strip() for token in param_names for name in token.split(",")
+    ]
+    if any(not name for name in normalized):
+        raise ValueError("--param-names contains an empty parameter name.")
+    return normalized
+
+
+def _normalize_param_values(raw_param_values):
+    """Accept a literal value list or one safely parsed CLI token per value."""
+    if raw_param_values is None:
+        return None
+    if len(raw_param_values) == 1:
+        parsed = _parse_param_value(raw_param_values[0])
+        if isinstance(parsed, (list, tuple)):
+            return list(parsed)
+        return [parsed]
+    return [_parse_param_value(raw_value) for raw_value in raw_param_values]
+
+
+def _values_are_type_compatible(value, reference):
+    """Accept the scalar type families sklearn estimators commonly accept."""
+    if isinstance(value, numbers.Real) and not isinstance(value, bool):
+        if not math.isfinite(value):
+            return False
+    if isinstance(reference, bool) or isinstance(value, bool):
+        return isinstance(value, bool) and isinstance(reference, bool)
+    if isinstance(reference, numbers.Integral):
+        return isinstance(value, numbers.Integral) and not isinstance(value, bool)
+    if isinstance(reference, numbers.Real):
+        return isinstance(value, numbers.Real) and not isinstance(value, bool)
+    return isinstance(value, type(reference))
+
+
+def _validate_param_overrides(pipeline_names, param_names, raw_param_values):
+    """Return validated fixed estimator parameters for all selected pipelines."""
+    if param_names is None and raw_param_values is None:
+        return {}
+    normalized_names = _normalize_param_names(param_names)
+    parsed_values = _normalize_param_values(raw_param_values)
+    if not normalized_names or not parsed_values:
+        raise ValueError(
+            "--param-names and --param-values must both be provided with at least "
+            "one value."
+        )
+    if len(normalized_names) != len(parsed_values):
+        raise ValueError(
+            "--param-names and --param-values must contain the same number of "
+            "entries."
+        )
+    duplicates = sorted(
+        name
+        for name in set(normalized_names)
+        if normalized_names.count(name) > 1
+    )
+    if duplicates:
+        raise ValueError(
+            "--param-names must not contain duplicates: " + ", ".join(duplicates)
+        )
+
+    overrides = dict(zip(normalized_names, parsed_values))
+    for pipeline_name in dict.fromkeys(pipeline_names):
+        estimator = PIPELINE_BUILDERS[pipeline_name]()
+        supported_params = estimator.get_params(deep=True)
+        unsupported = sorted(set(overrides).difference(supported_params))
+        if unsupported:
+            raise ValueError(
+                f"Pipeline '{pipeline_name}' does not support requested parameter(s): "
+                + ", ".join(unsupported)
+            )
+        grid = PIPELINE_PARAM_GRIDS[pipeline_name]
+        for name, value in overrides.items():
+            references = [supported_params[name], *grid.get(name, [])]
+            typed_references = [
+                reference for reference in references if reference is not None
+            ]
+            is_compatible = (
+                any(reference is None for reference in references)
+                if value is None
+                else not typed_references
+                or any(
+                    _values_are_type_compatible(value, reference)
+                    for reference in typed_references
+                )
+            )
+            if not is_compatible:
+                expected_types = sorted(
+                    {
+                        type(reference).__name__
+                        for reference in references
+                        if reference is not None
+                    }
+                )
+                raise ValueError(
+                    f"Value {value!r} for parameter '{name}' is not type-compatible "
+                    f"with pipeline '{pipeline_name}' (expected one of: "
+                    f"{', '.join(expected_types)})."
+                )
+    return overrides
+
+
+def _apply_fixed_param_overrides(pipelines, run_param_grid, fixed_overrides):
+    """Set fixed values and remove their dimensions from copied search grids."""
+    if not fixed_overrides:
+        return run_param_grid
+    for estimator in pipelines.values():
+        estimator.set_params(**fixed_overrides)
+    return {
+        label: {
+            name: values
+            for name, values in grid.items()
+            if name not in fixed_overrides
+        }
+        for label, grid in run_param_grid.items()
+    }
+
+
 def _resolve_eval_modes(global_hyperparam_fit_mode):
     mode = str(global_hyperparam_fit_mode).lower()
     if mode == "false":
@@ -583,6 +720,7 @@ def _write_group_artifacts(
     inner_group,
     run_param_grid,
     singleton_applied,
+    fixed_overrides,
     data_root,
 ):
     """Write compact human-readable companions beside MOABB's HDF5 store."""
@@ -611,6 +749,7 @@ def _write_group_artifacts(
         f"- Configured data root: `{data_root}`",
         f"- HDF5 store: `{hdf5_path}`",
         f"- Scores CSV: `{scores_path}`",
+        f"- Fixed parameter overrides: `{fixed_overrides!r}`",
     ]
     lines.extend(["", "## Outer-CV rows", ""])
     lines.extend(_markdown_table(group_results, outer_columns))
@@ -728,9 +867,38 @@ def main():
             "execution ID automatically; manual runs receive a timestamped ID."
         ),
     )
+    parser.add_argument(
+        "--param-names",
+        "--param_names",
+        nargs="+",
+        default=None,
+        metavar="PARAM",
+        help=(
+            "Estimator parameters to fix instead of searching. Accepts either "
+            "one token per name or a quoted comma-separated list."
+        ),
+    )
+    parser.add_argument(
+        "--param-values",
+        "--param_values",
+        nargs="+",
+        default=None,
+        metavar="VALUE",
+        help=(
+            "Safe literal values paired with --param-names. Accepts either one "
+            "token per value or one quoted Python literal list; bare values are "
+            "strings."
+        ),
+    )
     args = parser.parse_args()
     run_id = _safe_run_id(args.run_id)
     selected_pipelines = args.pipeline if args.pipeline else DEFAULT_PIPELINES
+    try:
+        fixed_overrides = _validate_param_overrides(
+            selected_pipelines, args.param_names, args.param_values
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     pipeline_runs = _build_pipeline_runs(
         pipeline_names=selected_pipelines,
         inner_group_mode=args.inner_group_mode,
@@ -738,6 +906,8 @@ def main():
     )
     _print_run_plan(args.subjects, selected_pipelines, pipeline_runs)
     print(f"Run ID: {run_id}", flush=True)
+    if fixed_overrides:
+        print(f"Fixed parameter overrides: {fixed_overrides}", flush=True)
 
     moabb.set_log_level("info")
 
@@ -789,6 +959,9 @@ def main():
             cfg["label"]: deepcopy(PIPELINE_PARAM_GRIDS[cfg["base_name"]])
             for cfg in run_cfgs
         }
+        run_param_grid = _apply_fixed_param_overrides(
+            pipelines, run_param_grid, fixed_overrides
+        )
         param_grid, singleton_applied = _prepare_param_grid_for_run(
             pipelines, run_param_grid
         )
@@ -833,6 +1006,7 @@ def main():
             inner_group=inner_group,
             run_param_grid=run_param_grid,
             singleton_applied=singleton_applied,
+            fixed_overrides=fixed_overrides,
             data_root=data_root,
         )
         results_chunks.append(group_results)

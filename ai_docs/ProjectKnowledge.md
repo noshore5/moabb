@@ -28,6 +28,12 @@ or MOABB `param_grid`. GNN classifiers store args in `__init__`, then chain
 treat the post-`set_params` / grid outcome as the true run config. Do not assume
 today’s runner defaults match experimental results/logs.
 
+`run_wct_gnn.py` accepts fixed estimator overrides through `--param-names` and
+`--param-values`. Names may be passed as separate tokens or as one quoted,
+comma-separated string; values may be separate safe literals or one quoted
+literal list. Overrides must be supported by every selected pipeline, are
+applied before evaluation, and remove the same dimensions from the copied grid.
+
 ## Hot-path inheritance
 
 XWT / WCT classifiers → `_BaseCWTGNNClassifier` (`xwt_phase_gnn_classifier.py`)
