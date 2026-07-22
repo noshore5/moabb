@@ -117,7 +117,11 @@ class WithinSessionEvaluation(BaseEvaluation):
         postprocess_pipeline,
     ):
         # Progress Bar at subject level
-        for subject in tqdm(dataset.subject_list, desc=f"{dataset.code}-WithinSession"):
+        for subject in tqdm(
+            dataset.subject_list,
+            desc=f"{dataset.code}-WithinSession",
+            disable=not self.progress_bar,
+        ):
             # check if we already have result for this subject/pipeline
             # we might need a better granularity, if we query the DB
             run_pipes = self.results.not_yet_computed(
@@ -366,7 +370,11 @@ class CrossSessionEvaluation(BaseEvaluation):
                 f"Dataset '{dataset.code}' is not appropriate for {self.__class__.__name__}: {reason}"
             )
             # Progressbar at subject level
-        for subject in tqdm(dataset.subject_list, desc=f"{dataset.code}-CrossSession"):
+        for subject in tqdm(
+            dataset.subject_list,
+            desc=f"{dataset.code}-CrossSession",
+            disable=not self.progress_bar,
+        ):
             # check if we already have result for this subject/pipeline
             # we might need a better granularity, if we query the DB
             run_pipes = self.results.not_yet_computed(
@@ -638,6 +646,7 @@ class CrossSubjectEvaluation(BaseEvaluation):
                 self.cv.split(y, metadata),
                 total=n_subjects,
                 desc=f"{dataset.code}-CrossSubject",
+                disable=not self.progress_bar,
             )
         ):
             subject = groups[test[0]]
@@ -834,7 +843,9 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
 
         # Stage 1: run all inner searches and keep per-fold cv_results_.
         for subject in tqdm(
-            dataset.subject_list, desc=f"{dataset.code}-GlobalFutureSession-Inner"
+            dataset.subject_list,
+            desc=f"{dataset.code}-GlobalFutureSession-Inner",
+            disable=not self.progress_bar,
         ):
             run_pipes = self.results.not_yet_computed(
                 pipelines, dataset, subject, process_pipeline

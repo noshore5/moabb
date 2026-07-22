@@ -3,6 +3,7 @@ import ast
 from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime
+import logging
 import math
 import numbers
 import os
@@ -17,7 +18,6 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.model_selection import ParameterGrid, StratifiedGroupKFold
 from sklearn.pipeline import make_pipeline
 
-import moabb
 from moabb.datasets import BNCI2014_001
 from moabb.evaluations import CrossSessionEvaluation
 try:
@@ -51,6 +51,23 @@ from coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
     XWTPhaseGNNClassifier,
     XWTPhaseGNNV2Classifier,
 )
+from coheriqs_contributions.experiment_logging import (
+    ConsolePolicy,
+    EventCategory,
+    configure_experiment_logging,
+    log_event,
+    resolve_experiment_log_path,
+)
+
+
+log = logging.getLogger(__name__)
+
+
+def _non_negative_int(raw_value):
+    value = int(raw_value)
+    if value < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return value
 
 
 def _make_csp_lda():
@@ -648,12 +665,12 @@ def _prepare_param_grid_for_run(pipelines, run_param_grid):
 
 
 def _print_run_plan(subjects, selected_pipelines, pipeline_runs):
-    print("\n=== Run plan ===", flush=True)
-    print(f"Subjects: {subjects}", flush=True)
-    print(f"Pipelines: {selected_pipelines}", flush=True)
-    print(f"Evaluation runs: {len(pipeline_runs)}", flush=True)
+    log_event(log, EventCategory.CONFIG, "=== Run plan ===")
+    log_event(log, EventCategory.CONFIG, f"Subjects: {subjects}")
+    log_event(log, EventCategory.CONFIG, f"Pipelines: {selected_pipelines}")
+    log_event(log, EventCategory.CONFIG, f"Evaluation runs: {len(pipeline_runs)}")
     for run_cfg in pipeline_runs:
-        print(f"  - {run_cfg['label']}", flush=True)
+        log_event(log, EventCategory.CONFIG, f"  - {run_cfg['label']}")
 
 
 def _safe_run_id(value):
@@ -681,11 +698,15 @@ def _configured_data_root():
     if configured is None:
         configured = Path.home() / "mne_data"
     data_root = Path(configured).expanduser().resolve()
-    print(f"[Data] configured MOABB/MNE root: {data_root}", flush=True)
+    log_event(
+        log,
+        EventCategory.CONFIG,
+        f"[Data] configured MOABB/MNE root: {data_root}",
+    )
     return data_root
 
 
-def _print_moabb_result_root():
+def _configured_moabb_result_root():
     configured = (
         os.environ.get("MOABB_RESULTS")
         or get_config("MOABB_RESULTS")
@@ -693,7 +714,7 @@ def _print_moabb_result_root():
         or get_config("MNE_DATA")
         or str(Path.home() / "mne_data")
     )
-    print(f"[Results] MOABB root: {Path(configured).expanduser().resolve()}", flush=True)
+    return Path(configured).expanduser().resolve()
 
 
 def _markdown_table(frame, columns):
@@ -720,8 +741,11 @@ def _write_group_artifacts(
     inner_group,
     run_param_grid,
     singleton_applied,
-    fixed_overrides,
     data_root,
+    fixed_overrides=None,
+    effective_params=None,
+    experiment_log_path=None,
+    console_policy=None,
 ):
     """Write compact human-readable companions beside MOABB's HDF5 store."""
     hdf5_path = Path(evaluation.results.filepath).resolve()
@@ -749,8 +773,12 @@ def _write_group_artifacts(
         f"- Configured data root: `{data_root}`",
         f"- HDF5 store: `{hdf5_path}`",
         f"- Scores CSV: `{scores_path}`",
-        f"- Fixed parameter overrides: `{fixed_overrides!r}`",
     ]
+    if experiment_log_path is not None:
+        lines.append(f"- Experiment log: `{experiment_log_path}`")
+    if console_policy is not None:
+        lines.append(f"- Console output policy: `{console_policy!r}`")
+    lines.append(f"- Fixed parameter overrides: `{fixed_overrides or {}}`")
     lines.extend(["", "## Outer-CV rows", ""])
     lines.extend(_markdown_table(group_results, outer_columns))
     lines.extend(["", "## Subject/pipeline means", ""])
@@ -769,16 +797,26 @@ def _write_group_artifacts(
         for name in sorted(values):
             lines.append(f"- `{name}`: `{values[name]!r}`")
         lines.append("")
+        if effective_params is not None and label in effective_params:
+            lines.append("Effective estimator parameters:")
+            lines.append("")
+            for name in sorted(effective_params[label]):
+                lines.append(f"- `{name}`: `{effective_params[label][name]!r}`")
+            lines.append("")
     summary_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"[Artifact] HDF5: {hdf5_path}", flush=True)
-    print(f"[Artifact] scores CSV: {scores_path}", flush=True)
-    print(f"[Artifact] summary: {summary_path}", flush=True)
+    log_event(log, EventCategory.ARTIFACT, f"[Artifact] HDF5: {hdf5_path}")
+    log_event(log, EventCategory.ARTIFACT, f"[Artifact] scores CSV: {scores_path}")
+    log_event(log, EventCategory.ARTIFACT, f"[Artifact] summary: {summary_path}")
 
 
 def _print_inner_results(inner):
-    print("\n=== Inner cv_results_ ===")
+    log_event(log, EventCategory.FINAL_RESULTS, "=== Inner cv_results_ ===")
     if inner.empty:
-        print("No inner cv_results_ collected.")
+        log_event(
+            log,
+            EventCategory.FINAL_RESULTS,
+            "No inner cv_results_ collected.",
+        )
         return
 
     summary_cols = [
@@ -797,7 +835,11 @@ def _print_inner_results(inner):
         ]
         if c in inner.columns
     ]
-    print(inner[summary_cols].to_string(index=False))
+    log_event(
+        log,
+        EventCategory.FINAL_RESULTS,
+        inner[summary_cols].to_string(index=False),
+    )
 
     split_cols = [
         c
@@ -814,8 +856,12 @@ def _print_inner_results(inner):
         if c in inner.columns
     ]
     if split_cols != summary_cols:
-        print("\n=== Inner CV split scores ===")
-        print(inner[split_cols].to_string(index=False))
+        log_event(log, EventCategory.FINAL_RESULTS, "=== Inner CV split scores ===")
+        log_event(
+            log,
+            EventCategory.FINAL_RESULTS,
+            inner[split_cols].to_string(index=False),
+        )
 
 
 def main():
@@ -868,6 +914,58 @@ def main():
         ),
     )
     parser.add_argument(
+        "--experiment-log",
+        default=None,
+        help=(
+            "Durable UTF-8 experiment log path. Defaults to "
+            "MOABB_RESULTS/<run-id>/experiment.log. Existing files are rejected."
+        ),
+    )
+    parser.add_argument(
+        "--console-initial-details",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Show model parameter, hash, configuration, and memory details.",
+    )
+    parser.add_argument(
+        "--console-final-results",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show final result tables (enabled by default).",
+    )
+    parser.add_argument(
+        "--console-cwt-progress",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Show transient CWT progress bars.",
+    )
+    parser.add_argument(
+        "--console-moabb-progress",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Show transient MOABB evaluation progress bars.",
+    )
+    parser.add_argument(
+        "--console-train-steps",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Show per-batch training-step diagnostics (very verbose).",
+    )
+    parser.add_argument(
+        "--console-epoch-every",
+        type=_non_negative_int,
+        default=5,
+        metavar="N",
+        help="Show every Nth epoch summary; 0 disables epoch summaries.",
+    )
+    parser.add_argument(
+        "--console-selector-every",
+        type=_non_negative_int,
+        default=0,
+        metavar="N",
+        help="Show every Nth selector diagnostic; 0 disables them.",
+    )
+    parser.add_argument(
         "--param-names",
         "--param_names",
         nargs="+",
@@ -904,17 +1002,55 @@ def main():
         inner_group_mode=args.inner_group_mode,
         global_hyperparam_fit_mode=args.global_hyperparam_fit,
     )
+    console_policy = ConsolePolicy(
+        initial_details=args.console_initial_details,
+        final_results=args.console_final_results,
+        cwt_progress=args.console_cwt_progress,
+        moabb_progress=args.console_moabb_progress,
+        train_steps=args.console_train_steps,
+        epoch_every=args.console_epoch_every,
+        selector_every=args.console_selector_every,
+    )
+    moabb_results_root = _configured_moabb_result_root()
+    try:
+        experiment_log_path = resolve_experiment_log_path(
+            args.experiment_log,
+            run_id=run_id,
+            moabb_results_root=moabb_results_root,
+        )
+    except FileExistsError as exc:
+        parser.error(str(exc))
+    configure_experiment_logging(
+        experiment_log_path,
+        console_policy=console_policy,
+    )
+    log_event(
+        log,
+        EventCategory.ARTIFACT,
+        f"[Artifact] experiment log: {experiment_log_path}",
+    )
+    log_event(
+        log,
+        EventCategory.CONFIG,
+        f"Console output policy: {console_policy!r}",
+    )
     _print_run_plan(args.subjects, selected_pipelines, pipeline_runs)
-    print(f"Run ID: {run_id}", flush=True)
+    log_event(log, EventCategory.STATUS, f"Run ID: {run_id}")
     if fixed_overrides:
-        print(f"Fixed parameter overrides: {fixed_overrides}", flush=True)
-
-    moabb.set_log_level("info")
+        log_event(
+            log,
+            EventCategory.CONFIG,
+            f"Fixed parameter overrides: {fixed_overrides}",
+        )
 
     dataset = BNCI2014_001()
     dataset.subject_list = args.subjects
     data_root = _configured_data_root()
-    _print_moabb_result_root()
+    log_event(
+        log,
+        EventCategory.CONFIG,
+        f"[Results] MOABB root: {moabb_results_root}",
+    )
     paradigm = LeftRightImagery(fmin=8, fmax=35)
 
     base_eval_kwargs = dict(
@@ -923,6 +1059,7 @@ def main():
         overwrite=True,
         n_jobs=1,
         random_state=42,
+        progress_bar=args.console_moabb_progress,
     )
 
     grouped_runs = defaultdict(list)
@@ -932,10 +1069,11 @@ def main():
     results_chunks = []
     inner_chunks = []
     for (eval_mode, inner_group), run_cfgs in grouped_runs.items():
-        print(
-            "\n=== Starting group: "
+        log_event(
+            log,
+            EventCategory.STATUS,
+            "=== Starting group: "
             f"eval={eval_mode}, inner_group={inner_group or 'None'} ===",
-            flush=True,
         )
         eval_kwargs = dict(base_eval_kwargs)
         group_id = (
@@ -954,7 +1092,11 @@ def main():
             cfg["label"]: PIPELINE_BUILDERS[cfg["base_name"]]()
             for cfg in run_cfgs
         }
-        print(f"Group pipelines: {list(pipelines)}", flush=True)
+        log_event(
+            log,
+            EventCategory.CONFIG,
+            f"Group pipelines: {list(pipelines)}",
+        )
         run_param_grid = {
             cfg["label"]: deepcopy(PIPELINE_PARAM_GRIDS[cfg["base_name"]])
             for cfg in run_cfgs
@@ -968,19 +1110,41 @@ def main():
 
         if singleton_applied:
             for label, params in singleton_applied.items():
-                print(
-                    f"[Grid] singleton combo for '{label}' applied directly: {params}",
-                    flush=True,
+                log_event(
+                    log,
+                    EventCategory.CONFIG,
+                    f"[Grid] singleton combo for '{label}' applied directly "
+                    f"({len(params)} parameters).",
                 )
+                log_event(
+                    log,
+                    EventCategory.INITIAL_DETAILS,
+                    f"[Grid] singleton parameters for '{label}': {params}",
+                )
+
+        for label, estimator in pipelines.items():
+            log_event(
+                log,
+                EventCategory.INITIAL_DETAILS,
+                f"Effective estimator parameters for '{label}': "
+                f"{estimator.get_params(deep=True)}",
+            )
+        if param_grid:
+            log_event(
+                log,
+                EventCategory.INITIAL_DETAILS,
+                f"Search grid passed to MOABB: {param_grid}",
+            )
 
         if not param_grid:
             param_grid = None
         grid_status = (
             "disabled after singleton application" if param_grid is None else "enabled"
         )
-        print(
+        log_event(
+            log,
+            EventCategory.CONFIG,
             f"Grid search: {grid_status}",
-            flush=True,
         )
 
         if eval_mode == "global":
@@ -995,7 +1159,15 @@ def main():
         else:
             raise ValueError(f"Unsupported eval_mode='{eval_mode}'.")
         group_results = evaluation.process(pipelines, param_grid=param_grid)
-        print(f"Completed group rows: {len(group_results)}", flush=True)
+        log_event(
+            log,
+            EventCategory.STATUS,
+            f"Completed group rows: {len(group_results)}",
+        )
+        effective_params = {
+            label: estimator.get_params(deep=True)
+            for label, estimator in pipelines.items()
+        }
         _write_group_artifacts(
             evaluation=evaluation,
             group_results=group_results,
@@ -1007,7 +1179,10 @@ def main():
             run_param_grid=run_param_grid,
             singleton_applied=singleton_applied,
             fixed_overrides=fixed_overrides,
+            effective_params=effective_params,
             data_root=data_root,
+            experiment_log_path=experiment_log_path,
+            console_policy=console_policy,
         )
         results_chunks.append(group_results)
 
@@ -1022,27 +1197,47 @@ def main():
     results = pd.concat(results_chunks, ignore_index=True)
     inner = pd.concat(inner_chunks, ignore_index=True) if inner_chunks else pd.DataFrame()
 
-    print("\n=== Outer CV results ===")
+    log_event(log, EventCategory.FINAL_RESULTS, "=== Outer CV results ===")
     outer_cols = ["subject", "session", "pipeline", "score"]
     if "best_params" in results.columns:
         outer_cols.append("best_params")
-    print(results[outer_cols].to_string(index=False))
+    log_event(
+        log,
+        EventCategory.FINAL_RESULTS,
+        results[outer_cols].to_string(index=False),
+    )
 
-    print("\n=== Per subject/pipeline mean scores")
+    log_event(
+        log,
+        EventCategory.FINAL_RESULTS,
+        "=== Per subject/pipeline mean scores ===",
+    )
     per_subject_pipeline = (
         results.groupby(["subject", "pipeline"], as_index=False)["score"].mean()
         .rename(columns={"score": "mean_score"})
         .sort_values(["subject", "pipeline"])
     )
-    print(per_subject_pipeline.to_string(index=False))
+    log_event(
+        log,
+        EventCategory.FINAL_RESULTS,
+        per_subject_pipeline.to_string(index=False),
+    )
 
-    print("\n=== Per pipeline mean scores")
+    log_event(
+        log,
+        EventCategory.FINAL_RESULTS,
+        "=== Per pipeline mean scores ===",
+    )
     per_pipeline = (
         results.groupby(["pipeline"], as_index=False)["score"].mean()
         .rename(columns={"score": "mean_score"})
         .sort_values(["pipeline"])
     )
-    print(per_pipeline.to_string(index=False))
+    log_event(
+        log,
+        EventCategory.FINAL_RESULTS,
+        per_pipeline.to_string(index=False),
+    )
 
     if args.show_inner_results:
         _print_inner_results(inner)

@@ -123,6 +123,8 @@ class BaseEvaluation(ABC):
         If not None, override the default MOABB logging level used by this evaluation
         (see :func:`moabb.utils.verbose` for more information on how this is handled).
         If used, it should be passed as a keyword-argument only.
+    progress_bar: bool, default=True
+        If True, show transient evaluation progress bars.
     codecarbon_config: dict of CodeCarbon parameters, default=dict(save_to_file=False, log_level="error")
         Allow CodeCarbon script level configurations.
         Can use combination of CodeCarbon environment variable and configuration files.
@@ -169,6 +171,7 @@ class BaseEvaluation(ABC):
         verbose=None,
         codecarbon_config=None,
         save_cv_split_indices=False,
+        progress_bar=True,
     ):
         self.random_state = random_state
         self.n_jobs = n_jobs
@@ -192,6 +195,7 @@ class BaseEvaluation(ABC):
         self.optuna = optuna
         self.time_out = time_out
         self.verbose = verbose
+        self.progress_bar = bool(progress_bar)
         self.emissions = Emissions(codecarbon_config=codecarbon_config)
 
         self.additional_columns = additional_columns

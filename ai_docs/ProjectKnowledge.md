@@ -41,6 +41,16 @@ XWT / WCT classifiers → `_BaseCWTGNNClassifier` (`xwt_phase_gnn_classifier.py`
 `TorchEEGClassifier` directly. CWT comes from
 `Coherent_Multiplex/utils/coherence_utils.py`; that sibling tree must be present.
 
+## Experiment logging
+
+`run_wct_gnn.py` configures one process-wide standard-library logger. Its file
+handler retains all INFO-level experiment events; its console handler filters
+semantic categories independently. Console flags control initial model details,
+CWT and MOABB progress, per-batch diagnostics, final results, and epoch/selector
+cadence. Direct estimator use outside the runner keeps the legacy `verbose`
+behavior. Experiment-log paths are collision-safe and existing files are never
+overwritten.
+
 ## Training / eval gotchas
 
 - Checkpointing uses validation **loss**; MOABB reports outer **ROC-AUC** — they

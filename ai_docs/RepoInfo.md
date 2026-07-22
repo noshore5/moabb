@@ -15,6 +15,9 @@ or `bash coheriqs_contributions/run_canonical_setup.sh` from repo root.
   tracker).
 - `run_wct_gnn.py` prints its configured data/result roots and writes each run
   under a unique result ID with HDF5 plus human-readable CSV/Markdown outputs.
+- `run_wct_gnn.py` also writes a complete UTF-8 experiment log while keeping
+  console output compact by default: every fifth epoch, no selector or
+  per-batch diagnostics, hidden progress bars, and final result summaries.
 
 ## Paths (open only when needed)
 

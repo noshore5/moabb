@@ -13,6 +13,7 @@ try:
     from coheriqs_contributions.moabb_pipelines.common import (
         TorchEEGClassifier,
         apply_minmax,
+        cwt_progress_context,
         fit_minmax_stats,
         prepare_cwt_tf,
         resolve_coherence_utils,
@@ -21,6 +22,7 @@ except ModuleNotFoundError:
     from moabb_pipelines.common import (
         TorchEEGClassifier,
         apply_minmax,
+        cwt_progress_context,
         fit_minmax_stats,
         prepare_cwt_tf,
         resolve_coherence_utils,
@@ -123,37 +125,45 @@ class CWTCNNClassifier(TorchEEGClassifier):
             (n_samples, n_channels, self.nfreqs, self.cwt_resample_n_time),
             dtype=np.float32,
         )
-        with tqdm(
-            total=n_samples * n_channels,
-            desc="CWT-CNN CWT",
-            disable=self.verbose < 1,
-            leave=False,
-        ) as pbar:
-            for sample_idx in range(n_samples):
-                for ch_idx in range(n_channels):
-                    try:
-                        coeffs, _ = self.transform_(
-                            X[sample_idx, ch_idx, :],
-                            self.sampling_rate,
-                            self.highest,
-                            self.lowest,
-                            nfreqs=self.nfreqs,
-                        )
-                        out[sample_idx, ch_idx] = np.abs(
-                            prepare_cwt_tf(
-                                coeffs,
+        with cwt_progress_context(
+            "cwt-cnn",
+            verbose=self.verbose,
+            samples=n_samples,
+            channels=n_channels,
+            transforms=n_samples * n_channels,
+            nfreqs=self.nfreqs,
+        ) as show_progress:
+            with tqdm(
+                total=n_samples * n_channels,
+                desc="CWT-CNN CWT",
+                disable=not show_progress,
+                leave=False,
+            ) as pbar:
+                for sample_idx in range(n_samples):
+                    for ch_idx in range(n_channels):
+                        try:
+                            coeffs, _ = self.transform_(
+                                X[sample_idx, ch_idx, :],
+                                self.sampling_rate,
+                                self.highest,
+                                self.lowest,
                                 nfreqs=self.nfreqs,
-                                n_time=self.cwt_resample_n_time,
-                            ).T
-                        ).astype(np.float32)
-                    except Exception as exc:
-                        log.debug(
-                            "CWT failed for sample %s channel %s: %s",
-                            sample_idx,
-                            ch_idx,
-                            exc,
-                        )
-                    pbar.update(1)
+                            )
+                            out[sample_idx, ch_idx] = np.abs(
+                                prepare_cwt_tf(
+                                    coeffs,
+                                    nfreqs=self.nfreqs,
+                                    n_time=self.cwt_resample_n_time,
+                                ).T
+                            ).astype(np.float32)
+                        except Exception as exc:
+                            log.debug(
+                                "CWT failed for sample %s channel %s: %s",
+                                sample_idx,
+                                ch_idx,
+                                exc,
+                            )
+                        pbar.update(1)
         return out
 
     def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):

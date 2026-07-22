@@ -12,6 +12,8 @@ from tqdm import tqdm
 
 try:
     from coheriqs_contributions.moabb_pipelines.common import (
+        cwt_progress_context,
+        is_experiment_logging_configured,
         prepare_cwt_tf,
         resolve_coherence_utils,
         upper_pair_indices,
@@ -19,6 +21,8 @@ try:
     )
 except ModuleNotFoundError:
     from moabb_pipelines.common import (
+        cwt_progress_context,
+        is_experiment_logging_configured,
         prepare_cwt_tf,
         resolve_coherence_utils,
         upper_pair_indices,
@@ -95,76 +99,92 @@ class WaveletTransformClassifier(ClassifierMixin, BaseEstimator):
             total_transforms,
             total_coherences,
         )
-        if self.verbose:
+        logging_configured = is_experiment_logging_configured()
+        if self.verbose and not logging_configured:
             print(
                 f"   Starting {total_transforms} CWT transforms and "
                 f"{total_coherences} coherence computations...",
                 flush=True,
             )
 
-        wavelet_coeffs: dict[tuple[int, int], tuple[np.ndarray | None, np.ndarray | None]] = {}
-        for sample_idx in range(n_samples):
-            for ch_idx in range(n_channels):
-                try:
-                    coeffs, freqs = transform_fn(
-                        X[sample_idx, ch_idx, :],
-                        self.sampling_rate,
-                        self.highest,
-                        self.lowest,
-                        nfreqs=self.nfreqs,
-                    )
-                    coeffs_ft = prepare_cwt_tf(
-                        coeffs,
-                        nfreqs=self.nfreqs,
-                        n_time=n_time,
-                    ).T
-                    wavelet_coeffs[(sample_idx, ch_idx)] = (coeffs_ft, freqs)
-                except Exception as exc:
-                    log.debug(
-                        "CWT failed for sample=%s channel=%s: %s",
-                        sample_idx,
-                        ch_idx,
-                        exc,
-                    )
-                    wavelet_coeffs[(sample_idx, ch_idx)] = (None, None)
+        with cwt_progress_context(
+            "wavelet-rf",
+            verbose=self.verbose,
+            samples=n_samples,
+            channels=n_channels,
+            transforms=total_transforms,
+            coherences=total_coherences,
+            nfreqs=self.nfreqs,
+        ) as show_progress:
+            wavelet_coeffs: dict[
+                tuple[int, int], tuple[np.ndarray | None, np.ndarray | None]
+            ] = {}
+            for sample_idx in range(n_samples):
+                for ch_idx in range(n_channels):
+                    try:
+                        coeffs, freqs = transform_fn(
+                            X[sample_idx, ch_idx, :],
+                            self.sampling_rate,
+                            self.highest,
+                            self.lowest,
+                            nfreqs=self.nfreqs,
+                        )
+                        coeffs_ft = prepare_cwt_tf(
+                            coeffs,
+                            nfreqs=self.nfreqs,
+                            n_time=n_time,
+                        ).T
+                        wavelet_coeffs[(sample_idx, ch_idx)] = (coeffs_ft, freqs)
+                    except Exception as exc:
+                        log.debug(
+                            "CWT failed for sample=%s channel=%s: %s",
+                            sample_idx,
+                            ch_idx,
+                            exc,
+                        )
+                        wavelet_coeffs[(sample_idx, ch_idx)] = (None, None)
 
-        features = []
-        iterator = tqdm(range(n_samples), disable=not self.verbose, leave=False)
-        for sample_idx in iterator:
-            sample_features: list[float] = []
+            features = []
+            iterator = tqdm(
+                range(n_samples),
+                disable=not show_progress,
+                leave=False,
+            )
+            for sample_idx in iterator:
+                sample_features: list[float] = []
 
-            for ch_idx in range(n_channels):
-                coeffs, _ = wavelet_coeffs[(sample_idx, ch_idx)]
-                if coeffs is None:
-                    sample_features.extend([0.0] * (self.nfreqs * 3))
-                else:
-                    self._append_scale_stats(np.abs(coeffs), sample_features)
+                for ch_idx in range(n_channels):
+                    coeffs, _ = wavelet_coeffs[(sample_idx, ch_idx)]
+                    if coeffs is None:
+                        sample_features.extend([0.0] * (self.nfreqs * 3))
+                    else:
+                        self._append_scale_stats(np.abs(coeffs), sample_features)
 
-            for ch_i, ch_j in pairs:
-                coeffs_i, freqs_i = wavelet_coeffs[(sample_idx, ch_i)]
-                coeffs_j, _ = wavelet_coeffs[(sample_idx, ch_j)]
-                if coeffs_i is None or coeffs_j is None or freqs_i is None:
-                    sample_features.extend([0.0] * (self.nfreqs * 3))
-                    continue
-                try:
-                    coh, _, _ = coherence_fn(coeffs_i, coeffs_j, freqs_i)
-                    self._append_scale_stats(np.asarray(coh), sample_features)
-                except Exception as exc:
-                    log.debug(
-                        "Coherence failed for sample=%s channels=(%s,%s): %s",
-                        sample_idx,
-                        ch_i,
-                        ch_j,
-                        exc,
-                    )
-                    sample_features.extend([0.0] * (self.nfreqs * 3))
+                for ch_i, ch_j in pairs:
+                    coeffs_i, freqs_i = wavelet_coeffs[(sample_idx, ch_i)]
+                    coeffs_j, _ = wavelet_coeffs[(sample_idx, ch_j)]
+                    if coeffs_i is None or coeffs_j is None or freqs_i is None:
+                        sample_features.extend([0.0] * (self.nfreqs * 3))
+                        continue
+                    try:
+                        coh, _, _ = coherence_fn(coeffs_i, coeffs_j, freqs_i)
+                        self._append_scale_stats(np.asarray(coh), sample_features)
+                    except Exception as exc:
+                        log.debug(
+                            "Coherence failed for sample=%s channels=(%s,%s): %s",
+                            sample_idx,
+                            ch_i,
+                            ch_j,
+                            exc,
+                        )
+                        sample_features.extend([0.0] * (self.nfreqs * 3))
 
-            features.append(sample_features)
+                features.append(sample_features)
 
         X_features = np.asarray(features, dtype=np.float32)
         X_features = np.nan_to_num(X_features, nan=0.0, posinf=0.0, neginf=0.0)
         log.info("Computed wavelet RF features shape: %s", X_features.shape)
-        if self.verbose:
+        if self.verbose and not logging_configured:
             print("   Completed CWT and coherence feature extraction.", flush=True)
         return X_features
 

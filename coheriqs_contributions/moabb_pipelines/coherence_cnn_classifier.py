@@ -13,6 +13,7 @@ try:
     from coheriqs_contributions.moabb_pipelines.common import (
         TorchEEGClassifier,
         apply_minmax,
+        cwt_progress_context,
         fit_minmax_stats,
         prepare_cwt_tf,
         resolve_coherence_utils,
@@ -22,6 +23,7 @@ except ModuleNotFoundError:
     from moabb_pipelines.common import (
         TorchEEGClassifier,
         apply_minmax,
+        cwt_progress_context,
         fit_minmax_stats,
         prepare_cwt_tf,
         resolve_coherence_utils,
@@ -117,7 +119,7 @@ class CoherenceCNNClassifier(TorchEEGClassifier):
             verbose=verbose,
         )
 
-    def _compute_channel_cwt(self, X: np.ndarray):
+    def _compute_channel_cwt(self, X: np.ndarray, *, show_progress: bool):
         if self.transform_ is None or self.coherence_fn_ is None:
             self.transform_, self.coherence_fn_ = resolve_coherence_utils()
         n_samples, n_channels, _ = X.shape
@@ -126,7 +128,7 @@ class CoherenceCNNClassifier(TorchEEGClassifier):
         with tqdm(
             total=n_samples * n_channels,
             desc="Coherence CWT",
-            disable=self.verbose < 1,
+            disable=not show_progress,
             leave=False,
         ) as pbar:
             for sample_idx in range(n_samples):
@@ -158,48 +160,63 @@ class CoherenceCNNClassifier(TorchEEGClassifier):
     def _compute_coherence_matrices(self, X: np.ndarray) -> np.ndarray:
         n_samples, n_channels, _ = X.shape
         pairs = upper_pair_indices(n_channels)
-        coeffs_by_channel, freqs_by_channel = self._compute_channel_cwt(X)
         out = np.zeros(
             (n_samples, len(pairs), self.nfreqs, self.cwt_resample_n_time),
             dtype=np.float32,
         )
-        for sample_idx in tqdm(
-            range(n_samples),
-            desc="Coherence",
-            disable=self.verbose < 1,
-            leave=False,
-        ):
-            for pair_idx, (ch_i, ch_j) in enumerate(pairs):
-                coeffs_i = coeffs_by_channel.get((sample_idx, ch_i))
-                coeffs_j = coeffs_by_channel.get((sample_idx, ch_j))
-                if coeffs_i is None or coeffs_j is None:
-                    continue
-                try:
-                    coh, _, _ = self.coherence_fn_(
-                        coeffs_i,
-                        coeffs_j,
-                        freqs_by_channel[(sample_idx, ch_i)],
-                    )
-                    coh = np.asarray(coh)
-                    if coh.shape[0] != self.nfreqs and coh.shape[-1] == self.nfreqs:
-                        coh = coh.T
-                    if coh.shape != (self.nfreqs, self.cwt_resample_n_time):
-                        coh = prepare_cwt_tf(
-                            coh,
-                            nfreqs=self.nfreqs,
-                            n_time=self.cwt_resample_n_time,
-                        ).T
-                    out[sample_idx, pair_idx] = np.nan_to_num(
-                        coh, nan=0.0, posinf=0.0, neginf=0.0
-                    ).astype(np.float32)
-                except Exception as exc:
-                    log.debug(
-                        "Coherence failed for sample %s channels (%s, %s): %s",
-                        sample_idx,
-                        ch_i,
-                        ch_j,
-                        exc,
-                    )
+        with cwt_progress_context(
+            "coherence-cnn",
+            verbose=self.verbose,
+            samples=n_samples,
+            channels=n_channels,
+            transforms=n_samples * n_channels,
+            coherences=n_samples * len(pairs),
+            nfreqs=self.nfreqs,
+        ) as show_progress:
+            coeffs_by_channel, freqs_by_channel = self._compute_channel_cwt(
+                X,
+                show_progress=show_progress,
+            )
+            for sample_idx in tqdm(
+                range(n_samples),
+                desc="Coherence",
+                disable=not show_progress,
+                leave=False,
+            ):
+                for pair_idx, (ch_i, ch_j) in enumerate(pairs):
+                    coeffs_i = coeffs_by_channel.get((sample_idx, ch_i))
+                    coeffs_j = coeffs_by_channel.get((sample_idx, ch_j))
+                    if coeffs_i is None or coeffs_j is None:
+                        continue
+                    try:
+                        coh, _, _ = self.coherence_fn_(
+                            coeffs_i,
+                            coeffs_j,
+                            freqs_by_channel[(sample_idx, ch_i)],
+                        )
+                        coh = np.asarray(coh)
+                        if (
+                            coh.shape[0] != self.nfreqs
+                            and coh.shape[-1] == self.nfreqs
+                        ):
+                            coh = coh.T
+                        if coh.shape != (self.nfreqs, self.cwt_resample_n_time):
+                            coh = prepare_cwt_tf(
+                                coh,
+                                nfreqs=self.nfreqs,
+                                n_time=self.cwt_resample_n_time,
+                            ).T
+                        out[sample_idx, pair_idx] = np.nan_to_num(
+                            coh, nan=0.0, posinf=0.0, neginf=0.0
+                        ).astype(np.float32)
+                    except Exception as exc:
+                        log.debug(
+                            "Coherence failed for sample %s channels (%s, %s): %s",
+                            sample_idx,
+                            ch_i,
+                            ch_j,
+                            exc,
+                        )
         return out
 
     def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):

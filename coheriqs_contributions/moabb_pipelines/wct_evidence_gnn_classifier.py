@@ -10,7 +10,11 @@ from typing import Literal
 import torch
 import torch.nn as nn
 
-from coheriqs_contributions.moabb_pipelines.common import make_gaussian_weight2d, resolve_torch_device
+from coheriqs_contributions.moabb_pipelines.common import (
+    emit_initial_detail,
+    make_gaussian_weight2d,
+    resolve_torch_device,
+)
 
 try:
     from coheriqs_contributions.nn_components import (
@@ -379,33 +383,30 @@ class WCTEvidenceGNNCore(nn.Module):
             if self.max_windows_per_chunk is not None
             else DEFAULT_MAX_WINDOWS_PER_CHUNK
         )
-        print(
+        emit_initial_detail(
             f"[{header}] WCTEvidence config "
             f"window_compute_mode={self.window_compute_mode} "
             f"effective_window_compute_mode={effective_mode} "
             f"max_windows_per_chunk={self.max_windows_per_chunk} "
             f"default_chunk_cap={DEFAULT_MAX_WINDOWS_PER_CHUNK} "
-            f"chunk_cap_effective={chunk_cap}",
-            flush=True,
+            f"chunk_cap_effective={chunk_cap}"
         )
-        print(
+        emit_initial_detail(
             f"[{header}] WCTEvidence config "
             f"window_size={self.window_size} nfreqs={self.nfreqs} "
             f"hidden_dim={self.hidden_dim} message_dim={self.message_dim} "
             f"payload_dim={self.payload_dim} "
             f"smooth_kernel_size={self.smooth_kernel_size} "
             f"padding_time_dim={self.padding_time_dim} "
-            f"padding_mode={self.padding_mode}",
-            flush=True,
+            f"padding_mode={self.padding_mode}"
         )
         self._print_selectable_message_mlp_summary(header)
 
         context = self._summary_context
         if context is None:
-            print(
+            emit_initial_detail(
                 f"[{header}] WCTEvidence memory estimates unavailable: "
-                "summary context was not configured.",
-                flush=True,
+                "summary context was not configured."
             )
             return
 
@@ -417,20 +418,18 @@ class WCTEvidenceGNNCore(nn.Module):
         num_edges = self.src_idx.numel()
         feature_time_steps = self._estimate_feature_time_steps(n_time)
         dtype_bytes = _dtype_nbytes(dtype)
-        print(
+        emit_initial_detail(
             f"[{header}] WCTEvidence dimensions "
             f"B={batch_size} C={self.n_channels} E={num_edges} "
             f"T={n_time} W={self.window_size} N={n_windows} F={self.nfreqs} "
             f"D={self.feature_conv_feature_dim} H={self.hidden_dim} "
             f"dtype={dtype} bytes_per_elem={dtype_bytes} "
-            f"n_samples={n_samples}",
-            flush=True,
+            f"n_samples={n_samples}"
         )
-        print(
+        emit_initial_detail(
             f"[{header}] WCTEvidence memory estimates "
             "approximate tensor payloads only; autograd, optimizer state, "
-            "allocator fragmentation, and convolution workspace are excluded.",
-            flush=True,
+            "allocator fragmentation, and convolution workspace are excluded."
         )
         for label, shape, copies in self._critical_tensor_estimates(
             batch_size=batch_size,
@@ -441,12 +440,11 @@ class WCTEvidenceGNNCore(nn.Module):
         ):
             numel = _shape_numel(shape) * copies
             copies_prefix = f"{copies} x " if copies != 1 else ""
-            print(
+            emit_initial_detail(
                 f"[{header}] WCTEvidence tensor {label}: "
                 f"shape={copies_prefix}{shape} "
                 f"elements={numel} "
-                f"approx_memory={_format_bytes(numel * dtype_bytes)}",
-                flush=True,
+                f"approx_memory={_format_bytes(numel * dtype_bytes)}"
             )
 
     def _print_selectable_message_mlp_summary(self, header: str) -> None:
@@ -465,7 +463,7 @@ class WCTEvidenceGNNCore(nn.Module):
             for candidate in self.message_mlp.choice.candidates
         ]
         selector_mode = _selector_mode_from_gate(gate)
-        print(
+        emit_initial_detail(
             f"[{header}] WCTEvidence selectable message_mlp "
             f"candidates={len(candidate_params)} "
             f"selector_optimizer_mode={selector_mode} "
@@ -476,8 +474,7 @@ class WCTEvidenceGNNCore(nn.Module):
             f"exploration_epsilon={gate.exploration_epsilon} "
             f"initial_probs={_format_number_list(probs_by_candidate.tolist())} "
             f"entropy={float(entropy.item()):.4f} "
-            f"candidate_params={candidate_params}",
-            flush=True,
+            f"candidate_params={candidate_params}"
         )
 
     def _estimate_feature_time_steps(self, n_time: int) -> int:

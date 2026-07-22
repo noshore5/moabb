@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 import random
@@ -12,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import sys
 import time
-from typing import Callable, Sequence
+from typing import Callable, Iterator, Sequence
 
 import numpy as np
 from scipy.signal import resample
@@ -24,6 +25,68 @@ from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.model_selection import StratifiedShuffleSplit
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
+
+from coheriqs_contributions.experiment_logging import (
+    EventCategory,
+    get_console_policy,
+    is_experiment_logging_configured,
+    log_event,
+)
+
+
+log = logging.getLogger(__name__)
+
+
+def emit_initial_detail(message: str) -> None:
+    """Log runner model details while preserving legacy direct-print behavior."""
+
+    if is_experiment_logging_configured():
+        log_event(log, EventCategory.INITIAL_DETAILS, message)
+    else:
+        print(message, flush=True)
+
+
+@contextmanager
+def cwt_progress_context(
+    label: str,
+    *,
+    verbose: int,
+    **details: object,
+) -> Iterator[bool]:
+    """Yield CWT bar visibility and durably record semantic lifecycle events."""
+
+    policy = get_console_policy()
+    show_progress = verbose >= 1 if policy is None else policy.cwt_progress
+    logging_configured = is_experiment_logging_configured()
+    detail_text = " ".join(f"{name}={value}" for name, value in details.items())
+    started = time.perf_counter()
+    if logging_configured:
+        log_event(
+            log,
+            EventCategory.CWT,
+            f"[CWT][{label}] start{f' {detail_text}' if detail_text else ''}",
+        )
+    try:
+        yield show_progress
+    except BaseException as exc:
+        if logging_configured:
+            log_event(
+                log,
+                EventCategory.CWT,
+                f"[CWT][{label}] failed "
+                f"error={type(exc).__name__}: {exc} "
+                f"elapsed={time.perf_counter() - started:.2f}s",
+                level=logging.ERROR,
+            )
+        raise
+    else:
+        if logging_configured:
+            log_event(
+                log,
+                EventCategory.CWT,
+                f"[CWT][{label}] complete "
+                f"elapsed={time.perf_counter() - started:.2f}s",
+            )
 
 
 def validate_eeg_X(X: np.ndarray) -> np.ndarray:
@@ -455,7 +518,7 @@ def fmt_metric(value: float | None, ndigits: int = 4) -> str:
 
 
 def print_torch_parameter_summary(model: nn.Module, header: str = "Model") -> None:
-    print(f"[{header}] Parameter summary", flush=True)
+    emit_initial_detail(f"[{header}] Parameter summary")
     total_params = 0
     total_trainable = 0
     for name, param in model.named_parameters():
@@ -463,16 +526,14 @@ def print_torch_parameter_summary(model: nn.Module, header: str = "Model") -> No
         total_params += n_params
         if param.requires_grad:
             total_trainable += n_params
-        print(
+        emit_initial_detail(
             f"[{header}] {name}: shape={tuple(param.shape)} params={n_params} "
-            f"trainable={param.requires_grad}",
-            flush=True,
+            f"trainable={param.requires_grad}"
         )
-    print(
+    emit_initial_detail(
         f"[{header}] total_params={total_params} "
         f"trainable_params={total_trainable} "
-        f"non_trainable_params={total_params - total_trainable}",
-        flush=True,
+        f"non_trainable_params={total_params - total_trainable}"
     )
 
 
@@ -516,15 +577,14 @@ def print_torch_parameter_hashes(
         model,
         precision=precision,
     )
-    print(
+    emit_initial_detail(
         f"[{header}] Parameter hashes algorithm=blake2b-128 "
-        f"precision={precision:.1e}",
-        flush=True,
+        f"precision={precision:.1e}"
     )
     for name, digest in parameter_hashes.items():
-        print(f"[{header}] {name}: weight_hash={digest}", flush=True)
-    print(f"[{header}] weight_model_hash={value_model_hash}", flush=True)
-    print(f"[{header}] named_model_hash={named_model_hash}", flush=True)
+        emit_initial_detail(f"[{header}] {name}: weight_hash={digest}")
+    emit_initial_detail(f"[{header}] weight_model_hash={value_model_hash}")
+    emit_initial_detail(f"[{header}] named_model_hash={named_model_hash}")
 
 
 def print_torch_custom_model_summary(
@@ -819,35 +879,44 @@ def compute_cwt_real_imag_tensors(
     w_real = np.zeros((n_samples, n_channels, n_time, nfreqs), dtype=np.float32)
     w_imag = np.zeros((n_samples, n_channels, n_time, nfreqs), dtype=np.float32)
 
-    _, freqs = transform_fn(
-        X[0, 0, :],
-        sampling_rate,
-        highest,
-        lowest,
+    with cwt_progress_context(
+        "shared-tensors",
+        verbose=verbose,
+        samples=n_samples,
+        channels=n_channels,
+        transforms=n_samples * n_channels,
+        input_time=n_time_orig,
+        output_time=n_time,
         nfreqs=nfreqs,
-    )
+    ) as show_progress:
+        _, freqs = transform_fn(
+            X[0, 0, :],
+            sampling_rate,
+            highest,
+            lowest,
+            nfreqs=nfreqs,
+        )
+        freqs = torch.from_numpy(freqs).float().expand(n_samples, nfreqs)
 
-    freqs = torch.from_numpy(freqs).float().expand(n_samples, nfreqs)
-
-    with tqdm(
-        total=n_samples * n_channels,
-        desc="CWT",
-        disable=verbose < 1,
-        leave=False,
-    ) as pbar:
-        for sample_idx in range(n_samples):
-            for ch_idx in range(n_channels):
-                coeffs, _ = transform_fn(
-                    X[sample_idx, ch_idx, :],
-                    sampling_rate,
-                    highest,
-                    lowest,
-                    nfreqs=nfreqs,
-                )
-                coeffs_tf = prepare_cwt_tf(coeffs, nfreqs=nfreqs, n_time=n_time)
-                w_real[sample_idx, ch_idx] = np.real(coeffs_tf).astype(np.float32)
-                w_imag[sample_idx, ch_idx] = np.imag(coeffs_tf).astype(np.float32)
-                pbar.update(1)
+        with tqdm(
+            total=n_samples * n_channels,
+            desc="CWT",
+            disable=not show_progress,
+            leave=False,
+        ) as pbar:
+            for sample_idx in range(n_samples):
+                for ch_idx in range(n_channels):
+                    coeffs, _ = transform_fn(
+                        X[sample_idx, ch_idx, :],
+                        sampling_rate,
+                        highest,
+                        lowest,
+                        nfreqs=nfreqs,
+                    )
+                    coeffs_tf = prepare_cwt_tf(coeffs, nfreqs=nfreqs, n_time=n_time)
+                    w_real[sample_idx, ch_idx] = np.real(coeffs_tf).astype(np.float32)
+                    w_imag[sample_idx, ch_idx] = np.imag(coeffs_tf).astype(np.float32)
+                    pbar.update(1)
 
     raw_x = resample(X, n_time, axis=2) if n_time != n_time_orig else X
     raw_x = np.nan_to_num(raw_x, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
@@ -1019,7 +1088,14 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.best_val_loss_ = None
 
     def _vprint(self, level: int, message: str) -> None:
-        if self.verbose >= level:
+        if is_experiment_logging_configured():
+            category = (
+                EventCategory.TRAIN_STEP
+                if message.startswith("[Train][Epoch") and " step=" in message
+                else EventCategory.STATUS
+            )
+            log_event(log, category, message)
+        elif self.verbose >= level:
             print(message, flush=True)
 
     def _validate_batch_control_params(self) -> None:
@@ -1075,7 +1151,8 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         epoch: int,
         summaries: Sequence[dict[str, object]],
     ) -> None:
-        if self.verbose < 2:
+        logging_configured = is_experiment_logging_configured()
+        if not logging_configured and self.verbose < 2:
             return
         for summary in summaries:
             probs = summary.get("probs_mean", [])
@@ -1105,7 +1182,17 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     "selected_fractions="
                     f"{_format_selector_values(summary['selected_fractions'])}"
                 )
-            self._vprint(2, " ".join(parts))
+            message = " ".join(parts)
+            if logging_configured:
+                log_event(
+                    log,
+                    EventCategory.SELECTOR,
+                    message,
+                    epoch=epoch + 1,
+                    total_epochs=int(self.epochs),
+                )
+            else:
+                self._vprint(2, message)
 
     def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):
         raise NotImplementedError
@@ -1206,7 +1293,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             self.device_
         )
         self._prepare_training_state_on_device()
-        if self.verbose >= 2:
+        if self.verbose >= 2 or is_experiment_logging_configured():
             model_label = getattr(self, "model_label", self.__class__.__name__)
             print_torch_parameter_summary(
                 self.model_, header=model_label
@@ -1627,16 +1714,25 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
 
             epoch_time = time.perf_counter() - epoch_start
             aux_suffix = "" if avg_aux is None else f" edge_density={avg_aux:.6f}"
-            self._vprint(
-                1,
+            epoch_message = (
                 f"[Train][Epoch {epoch + 1}/{self.epochs}] "
                 f"loss={avg_loss:.6f} (improve {loss_delta:+.6f}) "
                 f"acc={avg_acc:.4f} (delta {acc_delta:+.4f}) "
                 f"roc_auc={fmt_metric(avg_auc)} "
                 f"(delta {fmt_metric(auc_delta) if auc_delta is not None else 'n/a'})"
                 f" optimizer_steps={optimizer_steps}{aux_suffix} "
-                f"epoch_time={epoch_time:.2f}s{val_suffix}",
+                f"epoch_time={epoch_time:.2f}s{val_suffix}"
             )
+            if is_experiment_logging_configured():
+                log_event(
+                    log,
+                    EventCategory.EPOCH,
+                    epoch_message,
+                    epoch=epoch + 1,
+                    total_epochs=int(self.epochs),
+                )
+            else:
+                self._vprint(1, epoch_message)
 
             if (
                 val_loader is not None
