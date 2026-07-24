@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -37,6 +38,20 @@ class ConsolePolicy:
     epoch_every: int = 5
     selector_every: int = 0
 
+    @classmethod
+    def all(cls) -> ConsolePolicy:
+        """Return a policy that exposes every console event."""
+
+        return cls(
+            initial_details=True,
+            final_results=True,
+            cwt_progress=True,
+            moabb_progress=True,
+            train_steps=True,
+            epoch_every=1,
+            selector_every=1,
+        )
+
     def __post_init__(self) -> None:
         if self.epoch_every < 0:
             raise ValueError("console epoch cadence must be non-negative.")
@@ -45,6 +60,92 @@ class ConsolePolicy:
 
 
 _console_policy: ConsolePolicy | None = None
+
+
+def _non_negative_int(raw_value: str) -> int:
+    value = int(raw_value)
+    if value < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return value
+
+
+def add_console_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add grouped console visibility arguments to an experiment runner."""
+
+    group = parser.add_argument_group("Console logging")
+    group.add_argument(
+        "--console-all",
+        action="store_true",
+        help=(
+            "Show every configurable console event, including every epoch and "
+            "selector diagnostic. Explicit --no-console-* and cadence options "
+            "override it."
+        ),
+    )
+    group.add_argument(
+        "--console-initial-details",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show model parameter, hash, configuration, and memory details.",
+    )
+    group.add_argument(
+        "--console-final-results",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show final result tables (enabled by default).",
+    )
+    group.add_argument(
+        "--console-cwt-progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show transient CWT progress bars.",
+    )
+    group.add_argument(
+        "--console-moabb-progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show transient MOABB evaluation progress bars.",
+    )
+    group.add_argument(
+        "--console-train-steps",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Show per-batch training-step diagnostics (very verbose).",
+    )
+    group.add_argument(
+        "--console-epoch-every",
+        type=_non_negative_int,
+        default=None,
+        metavar="N",
+        help="Show every Nth epoch summary; 0 disables epoch summaries.",
+    )
+    group.add_argument(
+        "--console-selector-every",
+        type=_non_negative_int,
+        default=None,
+        metavar="N",
+        help="Show every Nth selector diagnostic; 0 disables them.",
+    )
+
+
+def console_policy_from_args(args: argparse.Namespace) -> ConsolePolicy:
+    """Resolve a console baseline plus explicitly supplied CLI overrides."""
+
+    baseline = ConsolePolicy.all() if args.console_all else ConsolePolicy()
+    values = {
+        "initial_details": args.console_initial_details,
+        "final_results": args.console_final_results,
+        "cwt_progress": args.console_cwt_progress,
+        "moabb_progress": args.console_moabb_progress,
+        "train_steps": args.console_train_steps,
+        "epoch_every": args.console_epoch_every,
+        "selector_every": args.console_selector_every,
+    }
+    resolved = {
+        name: value if value is not None else getattr(baseline, name)
+        for name, value in values.items()
+    }
+    return ConsolePolicy(**resolved)
 
 
 def get_console_policy() -> ConsolePolicy | None:
@@ -64,8 +165,9 @@ def resolve_experiment_log_path(
     *,
     run_id: str,
     moabb_results_root: str | os.PathLike[str],
+    overwrite: bool,
 ) -> Path:
-    """Resolve a collision-safe experiment log path for an experiment run."""
+    """Resolve an experiment log path under the runner's overwrite policy."""
 
     if requested_path is not None:
         log_path = Path(requested_path).expanduser().resolve()
@@ -76,7 +178,7 @@ def resolve_experiment_log_path(
             / "experiment.log"
         )
 
-    if log_path.exists():
+    if log_path.exists() and not overwrite:
         raise FileExistsError(
             f"Experiment log already exists; refusing to overwrite: {log_path}"
         )
@@ -144,6 +246,7 @@ def configure_experiment_logging(
     log_path: Path,
     *,
     console_policy: ConsolePolicy,
+    overwrite: bool,
 ) -> None:
     """Install one durable file handler and one semantic console handler."""
 
@@ -154,7 +257,11 @@ def configure_experiment_logging(
         root_logger.removeHandler(handler)
         handler.close()
 
-    file_handler = logging.FileHandler(log_path, mode="x", encoding="utf-8")
+    file_handler = logging.FileHandler(
+        log_path,
+        mode="w" if overwrite else "x",
+        encoding="utf-8",
+    )
     file_handler.setLevel(logging.INFO)
     file_handler.addFilter(_DurableCategoryFilter())
     file_handler.setFormatter(

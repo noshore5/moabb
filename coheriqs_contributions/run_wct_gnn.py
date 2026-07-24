@@ -52,22 +52,16 @@ from coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
     XWTPhaseGNNV2Classifier,
 )
 from coheriqs_contributions.experiment_logging import (
-    ConsolePolicy,
     EventCategory,
+    add_console_arguments,
     configure_experiment_logging,
+    console_policy_from_args,
     log_event,
     resolve_experiment_log_path,
 )
 
 
 log = logging.getLogger(__name__)
-
-
-def _non_negative_int(raw_value):
-    value = int(raw_value)
-    if value < 0:
-        raise argparse.ArgumentTypeError("value must be non-negative")
-    return value
 
 
 def _make_csp_lda():
@@ -746,12 +740,20 @@ def _write_group_artifacts(
     effective_params=None,
     experiment_log_path=None,
     console_policy=None,
+    overwrite=True,
 ):
     """Write compact human-readable companions beside MOABB's HDF5 store."""
     hdf5_path = Path(evaluation.results.filepath).resolve()
     artifact_dir = hdf5_path.parent
     scores_path = artifact_dir / f"scores_{group_id}.csv"
     summary_path = artifact_dir / f"summary_{group_id}.md"
+    if not overwrite:
+        existing_paths = [path for path in (scores_path, summary_path) if path.exists()]
+        if existing_paths:
+            raise FileExistsError(
+                "Run artifact already exists; refusing to overwrite: "
+                + ", ".join(str(path) for path in existing_paths)
+            )
     group_results.to_csv(scores_path, index=False)
 
     outer_columns = ["subject", "session", "pipeline", "score"]
@@ -778,6 +780,7 @@ def _write_group_artifacts(
         lines.append(f"- Experiment log: `{experiment_log_path}`")
     if console_policy is not None:
         lines.append(f"- Console output policy: `{console_policy!r}`")
+    lines.append(f"- Overwrite existing outputs: `{overwrite}`")
     lines.append(f"- Fixed parameter overrides: `{fixed_overrides or {}}`")
     lines.extend(["", "## Outer-CV rows", ""])
     lines.extend(_markdown_table(group_results, outer_columns))
@@ -914,57 +917,24 @@ def main():
         ),
     )
     parser.add_argument(
+        "--overwrite",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Replace outputs for an existing run ID (enabled by default). "
+            "--no-overwrite preserves MOABB results and rejects existing logs "
+            "and human-readable artifacts."
+        ),
+    )
+    parser.add_argument(
         "--experiment-log",
         default=None,
         help=(
             "Durable UTF-8 experiment log path. Defaults to "
-            "MOABB_RESULTS/<run-id>/experiment.log. Existing files are rejected."
+            "MOABB_RESULTS/<run-id>/experiment.log."
         ),
     )
-    parser.add_argument(
-        "--console-initial-details",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Show model parameter, hash, configuration, and memory details.",
-    )
-    parser.add_argument(
-        "--console-final-results",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Show final result tables (enabled by default).",
-    )
-    parser.add_argument(
-        "--console-cwt-progress",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Show transient CWT progress bars.",
-    )
-    parser.add_argument(
-        "--console-moabb-progress",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Show transient MOABB evaluation progress bars.",
-    )
-    parser.add_argument(
-        "--console-train-steps",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Show per-batch training-step diagnostics (very verbose).",
-    )
-    parser.add_argument(
-        "--console-epoch-every",
-        type=_non_negative_int,
-        default=5,
-        metavar="N",
-        help="Show every Nth epoch summary; 0 disables epoch summaries.",
-    )
-    parser.add_argument(
-        "--console-selector-every",
-        type=_non_negative_int,
-        default=0,
-        metavar="N",
-        help="Show every Nth selector diagnostic; 0 disables them.",
-    )
+    add_console_arguments(parser)
     parser.add_argument(
         "--param-names",
         "--param_names",
@@ -1002,27 +972,21 @@ def main():
         inner_group_mode=args.inner_group_mode,
         global_hyperparam_fit_mode=args.global_hyperparam_fit,
     )
-    console_policy = ConsolePolicy(
-        initial_details=args.console_initial_details,
-        final_results=args.console_final_results,
-        cwt_progress=args.console_cwt_progress,
-        moabb_progress=args.console_moabb_progress,
-        train_steps=args.console_train_steps,
-        epoch_every=args.console_epoch_every,
-        selector_every=args.console_selector_every,
-    )
+    console_policy = console_policy_from_args(args)
     moabb_results_root = _configured_moabb_result_root()
     try:
         experiment_log_path = resolve_experiment_log_path(
             args.experiment_log,
             run_id=run_id,
             moabb_results_root=moabb_results_root,
+            overwrite=args.overwrite,
         )
     except FileExistsError as exc:
         parser.error(str(exc))
     configure_experiment_logging(
         experiment_log_path,
         console_policy=console_policy,
+        overwrite=args.overwrite,
     )
     log_event(
         log,
@@ -1033,6 +997,11 @@ def main():
         log,
         EventCategory.CONFIG,
         f"Console output policy: {console_policy!r}",
+    )
+    log_event(
+        log,
+        EventCategory.CONFIG,
+        f"Overwrite existing run outputs: {args.overwrite}",
     )
     _print_run_plan(args.subjects, selected_pipelines, pipeline_runs)
     log_event(log, EventCategory.STATUS, f"Run ID: {run_id}")
@@ -1056,10 +1025,10 @@ def main():
     base_eval_kwargs = dict(
         paradigm=paradigm,
         datasets=[dataset],
-        overwrite=True,
+        overwrite=args.overwrite,
         n_jobs=1,
         random_state=42,
-        progress_bar=args.console_moabb_progress,
+        progress_bar=console_policy.moabb_progress,
     )
 
     grouped_runs = defaultdict(list)
@@ -1183,6 +1152,7 @@ def main():
             data_root=data_root,
             experiment_log_path=experiment_log_path,
             console_policy=console_policy,
+            overwrite=args.overwrite,
         )
         results_chunks.append(group_results)
 

@@ -27,4 +27,7 @@ cd "$REPO_ROOT"
 exec python "$RUNNER" \
   --subjects 1 \
   --pipeline WCT-Evidence-GNN \
-  --run-id canonical
+  --run-id canonical \
+  --console-all \
+  --no-console-train-steps \
+  --console-selector-every 0

@@ -47,9 +47,11 @@ XWT / WCT classifiers → `_BaseCWTGNNClassifier` (`xwt_phase_gnn_classifier.py`
 handler retains all INFO-level experiment events; its console handler filters
 semantic categories independently. Console flags control initial model details,
 CWT and MOABB progress, per-batch diagnostics, final results, and epoch/selector
-cadence. Direct estimator use outside the runner keeps the legacy `verbose`
-behavior. Experiment-log paths are collision-safe and existing files are never
-overwritten.
+cadence. `--console-all` enables every category and cadence; explicit
+`--no-console-*` and cadence arguments override that baseline. Direct estimator
+use outside the runner keeps the legacy `verbose` behavior. The runner's unified
+`--overwrite/--no-overwrite` policy applies to MOABB results, experiment logs,
+and CSV/Markdown companions; overwrite is enabled by default.
 
 ## Training / eval gotchas
 

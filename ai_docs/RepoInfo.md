@@ -18,6 +18,9 @@ or `bash coheriqs_contributions/run_canonical_setup.sh` from repo root.
 - `run_wct_gnn.py` also writes a complete UTF-8 experiment log while keeping
   console output compact by default: every fifth epoch, no selector or
   per-batch diagnostics, hidden progress bars, and final result summaries.
+  `--console-all` exposes every console event; individual console flags override
+  that baseline. Existing outputs are replaced by default, while
+  `--no-overwrite` preserves them.
 
 ## Paths (open only when needed)
 
