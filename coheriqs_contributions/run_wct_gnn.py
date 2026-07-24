@@ -64,6 +64,10 @@ from coheriqs_contributions.experiment_logging import (
 log = logging.getLogger(__name__)
 
 
+class RunConfigurationError(ValueError):
+    """Configuration error that the CLI should report as an argument error."""
+
+
 def _make_csp_lda():
     return make_pipeline(
         CSP(n_components=4, log=True, norm_trace=False, reg=None),
@@ -867,7 +871,7 @@ def _print_inner_results(inner):
         )
 
 
-def main():
+def _build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--subjects", nargs="+", type=int, default=[1])
     parser.add_argument(
@@ -958,35 +962,47 @@ def main():
             "strings."
         ),
     )
-    args = parser.parse_args()
-    run_id = _safe_run_id(args.run_id)
-    selected_pipelines = args.pipeline if args.pipeline else DEFAULT_PIPELINES
+    return parser
+
+
+def parse_parameters(arguments: list[str] | None = None) -> argparse.Namespace:
+    """Parse runner parameters from explicit arguments or the process CLI."""
+    return _build_argument_parser().parse_args(arguments)
+
+
+def main(parameters: argparse.Namespace) -> None:
+    run_id = _safe_run_id(parameters.run_id)
+    selected_pipelines = (
+        parameters.pipeline if parameters.pipeline else DEFAULT_PIPELINES
+    )
     try:
         fixed_overrides = _validate_param_overrides(
-            selected_pipelines, args.param_names, args.param_values
+            selected_pipelines,
+            parameters.param_names,
+            parameters.param_values,
         )
     except ValueError as exc:
-        parser.error(str(exc))
+        raise RunConfigurationError(str(exc)) from exc
     pipeline_runs = _build_pipeline_runs(
         pipeline_names=selected_pipelines,
-        inner_group_mode=args.inner_group_mode,
-        global_hyperparam_fit_mode=args.global_hyperparam_fit,
+        inner_group_mode=parameters.inner_group_mode,
+        global_hyperparam_fit_mode=parameters.global_hyperparam_fit,
     )
-    console_policy = console_policy_from_args(args)
+    console_policy = console_policy_from_args(parameters)
     moabb_results_root = _configured_moabb_result_root()
     try:
         experiment_log_path = resolve_experiment_log_path(
-            args.experiment_log,
+            parameters.experiment_log,
             run_id=run_id,
             moabb_results_root=moabb_results_root,
-            overwrite=args.overwrite,
+            overwrite=parameters.overwrite,
         )
     except FileExistsError as exc:
-        parser.error(str(exc))
+        raise RunConfigurationError(str(exc)) from exc
     configure_experiment_logging(
         experiment_log_path,
         console_policy=console_policy,
-        overwrite=args.overwrite,
+        overwrite=parameters.overwrite,
     )
     log_event(
         log,
@@ -1001,9 +1017,9 @@ def main():
     log_event(
         log,
         EventCategory.CONFIG,
-        f"Overwrite existing run outputs: {args.overwrite}",
+        f"Overwrite existing run outputs: {parameters.overwrite}",
     )
-    _print_run_plan(args.subjects, selected_pipelines, pipeline_runs)
+    _print_run_plan(parameters.subjects, selected_pipelines, pipeline_runs)
     log_event(log, EventCategory.STATUS, f"Run ID: {run_id}")
     if fixed_overrides:
         log_event(
@@ -1013,7 +1029,7 @@ def main():
         )
 
     dataset = BNCI2014_001()
-    dataset.subject_list = args.subjects
+    dataset.subject_list = parameters.subjects
     data_root = _configured_data_root()
     log_event(
         log,
@@ -1025,7 +1041,7 @@ def main():
     base_eval_kwargs = dict(
         paradigm=paradigm,
         datasets=[dataset],
-        overwrite=args.overwrite,
+        overwrite=parameters.overwrite,
         n_jobs=1,
         random_state=42,
         progress_bar=console_policy.moabb_progress,
@@ -1142,7 +1158,7 @@ def main():
             group_results=group_results,
             group_id=group_id,
             run_id=run_id,
-            subjects=args.subjects,
+            subjects=parameters.subjects,
             eval_mode=eval_mode,
             inner_group=inner_group,
             run_param_grid=run_param_grid,
@@ -1152,7 +1168,7 @@ def main():
             data_root=data_root,
             experiment_log_path=experiment_log_path,
             console_policy=console_policy,
-            overwrite=args.overwrite,
+            overwrite=parameters.overwrite,
         )
         results_chunks.append(group_results)
 
@@ -1209,9 +1225,13 @@ def main():
         per_pipeline.to_string(index=False),
     )
 
-    if args.show_inner_results:
+    if parameters.show_inner_results:
         _print_inner_results(inner)
 
 
 if __name__ == "__main__":
-    main()
+    argument_parser = _build_argument_parser()
+    try:
+        main(argument_parser.parse_args())
+    except RunConfigurationError as exc:
+        argument_parser.error(str(exc))

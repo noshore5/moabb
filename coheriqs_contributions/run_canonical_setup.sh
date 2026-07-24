@@ -7,7 +7,7 @@
 # run_wct_gnn.py.
 #
 # Safe to invoke from repo root or coheriqs_contributions/ (cwd does not matter).
-# Usage (with moabb-env-win active):
+# Usage (with moabb's Python env active):
 #   bash coheriqs_contributions/run_canonical_setup.sh
 #   bash run_canonical_setup.sh   # when cwd is coheriqs_contributions/
 
@@ -28,6 +28,8 @@ exec python "$RUNNER" \
   --subjects 1 \
   --pipeline WCT-Evidence-GNN \
   --run-id canonical \
+  --param-names window_compute_mode \
+  --param-values chunked \
   --console-all \
   --no-console-train-steps \
   --console-selector-every 0
