@@ -7,8 +7,10 @@ MOABB LeftRightImagery (BNCI2014-001) CWT/WCT/XWT GNN + baselines.
 - Run scripts / pytest from: **repo root** (imports). Edit code under
   `coheriqs_contributions/`.
 - Environment: venvs live at repo root and are (usually) named as `moabb-env-win` (Windows) / `moabb-env` (Unix).
-- Main run: `python coheriqs_contributions/run_wct_gnn.py --subjects 1 --pipeline WCT-Evidence-GNN`
-or `bash coheriqs_contributions/run_canonical_setup.sh` from repo root.
+- Main run: `python coheriqs_contributions/run_wct_gnn.py --subjects 1 --pipeline WCT-Evidence-GNN`.
+  Use `bash coheriqs_contributions/run_canonical_setup.sh` or run
+  `coheriqs_contributions/run_canonical_setup.py` directly from an IDE for the
+  maintained, zero-argument canonical setup.
 - Tests: `pytest coheriqs_contributions/tests -q`
 - Subject scope: default `--subjects 1`. Before using any other subjects, read
   and update `ai_docs/experimental_policy.md` (scope rules and exploitation
@@ -45,4 +47,5 @@ or `bash coheriqs_contributions/run_canonical_setup.sh` from repo root.
 ## Chores
 
 - Keep `run_canonical_setup.sh` in sync with `run_wct_gnn.py` —
-  when the active run profile changes - update the arguments accordingly.
+  when the active run profile changes, update its arguments and those in
+  `run_canonical_setup.py` accordingly.

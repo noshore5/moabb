@@ -10,9 +10,11 @@ local multi-worktree project-control bundle is under `orchestration/`.
   change upstream `moabb/` only when the contribution genuinely belongs there.
 - Launch and pytest from the **repo root**. `run_wct_gnn.py` puts the root on
   `sys.path`; the contributions tree is not an installable package.
-- `coheriqs_contributions/run_canonical_setup.sh` — maintained script
-  wrapper for the canonical experimental setup; update when the active
-  experimental CLI profile changes.
+- `coheriqs_contributions/run_canonical_setup.sh` and
+  `coheriqs_contributions/run_canonical_setup.py` are maintained wrappers for
+  the canonical experimental setup. The Python wrapper is a zero-argument IDE
+  entry point that reuses the active interpreter and environment. Update both
+  wrappers when the active experimental CLI profile changes.
 
 ## Argument / config threading
 
