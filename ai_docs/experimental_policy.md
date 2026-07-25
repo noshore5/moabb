@@ -67,3 +67,11 @@ outer-score looks) is the better pressure signal than Unique.
 | 7 | 0 | 0 | frozen until allowed |
 | 8 | 0 | 0 | frozen until allowed |
 | 9 | 0 | 0 | frozen until allowed |
+
+## Run naming and optional context
+
+- Timestamp-generated IDs are fine for ordinary exploration. Give a run a
+  descriptive ID when its result is intended to be revisited or compared later.
+- Use `--no-overwrite` when a named result must be preserved.
+- Once the runner supports the optional experiment description 
+  use it when the motivation is not evident from the run ID and effective configuration.
