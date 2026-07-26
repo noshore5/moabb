@@ -46,6 +46,29 @@ class DummyClassifier(sklearn.base.BaseEstimator):
         self.kernel = kernel
 
 
+class ValidationMetadataSpy(sklearn.base.ClassifierMixin, sklearn.base.BaseEstimator):
+    received_validation_groups = []
+    received_metadata = []
+
+    def __init__(self, validation_group_column="run", offset=0):
+        self.validation_group_column = validation_group_column
+        self.offset = offset
+
+    def fit(self, X, y, validation_groups=None, metadata=None):
+        type(self).received_validation_groups.append(
+            None if validation_groups is None else np.asarray(validation_groups).copy()
+        )
+        type(self).received_metadata.append(metadata)
+        self.classes_ = np.unique(y)
+        return self
+
+    def predict(self, X):
+        return np.repeat(self.classes_[0], len(X))
+
+    def predict_proba(self, X):
+        return np.full((len(X), len(self.classes_)), 1 / len(self.classes_))
+
+
 class TestWithinSess:
     """This is actually integration testing but I don't know how to do this
     better.
@@ -673,6 +696,30 @@ def test_cross_session_inner_cv_supports_groups_with_custom_inner_cv():
 
     inner_df = evaluation.get_inner_cv_results()
     assert not inner_df.empty
+
+
+@pytest.mark.parametrize("param_grid", [None, {"spy": {"offset": [0, 1]}}])
+def test_cross_session_forwards_run_metadata_to_validation_estimators(param_grid):
+    ValidationMetadataSpy.received_validation_groups.clear()
+    ValidationMetadataSpy.received_metadata.clear()
+    evaluation = ev.CrossSessionEvaluation(
+        paradigm=FakeImageryParadigm(), datasets=[dataset], overwrite=True
+    )
+
+    results = evaluation.process(
+        {"spy": ValidationMetadataSpy()}, param_grid=param_grid
+    )
+
+    assert len(results) > 0
+    assert ValidationMetadataSpy.received_validation_groups
+    assert all(
+        groups is not None and len(groups) > 0
+        for groups in ValidationMetadataSpy.received_validation_groups
+    )
+    assert all(
+        metadata is not None and "run" in metadata.columns
+        for metadata in ValidationMetadataSpy.received_metadata
+    )
 
 
 def test_global_future_session_aggregates_over_other_folds_only():

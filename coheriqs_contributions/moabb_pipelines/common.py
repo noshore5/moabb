@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import logging
 import math
 import os
@@ -730,8 +731,14 @@ def resolve_train_val_indices(
         unique_groups = np.unique(validation_groups)
         if unique_groups.size < 2:
             raise ValueError("Grouped validation requires at least 2 groups.")
-        n_val_groups = max(1, min(unique_groups.size - 1, round(frac * unique_groups.size)))
-        chosen_groups = np.asarray(rng.permutation(unique_groups)[:n_val_groups])
+        # Python's round uses ties-to-even, which makes a half-step request
+        # surprising for a small number of available groups.  Selection is
+        # constrained to leave at least one complete group for training.
+        n_val_groups = int(math.floor(frac * unique_groups.size + 0.5))
+        n_val_groups = max(1, min(unique_groups.size - 1, n_val_groups))
+        chosen_groups = _choose_validation_groups(
+            unique_groups, validation_groups, y_idx, n_val_groups, rng
+        )
         val_mask = np.isin(validation_groups, chosen_groups)
         train_idx = np.where(~val_mask)[0]
         val_idx = np.where(val_mask)[0]
@@ -749,17 +756,91 @@ def resolve_train_val_indices(
         )
 
     requested_values = list(validation_split)
-    mask = np.isin(validation_groups, requested_values)
-    if not np.any(mask):
-        mask = np.isin(
-            validation_groups.astype(str),
-            np.array([str(v) for v in requested_values], dtype=object),
+    if not requested_values:
+        raise ValueError("Explicit validation group selection cannot be empty.")
+    available_values = validation_groups.tolist()
+    missing_values = []
+    matched_values = []
+    for value in requested_values:
+        exact_matches = [available for available in available_values if value == available]
+        string_matches = [
+            available for available in available_values if str(value) == str(available)
+        ]
+        matches = exact_matches or string_matches
+        if not matches:
+            missing_values.append(value)
+        else:
+            matched_values.extend(matches)
+    if missing_values:
+        raise ValueError(
+            "Requested validation group values are absent: "
+            f"{missing_values}. Available values: {np.unique(validation_groups).tolist()}."
         )
+    mask = np.isin(validation_groups, matched_values)
     val_idx = np.where(mask)[0]
     train_idx = np.where(~mask)[0]
     if train_idx.size == 0 or val_idx.size == 0:
         raise ValueError("Validation group selection produced an empty partition.")
     return train_idx, val_idx, np.unique(validation_groups[val_idx])
+
+
+def _choose_validation_groups(
+    unique_groups: np.ndarray,
+    validation_groups: np.ndarray,
+    y_idx: np.ndarray,
+    n_val_groups: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Choose a seeded group subset, preferring class coverage on both sides."""
+    all_classes = np.unique(y_idx)
+    best_groups = None
+    best_score = None
+    for candidate_indices in itertools.combinations(range(unique_groups.size), n_val_groups):
+        candidate = unique_groups[list(candidate_indices)]
+        val_mask = np.isin(validation_groups, candidate)
+        val_coverage = np.intersect1d(np.unique(y_idx[val_mask]), all_classes).size
+        train_coverage = np.intersect1d(np.unique(y_idx[~val_mask]), all_classes).size
+        # The seeded tie-break makes equally useful subsets reproducible while
+        # avoiding a systematic preference for the first sorted group values.
+        score = (val_coverage, train_coverage, float(rng.random()))
+        if best_score is None or score > best_score:
+            best_score = score
+            best_groups = candidate
+    assert best_groups is not None
+    return np.asarray(best_groups)
+
+
+def validation_split_summary(
+    *,
+    n_samples: int,
+    validation_split,
+    validation_group_column: str | None,
+    validation_groups: np.ndarray | None,
+    chosen_groups: np.ndarray | None,
+    val_idx: np.ndarray,
+    seed: int,
+) -> dict[str, object]:
+    """Return serializable facts about the internal validation partition."""
+    grouped = validation_group_column is not None
+    total_groups = None if validation_groups is None else int(np.unique(validation_groups).size)
+    requested_fraction = (
+        float(validation_split)
+        if isinstance(validation_split, (float, int)) and not isinstance(validation_split, bool)
+        else None
+    )
+    return {
+        "group_column": validation_group_column,
+        "requested_fraction": requested_fraction,
+        "actual_group_fraction": (
+            None
+            if not grouped or total_groups is None or chosen_groups is None
+            else float(len(chosen_groups) / total_groups)
+        ),
+        "actual_sample_fraction": float(val_idx.size / n_samples),
+        "total_groups": total_groups,
+        "selected_values": [] if chosen_groups is None else chosen_groups.tolist(),
+        "seed": int(seed),
+    }
 
 
 def validation_groups_from_metadata(
@@ -1086,6 +1167,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.optimizer_step_count_history_ = []
         self.best_epoch_ = None
         self.best_val_loss_ = None
+        self.validation_split_summary_ = None
 
     def _vprint(self, level: int, message: str) -> None:
         if is_experiment_logging_configured():
@@ -1255,6 +1337,15 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             self.validation_split,
             self.validation_group_column,
             groups,
+        )
+        self.validation_split_summary_ = validation_split_summary(
+            n_samples=X.shape[0],
+            validation_split=self.validation_split,
+            validation_group_column=self.validation_group_column,
+            validation_groups=groups,
+            chosen_groups=chosen_groups,
+            val_idx=val_idx,
+            seed=int(self.seed or 0),
         )
         if val_idx.size == 0:
             self._vprint(1, "[Train] validation disabled.")
