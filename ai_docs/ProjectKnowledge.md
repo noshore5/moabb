@@ -55,6 +55,14 @@ use outside the runner keeps the legacy `verbose` behavior. The runner's unified
 `--overwrite/--no-overwrite` policy applies to MOABB results, experiment logs,
 and CSV/Markdown companions; overwrite is enabled by default.
 
+Selected durable events carry `data=` JSON after their readable message. The
+serializer keeps common configuration values JSON-compatible, orders fields
+deterministically, and marks unknown values with a type-qualified fallback.
+`runtime_context.py` records lightweight source, platform, package, and device
+facts once per run; unavailable optional probes are reported in its payload
+instead of failing the run. Per-group effective configuration and the optional
+`--description` are included in the Markdown summaries.
+
 ## Training / eval gotchas
 
 - Checkpointing uses validation **loss**; MOABB reports outer **ROC-AUC** — they

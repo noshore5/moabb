@@ -23,6 +23,10 @@ MOABB LeftRightImagery (BNCI2014-001) CWT/WCT/XWT GNN + baselines.
   `--console-all` exposes every console event; individual console flags override
   that baseline. Existing outputs are replaced by default, while
   `--no-overwrite` preserves them.
+- Use `--description` when a short run-purpose note is useful. Durable logs
+  append deterministic JSON to structured note, configuration, and runtime
+  events; console output remains readable prose. Each result summary includes
+  the resolved configuration and best-effort runtime context.
 
 ## Paths (open only when needed)
 

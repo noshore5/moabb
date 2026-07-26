@@ -632,6 +632,9 @@ def test_run_wct_gnn_writes_human_readable_result_companions(tmp_path) -> None:
         run_param_grid={"test-pipeline": {"batch_size": [8]}},
         singleton_applied={"test-pipeline": {"batch_size": 8}},
         data_root=tmp_path,
+        description="Check the selected configuration.",
+        effective_configuration={"schema_version": 1, "run_id": "test-run"},
+        runtime_context={"schema_version": 1, "run_id": "test-run"},
     )
 
     scores = tmp_path / "scores_test-group.csv"
@@ -642,6 +645,9 @@ def test_run_wct_gnn_writes_human_readable_result_companions(tmp_path) -> None:
     summary_text = summary.read_text(encoding="utf-8")
     assert "Run ID: `test-run`" in summary_text
     assert "`batch_size`: `8`" in summary_text
+    assert "Check the selected configuration." in summary_text
+    assert "## Effective configuration" in summary_text
+    assert "## Runtime context" in summary_text
 
 
 def test_run_wct_gnn_managed_run_id_comes_from_environment(monkeypatch) -> None:
@@ -652,6 +658,125 @@ def test_run_wct_gnn_managed_run_id_comes_from_environment(monkeypatch) -> None:
     assert run_wct_gnn._safe_run_id(None) == "managed-run-1"
     with pytest.raises(ValueError, match="Run ID"):
         run_wct_gnn._safe_run_id("invalid run id")
+
+
+def test_run_wct_gnn_registers_selected_coherent_source(monkeypatch, tmp_path) -> None:
+    from coheriqs_contributions import run_wct_gnn
+
+    module_path = tmp_path / "utils" / "coherence_utils.py"
+    module_path.parent.mkdir()
+    module_path.touch()
+    monkeypatch.setenv("WCT_COHERENT_MULTIPLEX_ROOT", str(tmp_path))
+
+    assert run_wct_gnn._selected_source_repositories(["CSP+LDA"]) == ({}, [])
+    assert run_wct_gnn._selected_source_repositories(["WCT-Evidence-GNN"]) == (
+        {"coherent_multiplex": tmp_path},
+        [],
+    )
+
+
+def test_run_wct_gnn_registers_default_coherent_source(monkeypatch, tmp_path) -> None:
+    from coheriqs_contributions import run_wct_gnn
+
+    default_root = tmp_path / "Coherent_Multiplex"
+    module_path = default_root / "utils" / "coherence_utils.py"
+    module_path.parent.mkdir(parents=True)
+    module_path.touch()
+    monkeypatch.delenv("WCT_COHERENT_MULTIPLEX_ROOT", raising=False)
+    monkeypatch.setattr(run_wct_gnn, "REPO_ROOT", tmp_path)
+
+    assert run_wct_gnn._selected_source_repositories(["WCT-Evidence-GNN"]) == (
+        {"coherent_multiplex": default_root},
+        [],
+    )
+
+
+def test_run_wct_gnn_requires_expected_coherent_module(monkeypatch, tmp_path) -> None:
+    from coheriqs_contributions import run_wct_gnn
+
+    monkeypatch.setenv("WCT_COHERENT_MULTIPLEX_ROOT", str(tmp_path))
+
+    assert run_wct_gnn._selected_source_repositories(["WCT-Evidence-GNN"]) == (
+        {},
+        ["coherent_multiplex source module unavailable"],
+    )
+
+
+def test_run_wct_gnn_expands_configured_coherent_source(monkeypatch, tmp_path) -> None:
+    from coheriqs_contributions import run_wct_gnn
+
+    module_path = tmp_path / "utils" / "coherence_utils.py"
+    module_path.parent.mkdir()
+    module_path.touch()
+    monkeypatch.setenv("WCT_COHERENT_MULTIPLEX_ROOT", "~selected-source")
+    monkeypatch.setattr(run_wct_gnn.Path, "expanduser", lambda _path: tmp_path)
+
+    assert run_wct_gnn._selected_source_repositories(["WCT-Evidence-GNN"]) == (
+        {"coherent_multiplex": tmp_path},
+        [],
+    )
+
+
+def test_run_wct_gnn_records_source_probe_exception(monkeypatch) -> None:
+    from coheriqs_contributions import run_wct_gnn
+
+    monkeypatch.setattr(run_wct_gnn.Path, "is_file", lambda _path: 1 / 0)
+
+    sources, failures = run_wct_gnn._selected_source_repositories(["WCT-Evidence-GNN"])
+
+    assert sources == {}
+    assert failures == ["coherent_multiplex source probe: ZeroDivisionError"]
+
+
+def test_run_wct_gnn_sanitizes_description_for_single_line_log_records() -> None:
+    from coheriqs_contributions import run_wct_gnn
+
+    assert run_wct_gnn._single_line_log_text("line one\r\nline two\x00") == (
+        "line one line two"
+    )
+    assert run_wct_gnn._single_line_log_text(
+        "one\u0085two\u2028three\u2029four"
+    ) == "one two three four"
+
+
+def test_run_wct_gnn_preserves_global_evaluation_unavailable_error(
+    monkeypatch, tmp_path
+) -> None:
+    from coheriqs_contributions import run_wct_gnn
+
+    monkeypatch.setattr(run_wct_gnn, "GlobalFutureSessionEvaluation", None)
+    monkeypatch.setenv("MOABB_RESULTS", str(tmp_path))
+    calls = []
+    original_collect = run_wct_gnn.collect_runtime_context
+
+    def collect_once(**kwargs):
+        calls.append(kwargs)
+        return original_collect(**kwargs)
+
+    monkeypatch.setattr(run_wct_gnn, "collect_runtime_context", collect_once)
+    parameters = run_wct_gnn.parse_parameters(
+        [
+            "--pipeline",
+            "CSP+LDA",
+            "--global-hyperparam-fit",
+            "true",
+            "--run-id",
+            "global-unavailable",
+            "--description",
+            "first line\r\nsecond line\x00",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="GlobalFutureSessionEvaluation not available"):
+        run_wct_gnn.main(parameters)
+    assert len(calls) == 1
+    log_lines = (tmp_path / "global-unavailable" / "experiment.log").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    description_lines = [line for line in log_lines if "Run description:" in line]
+    assert len(description_lines) == 1
+    assert "first line second line" in description_lines[0]
+    assert "\\r\\n" in description_lines[0]
 
 
 def test_noise_augmentation_controls_are_sklearn_parameter_grid_friendly() -> None:

@@ -58,7 +58,9 @@ from coheriqs_contributions.experiment_logging import (
     console_policy_from_args,
     log_event,
     resolve_experiment_log_path,
+    serialize_event_data,
 )
+from coheriqs_contributions.runtime_context import collect_runtime_context
 
 
 log = logging.getLogger(__name__)
@@ -335,6 +337,16 @@ PIPELINE_BUILDERS = {
     "XWT-Phase-GNN-V2": _make_xwt_phase_gnn_v2,
 }
 DEFAULT_PIPELINES = ["WCT-Evidence-GNN",]
+_COHERENT_MULTIPLEX_PIPELINES = {
+    "Coherence-CNN",
+    "CWT-CNN",
+    "WCT-Evidence-GNN",
+    "WCT-Phase-GNN",
+    "WCT-Phase-GNN-V2",
+    "Wavelet-RF",
+    "XWT-Phase-GNN",
+    "XWT-Phase-GNN-V2",
+}
 PIPELINE_PARAM_GRIDS = {
     "CSP+LDA": {
         "csp__n_components": [5, 6, 7],
@@ -662,6 +674,53 @@ def _prepare_param_grid_for_run(pipelines, run_param_grid):
     return effective_param_grid, singleton_applied
 
 
+def _resolved_estimator_candidates(pipelines, run_param_grid):
+    """Capture every parameter set that evaluation may fit for each pipeline."""
+
+    candidates = {}
+    for label, estimator in pipelines.items():
+        base_parameters = estimator.get_params(deep=True)
+        combinations = ParameterGrid(run_param_grid.get(label, {}))
+        candidates[label] = []
+        for overrides in combinations:
+            candidate = dict(base_parameters)
+            candidate.update(overrides)
+            candidates[label].append(candidate)
+    return candidates
+
+
+def _candidate_devices(estimator_candidates):
+    return {
+        label: sorted(
+            {
+                str(candidate["device"])
+                for candidate in candidates
+                if "device" in candidate
+            }
+        )
+        for label, candidates in estimator_candidates.items()
+    }
+
+
+def _selected_source_repositories(selected_pipelines):
+    """Register only the declared external source used by selected pipelines."""
+
+    if not _COHERENT_MULTIPLEX_PIPELINES.intersection(selected_pipelines):
+        return {}, []
+    try:
+        configured_root = os.environ.get("WCT_COHERENT_MULTIPLEX_ROOT")
+        source_root = (
+            Path(configured_root).expanduser()
+            if configured_root
+            else REPO_ROOT / "Coherent_Multiplex"
+        )
+        if (source_root / "utils" / "coherence_utils.py").is_file():
+            return {"coherent_multiplex": source_root}, []
+        return {}, ["coherent_multiplex source module unavailable"]
+    except Exception as exc:
+        return {}, [f"coherent_multiplex source probe: {type(exc).__name__}"]
+
+
 def _print_run_plan(subjects, selected_pipelines, pipeline_runs):
     log_event(log, EventCategory.CONFIG, "=== Run plan ===")
     log_event(log, EventCategory.CONFIG, f"Subjects: {subjects}")
@@ -669,6 +728,11 @@ def _print_run_plan(subjects, selected_pipelines, pipeline_runs):
     log_event(log, EventCategory.CONFIG, f"Evaluation runs: {len(pipeline_runs)}")
     for run_cfg in pipeline_runs:
         log_event(log, EventCategory.CONFIG, f"  - {run_cfg['label']}")
+
+
+def _single_line_log_text(value):
+    single_line = " ".join(str(value).splitlines())
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", single_line).strip()
 
 
 def _safe_run_id(value):
@@ -744,6 +808,9 @@ def _write_group_artifacts(
     effective_params=None,
     experiment_log_path=None,
     console_policy=None,
+    description=None,
+    runtime_context=None,
+    effective_configuration=None,
     overwrite=True,
 ):
     """Write compact human-readable companions beside MOABB's HDF5 store."""
@@ -786,6 +853,30 @@ def _write_group_artifacts(
         lines.append(f"- Console output policy: `{console_policy!r}`")
     lines.append(f"- Overwrite existing outputs: `{overwrite}`")
     lines.append(f"- Fixed parameter overrides: `{fixed_overrides or {}}`")
+    if description:
+        lines.extend(["", "## Run description", "", description])
+    if effective_configuration is not None:
+        lines.extend(
+            [
+                "",
+                "## Effective configuration",
+                "",
+                "```json",
+                serialize_event_data(effective_configuration),
+                "```",
+            ]
+        )
+    if runtime_context is not None:
+        lines.extend(
+            [
+                "",
+                "## Runtime context",
+                "",
+                "```json",
+                serialize_event_data(runtime_context),
+                "```",
+            ]
+        )
     lines.extend(["", "## Outer-CV rows", ""])
     lines.extend(_markdown_table(group_results, outer_columns))
     lines.extend(["", "## Subject/pipeline means", ""])
@@ -938,6 +1029,12 @@ def _build_argument_parser() -> argparse.ArgumentParser:
             "MOABB_RESULTS/<run-id>/experiment.log."
         ),
     )
+    parser.add_argument(
+        "--description",
+        "--run-description",
+        default=None,
+        help="Optional free-form note describing this run's purpose.",
+    )
     add_console_arguments(parser)
     parser.add_argument(
         "--param-names",
@@ -1021,6 +1118,17 @@ def main(parameters: argparse.Namespace) -> None:
     )
     _print_run_plan(parameters.subjects, selected_pipelines, pipeline_runs)
     log_event(log, EventCategory.STATUS, f"Run ID: {run_id}")
+    if parameters.description:
+        log_event(
+            log,
+            EventCategory.RESEARCH_NOTE,
+            f"Run description: {_single_line_log_text(parameters.description)}",
+            data={
+                "schema_version": 1,
+                "run_id": run_id,
+                "description": parameters.description,
+            },
+        )
     if fixed_overrides:
         log_event(
             log,
@@ -1050,6 +1158,39 @@ def main(parameters: argparse.Namespace) -> None:
     grouped_runs = defaultdict(list)
     for run_cfg in pipeline_runs:
         grouped_runs[(run_cfg["eval_mode"], run_cfg["inner_group"])].append(run_cfg)
+
+    runtime_pipelines = {
+        run_cfg["label"]: PIPELINE_BUILDERS[run_cfg["base_name"]]()
+        for run_cfg in pipeline_runs
+    }
+    runtime_param_grid = {
+        run_cfg["label"]: deepcopy(PIPELINE_PARAM_GRIDS[run_cfg["base_name"]])
+        for run_cfg in pipeline_runs
+    }
+    runtime_param_grid = _apply_fixed_param_overrides(
+        runtime_pipelines, runtime_param_grid, fixed_overrides
+    )
+    _prepare_param_grid_for_run(runtime_pipelines, runtime_param_grid)
+    runtime_candidates = _resolved_estimator_candidates(
+        runtime_pipelines, runtime_param_grid
+    )
+    source_repositories, source_probe_failures = _selected_source_repositories(
+        selected_pipelines
+    )
+    runtime_context = collect_runtime_context(
+        run_id=run_id,
+        parsed_arguments=vars(parameters),
+        repository_root=REPO_ROOT,
+        pipeline_devices=_candidate_devices(runtime_candidates),
+        source_repositories=source_repositories,
+        source_probe_failures=source_probe_failures,
+    )
+    log_event(
+        log,
+        EventCategory.RUNTIME_CONTEXT,
+        "Runtime context captured.",
+        data=runtime_context,
+    )
 
     results_chunks = []
     inner_chunks = []
@@ -1091,6 +1232,59 @@ def main(parameters: argparse.Namespace) -> None:
         )
         param_grid, singleton_applied = _prepare_param_grid_for_run(
             pipelines, run_param_grid
+        )
+        estimator_candidates = _resolved_estimator_candidates(
+            pipelines, run_param_grid
+        )
+        inner_cv_configuration = (
+            {
+                "implementation": "sklearn.model_selection.StratifiedGroupKFold",
+                "kwargs": {"n_splits": 3, "shuffle": True, "random_state": 42},
+            }
+            if inner_group is not None
+            else None
+        )
+        effective_configuration = {
+            "schema_version": 1,
+            "run_id": run_id,
+            "dataset": type(dataset).__name__,
+            "subjects": parameters.subjects,
+            "paradigm": {"name": type(paradigm).__name__, "fmin": 8, "fmax": 35},
+            "evaluation_mode": eval_mode,
+            "inner_group": inner_group,
+            "inner_cv": inner_cv_configuration,
+            "evaluation": {
+                "implementation": (
+                    CrossSessionEvaluation.__name__
+                    if eval_mode == "cross"
+                    else (
+                        GlobalFutureSessionEvaluation.__name__
+                        if GlobalFutureSessionEvaluation is not None
+                        else None
+                    )
+                ),
+                "n_jobs": 1,
+                "progress_bar": console_policy.moabb_progress,
+                "random_state": 42,
+            },
+            "pipelines": list(pipelines),
+            "fixed_overrides": fixed_overrides,
+            "search_grids": param_grid or {},
+            "singleton_parameters": singleton_applied,
+            "estimator_candidates": estimator_candidates,
+            "data_root": data_root,
+            "results_root": moabb_results_root,
+            "overwrite": parameters.overwrite,
+            "logging": {
+                "console_policy": console_policy,
+                "durable_log_path": experiment_log_path,
+            },
+        }
+        log_event(
+            log,
+            EventCategory.EFFECTIVE_CONFIG,
+            f"Effective configuration captured for {group_id}.",
+            data=effective_configuration,
         )
 
         if singleton_applied:
@@ -1168,6 +1362,9 @@ def main(parameters: argparse.Namespace) -> None:
             data_root=data_root,
             experiment_log_path=experiment_log_path,
             console_policy=console_policy,
+            description=parameters.description,
+            runtime_context=runtime_context,
+            effective_configuration=effective_configuration,
             overwrite=parameters.overwrite,
         )
         results_chunks.append(group_results)

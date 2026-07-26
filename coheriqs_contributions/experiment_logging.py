@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
+import json
 import logging
+import math
 import os
 from pathlib import Path
 import sys
+from typing import Any, Mapping
 
 
 class EventCategory(str, Enum):
@@ -24,6 +27,10 @@ class EventCategory(str, Enum):
     MOABB = "moabb"
     FINAL_RESULTS = "final_results"
     ARTIFACT = "artifact"
+    RESEARCH_NOTE = "research_note"
+    EFFECTIVE_CONFIG = "effective_config"
+    RUNTIME_CONTEXT = "runtime_context"
+    FIT_SUMMARY = "fit_summary"
 
 
 @dataclass(frozen=True)
@@ -210,11 +217,19 @@ class _SemanticConsoleFilter(logging.Filter):
             category = category.value
         if category == EventCategory.ARTIFACT.value:
             return True
-        if category in {EventCategory.STATUS.value, EventCategory.CONFIG.value}:
+        if category in {
+            EventCategory.STATUS.value,
+            EventCategory.CONFIG.value,
+        }:
             return True
-        if category == EventCategory.INITIAL_DETAILS.value:
+        if category in {
+            EventCategory.INITIAL_DETAILS.value,
+            EventCategory.RESEARCH_NOTE.value,
+            EventCategory.EFFECTIVE_CONFIG.value,
+            EventCategory.RUNTIME_CONTEXT.value,
+        }:
             return self.policy.initial_details
-        if category == EventCategory.FINAL_RESULTS.value:
+        if category in {EventCategory.FINAL_RESULTS.value, EventCategory.FIT_SUMMARY.value}:
             return self.policy.final_results
         if category == EventCategory.CWT.value:
             return self.policy.cwt_progress
@@ -242,6 +257,94 @@ class _DurableCategoryFilter(logging.Filter):
         return True
 
 
+_TOP_LEVEL_DATA_ORDER = (
+    "schema_version",
+    "run_id",
+    "start_time",
+    "description",
+)
+
+
+def _fallback_value(value: Any) -> str:
+    value_type = type(value)
+    return f"<non_json:{value_type.__module__}.{value_type.__qualname__}>"
+
+
+def _json_compatible(value: Any) -> Any:
+    """Convert common experiment values without making logging fragile."""
+
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        return f"<non_finite:{value}>"
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Enum):
+        return _json_compatible(value.value)
+    if is_dataclass(value) and not isinstance(value, type):
+        try:
+            return _json_compatible(asdict(value))
+        except Exception:
+            return _fallback_value(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_compatible(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible(item) for item in value]
+    if hasattr(value, "item"):
+        try:
+            return _json_compatible(value.item())
+        except Exception:
+            pass
+    if hasattr(value, "tolist"):
+        try:
+            return _json_compatible(value.tolist())
+        except Exception:
+            pass
+    return _fallback_value(value)
+
+
+def serialize_event_data(data: Mapping[str, Any] | Any) -> str:
+    """Return deterministic JSON while retaining a scan-friendly field order."""
+
+    try:
+        compatible = _json_compatible(data)
+        if isinstance(compatible, dict):
+            ordered = {
+                key: compatible[key]
+                for key in _TOP_LEVEL_DATA_ORDER
+                if key in compatible
+            }
+            ordered.update(
+                (key, compatible[key])
+                for key in sorted(compatible)
+                if key not in ordered
+            )
+            compatible = ordered
+        return json.dumps(
+            compatible,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+    except Exception as exc:  # pragma: no cover - final logging safety net
+        return json.dumps({"serialization_error": type(exc).__name__})
+
+
+class _DurableEventFormatter(logging.Formatter):
+    """Append selected structured event payloads only to the durable log."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = super().format(record)
+        if hasattr(record, "event_data"):
+            rendered += f" | data={serialize_event_data(record.event_data)}"
+        return rendered
+
+
 def configure_experiment_logging(
     log_path: Path,
     *,
@@ -265,7 +368,7 @@ def configure_experiment_logging(
     file_handler.setLevel(logging.INFO)
     file_handler.addFilter(_DurableCategoryFilter())
     file_handler.setFormatter(
-        logging.Formatter(
+        _DurableEventFormatter(
             "%(asctime)s %(levelname)s %(name)s "
             "[%(event_category)s] %(message)s",
             defaults={"event_category": "external"},
@@ -293,12 +396,15 @@ def log_event(
     level: int = logging.INFO,
     epoch: int | None = None,
     total_epochs: int | None = None,
+    data: Mapping[str, Any] | Any | None = None,
 ) -> None:
-    """Emit one categorized record with optional epoch cadence metadata."""
+    """Emit one categorized record with optional durable structured data."""
 
     extra = {
         "event_category": category.value,
         "event_epoch": epoch,
         "event_total_epochs": total_epochs,
     }
+    if data is not None:
+        extra["event_data"] = data
     logger.log(level, message, extra=extra)
