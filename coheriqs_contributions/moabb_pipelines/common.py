@@ -43,8 +43,6 @@ from coheriqs_contributions.experiment_logging import (
 from coheriqs_contributions.wct_cache import (
     TensorCache,
     exact_array_identity,
-    implementation_identity,
-    library_versions,
 )
 
 
@@ -1026,17 +1024,6 @@ def compute_cwt_real_imag_tensors(
 class CWTCacheStats:
     hits: int = 0
     misses: int = 0
-    bypasses: int = 0
-
-
-def _cache_reuse_policy(
-    identity: Mapping[str, object],
-    *,
-    namespace: str | None,
-) -> tuple[bool, str | None]:
-    if bool(identity["dirty"]) and not namespace:
-        return False, "relevant transform source is dirty and no development namespace was supplied"
-    return True, None
 
 
 def compute_cached_cwt_real_imag_tensors(
@@ -1049,7 +1036,6 @@ def compute_cached_cwt_real_imag_tensors(
     cwt_resample_n_time: int | None,
     transform_fn,
     cache_root: str | os.PathLike[str],
-    cache_namespace: str | None,
     verbose: int,
 ) -> tuple[
     tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
@@ -1059,21 +1045,7 @@ def compute_cached_cwt_real_imag_tensors(
 
     X = validate_eeg_X(X)
     output_time = int(cwt_resample_n_time or X.shape[2])
-    transform_identity = implementation_identity(
-        compute_cached_cwt_real_imag_tensors,
-        compute_cwt_real_imag_tensors,
-        prepare_cwt_tf,
-        transform_fn,
-    )
-    reusable, bypass_reason = _cache_reuse_policy(
-        transform_identity,
-        namespace=cache_namespace,
-    )
-    cache = TensorCache(
-        cache_root,
-        kind="input-cwt",
-        namespace=cache_namespace,
-    )
+    cache = TensorCache(cache_root, kind="input-cwt")
     transform_fields = {
         "sampling_rate": int(sampling_rate),
         "highest": float(highest),
@@ -1082,14 +1054,12 @@ def compute_cached_cwt_real_imag_tensors(
         "input_time": int(X.shape[2]),
         "output_time": output_time,
         "storage_dtype": np.dtype(np.float32).str,
-        "implementation": transform_identity,
-        "libraries": library_versions(),
     }
     raw_trials: list[np.ndarray] = []
     real_trials: list[np.ndarray] = []
     imag_trials: list[np.ndarray] = []
     frequency_trials: list[np.ndarray] = []
-    hits = misses = bypasses = 0
+    hits = misses = 0
 
     with cwt_progress_context(
         "cached-input-tensors",
@@ -1128,12 +1098,9 @@ def compute_cached_cwt_real_imag_tensors(
                 },
                 expected_names=("raw", "real", "imag", "freqs"),
                 producer=produce,
-                reusable=reusable,
-                bypass_reason=bypass_reason,
             )
             hits += int(result.hit)
-            misses += int(not result.hit and result.bypass_reason is None)
-            bypasses += int(result.bypass_reason is not None)
+            misses += int(not result.hit)
             raw_trials.append(result.tensors["raw"])
             real_trials.append(result.tensors["real"])
             imag_trials.append(result.tensors["imag"])
@@ -1148,7 +1115,7 @@ def compute_cached_cwt_real_imag_tensors(
         torch.from_numpy(np.stack(imag_trials)).float(),
         torch.from_numpy(np.stack(frequency_trials)).float(),
     )
-    return tensors, CWTCacheStats(hits=hits, misses=misses, bypasses=bypasses)
+    return tensors, CWTCacheStats(hits=hits, misses=misses)
 
 
 def compute_paired_cwt_noise_bank(
@@ -1164,7 +1131,6 @@ def compute_paired_cwt_noise_bank(
     seed: int,
     verbose: int,
     cache_root: str | os.PathLike[str] | None = None,
-    cache_namespace: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build matched raw/CWT noise entries from the same white-noise segments."""
 
@@ -1195,22 +1161,8 @@ def compute_paired_cwt_noise_bank(
     if cache_root is None:
         tensors = produce()
     else:
-        generator_identity = implementation_identity(
-            compute_paired_cwt_noise_bank,
-            compute_cwt_real_imag_tensors,
-            prepare_cwt_tf,
-            transform_fn,
-        )
-        reusable, bypass_reason = _cache_reuse_policy(
-            generator_identity,
-            namespace=cache_namespace,
-        )
         bit_generator = np.random.default_rng(int(seed)).bit_generator
-        result = TensorCache(
-            cache_root,
-            kind="noise-bank",
-            namespace=cache_namespace,
-        ).load_or_compute(
+        result = TensorCache(cache_root, kind="noise-bank").load_or_compute(
             key_fields={
                 "seed": int(seed),
                 "bit_generator": (
@@ -1224,13 +1176,9 @@ def compute_paired_cwt_noise_bank(
                 "nfreqs": int(nfreqs),
                 "output_time": int(cwt_resample_n_time or segment_length),
                 "storage_dtype": np.dtype(np.float32).str,
-                "implementation": generator_identity,
-                "libraries": library_versions(),
             },
             expected_names=("raw", "real", "imag"),
             producer=produce,
-            reusable=reusable,
-            bypass_reason=bypass_reason,
         )
         tensors = result.tensors
     return tuple(

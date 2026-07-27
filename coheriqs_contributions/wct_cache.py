@@ -4,13 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-from importlib import metadata as importlib_metadata
-import inspect
 import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import time
 from typing import Callable, Mapping, Sequence
 from uuid import uuid4
@@ -29,7 +26,6 @@ class CacheResult:
     tensors: dict[str, np.ndarray]
     hit: bool
     key: str
-    bypass_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,92 +61,6 @@ def exact_array_identity(value: np.ndarray) -> dict[str, object]:
         "shape": list(array.shape),
         "dtype": array.dtype.str,
         "byte_order": array.dtype.byteorder,
-    }
-
-
-def library_versions() -> dict[str, str | None]:
-    versions: dict[str, str | None] = {}
-    for name in ("fcwt", "numpy", "scipy"):
-        try:
-            versions[name] = importlib_metadata.version(name)
-        except importlib_metadata.PackageNotFoundError:
-            versions[name] = None
-    return versions
-
-
-def _git_output(root: Path, *arguments: str) -> str | None:
-    try:
-        completed = subprocess.run(
-            ["git", "-c", f"safe.directory={root.as_posix()}", *arguments],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return completed.stdout.strip()
-
-
-def source_identity(source: object) -> dict[str, object]:
-    """Describe one loaded implementation file and its relevant dirty state."""
-
-    inspection_target = (
-        source
-        if inspect.isfunction(source) or inspect.isclass(source) or inspect.ismodule(source)
-        else type(source)
-    )
-    try:
-        source_path_text = (
-            inspect.getsourcefile(inspection_target)
-            or inspect.getfile(inspection_target)
-        )
-    except (TypeError, OSError):
-        source_path_text = None
-    identity: dict[str, object] = {
-        "qualified_name": (
-            f"{getattr(source, '__module__', type(source).__module__)}."
-            f"{getattr(source, '__qualname__', type(source).__qualname__)}"
-        ),
-        "path": None,
-        "sha256": None,
-        "repository_root": None,
-        "commit": None,
-        "dirty": True,
-    }
-    if source_path_text is None:
-        return identity
-    path = Path(source_path_text).resolve()
-    identity["path"] = path.name
-    try:
-        identity["sha256"] = _digest_bytes(path.read_bytes())
-    except OSError:
-        return identity
-
-    root_text = _git_output(path.parent, "rev-parse", "--show-toplevel")
-    if root_text is None:
-        # A content digest is a complete implementation identity when the
-        # source is not in Git; it is not an unknowable dirty checkout.
-        identity["dirty"] = False
-        return identity
-    root = Path(root_text).resolve()
-    try:
-        relative = path.relative_to(root)
-    except ValueError:
-        return identity
-    identity["path"] = relative.as_posix()
-    identity["commit"] = _git_output(root, "rev-parse", "HEAD")
-    status = _git_output(root, "status", "--porcelain", "--", relative.as_posix())
-    identity["dirty"] = status is None or bool(status)
-    return identity
-
-
-def implementation_identity(*sources: object) -> dict[str, object]:
-    records = [source_identity(source) for source in sources]
-    return {
-        "sources": records,
-        "dirty": any(bool(record["dirty"]) for record in records),
     }
 
 
@@ -199,14 +109,12 @@ class TensorCache:
         root: str | os.PathLike[str],
         *,
         kind: str,
-        namespace: str | None = None,
         lock_timeout_seconds: float = 120.0,
     ) -> None:
         if not kind or any(character in kind for character in "/\\"):
             raise ValueError("Cache kind must be one path component.")
         self.root = Path(root).expanduser().resolve()
         self.kind = kind
-        self.namespace = namespace
         self.lock_timeout_seconds = float(lock_timeout_seconds)
         self.kind_root = self.root / kind / f"v{CACHE_SCHEMA_VERSION}"
 
@@ -223,7 +131,6 @@ class TensorCache:
         key_fields = {
             "cache_schema_version": CACHE_SCHEMA_VERSION,
             "kind": self.kind,
-            "development_namespace": self.namespace,
             **dict(fields),
         }
         return _digest_bytes(stable_json(key_fields).encode("utf-8")), key_fields
@@ -297,18 +204,8 @@ class TensorCache:
         key_fields: Mapping[str, object],
         expected_names: Sequence[str],
         producer: Callable[[], Mapping[str, np.ndarray]],
-        reusable: bool = True,
-        bypass_reason: str | None = None,
     ) -> CacheResult:
         key, complete_key_fields = self._key(key_fields)
-        if not reusable:
-            return CacheResult(
-                tensors={name: np.asarray(value) for name, value in producer().items()},
-                hit=False,
-                key=key,
-                bypass_reason=bypass_reason or "cache reuse disabled",
-            )
-
         self._initialize_root()
         entry = self._entry_path(key)
         loaded = self._load_valid_entry(

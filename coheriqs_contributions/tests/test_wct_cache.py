@@ -46,7 +46,7 @@ def _tensor_producer(value: float):
 def test_tensor_cache_stable_keys_hits_parameter_misses_and_immutable_values(
     tmp_path: Path,
 ) -> None:
-    cache = TensorCache(tmp_path, kind="unit", namespace="tests")
+    cache = TensorCache(tmp_path, kind="unit")
     first = cache.load_or_compute(
         key_fields={"parameter": 1, "nested": {"b": 2, "a": 1}},
         expected_names=("value",),
@@ -73,7 +73,7 @@ def test_tensor_cache_stable_keys_hits_parameter_misses_and_immutable_values(
 def test_corrupt_and_incomplete_entries_are_misses_and_republished(
     tmp_path: Path,
 ) -> None:
-    cache = TensorCache(tmp_path, kind="unit", namespace="tests")
+    cache = TensorCache(tmp_path, kind="unit")
     first = cache.load_or_compute(
         key_fields={"case": "corrupt"},
         expected_names=("value",),
@@ -110,7 +110,7 @@ def test_simultaneous_writers_publish_once(tmp_path: Path) -> None:
         return _tensor_producer(7.0)
 
     def access():
-        return TensorCache(tmp_path, kind="unit", namespace="tests").load_or_compute(
+        return TensorCache(tmp_path, kind="unit").load_or_compute(
             key_fields={"same": True},
             expected_names=("value",),
             producer=produce,
@@ -123,46 +123,6 @@ def test_simultaneous_writers_publish_once(tmp_path: Path) -> None:
     assert sorted(result.hit for result in results) == [False, True]
     for result in results:
         np.testing.assert_array_equal(result.tensors["value"], [7.0])
-
-
-def test_dirty_source_bypasses_without_namespace(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        common,
-        "implementation_identity",
-        lambda *sources: {"dirty": True, "sources": [{"dirty": True}]},
-    )
-    transform = CountingTransform()
-    X = np.arange(8, dtype=np.float32).reshape(1, 1, 8)
-
-    _, first = common.compute_cached_cwt_real_imag_tensors(
-        X,
-        sampling_rate=8,
-        highest=4.0,
-        lowest=1.0,
-        nfreqs=2,
-        cwt_resample_n_time=None,
-        transform_fn=transform,
-        cache_root=tmp_path,
-        cache_namespace=None,
-        verbose=0,
-    )
-    _, second = common.compute_cached_cwt_real_imag_tensors(
-        X,
-        sampling_rate=8,
-        highest=4.0,
-        lowest=1.0,
-        nfreqs=2,
-        cwt_resample_n_time=None,
-        transform_fn=transform,
-        cache_root=tmp_path,
-        cache_namespace=None,
-        verbose=0,
-    )
-
-    assert first.bypasses == second.bypasses == 1
-    assert first.hits == second.hits == 0
-    assert not (tmp_path / ".wct-cache-root.json").exists()
-    assert inspect_cache(tmp_path).entries == 0
 
 
 def test_input_cache_reuses_per_trial_across_order_and_misses_on_changes(
@@ -179,7 +139,6 @@ def test_input_cache_reuses_per_trial_across_order_and_misses_on_changes(
         cwt_resample_n_time=6,
         transform_fn=transform,
         cache_root=tmp_path,
-        cache_namespace="tests",
         verbose=0,
     )
     reversed_features, reversed_stats = common.compute_cached_cwt_real_imag_tensors(
@@ -191,7 +150,6 @@ def test_input_cache_reuses_per_trial_across_order_and_misses_on_changes(
         cwt_resample_n_time=6,
         transform_fn=transform,
         cache_root=tmp_path,
-        cache_namespace="tests",
         verbose=0,
     )
     changed = X.copy()
@@ -205,7 +163,6 @@ def test_input_cache_reuses_per_trial_across_order_and_misses_on_changes(
         cwt_resample_n_time=6,
         transform_fn=transform,
         cache_root=tmp_path,
-        cache_namespace="tests",
         verbose=0,
     )
     _, parameter_stats = common.compute_cached_cwt_real_imag_tensors(
@@ -217,7 +174,6 @@ def test_input_cache_reuses_per_trial_across_order_and_misses_on_changes(
         cwt_resample_n_time=6,
         transform_fn=transform,
         cache_root=tmp_path,
-        cache_namespace="tests",
         verbose=0,
     )
 
@@ -243,7 +199,6 @@ def test_noise_cache_preserves_raw_real_imag_pairing(tmp_path: Path) -> None:
         seed=17,
         verbose=0,
         cache_root=tmp_path,
-        cache_namespace="tests",
     )
     calls_after_first = transform.calls
     second = common.compute_paired_cwt_noise_bank(
@@ -258,7 +213,6 @@ def test_noise_cache_preserves_raw_real_imag_pairing(tmp_path: Path) -> None:
         seed=17,
         verbose=0,
         cache_root=tmp_path,
-        cache_namespace="tests",
     )
 
     assert transform.calls == calls_after_first
@@ -285,7 +239,6 @@ def test_real_transform_and_noise_cache_smoke(tmp_path: Path) -> None:
         cwt_resample_n_time=12,
         transform_fn=transform,
         cache_root=input_root,
-        cache_namespace=None,
         verbose=0,
     )
     second, second_stats = common.compute_cached_cwt_real_imag_tensors(
@@ -297,7 +250,6 @@ def test_real_transform_and_noise_cache_smoke(tmp_path: Path) -> None:
         cwt_resample_n_time=12,
         transform_fn=transform,
         cache_root=input_root,
-        cache_namespace=None,
         verbose=0,
     )
     first_noise = common.compute_paired_cwt_noise_bank(
@@ -312,7 +264,6 @@ def test_real_transform_and_noise_cache_smoke(tmp_path: Path) -> None:
         seed=23,
         verbose=0,
         cache_root=noise_root,
-        cache_namespace=None,
     )
     second_noise = common.compute_paired_cwt_noise_bank(
         bank_size=2,
@@ -326,7 +277,6 @@ def test_real_transform_and_noise_cache_smoke(tmp_path: Path) -> None:
         seed=23,
         verbose=0,
         cache_root=noise_root,
-        cache_namespace=None,
     )
 
     assert first_stats.misses == 1
@@ -363,7 +313,6 @@ def test_affine_cached_features_match_normalize_before_linear_transform(
         cwt_resample_n_time=6,
         transform_fn=transform,
         cache_root=tmp_path,
-        cache_namespace="tests",
         verbose=0,
     )
     ones, _ = common.compute_cached_cwt_real_imag_tensors(
@@ -375,7 +324,6 @@ def test_affine_cached_features_match_normalize_before_linear_transform(
         cwt_resample_n_time=6,
         transform_fn=transform,
         cache_root=tmp_path,
-        cache_namespace="tests",
         verbose=0,
     )
     denominator = std + 1e-8
@@ -390,7 +338,7 @@ def test_affine_cached_features_match_normalize_before_linear_transform(
 
 
 def test_inspection_and_explicit_cleanup(tmp_path: Path) -> None:
-    cache = TensorCache(tmp_path, kind="unit", namespace="tests")
+    cache = TensorCache(tmp_path, kind="unit")
     cache.load_or_compute(
         key_fields={"entry": 1},
         expected_names=("value",),
@@ -407,7 +355,7 @@ def test_inspection_and_explicit_cleanup(tmp_path: Path) -> None:
 
 
 def test_metadata_is_json_and_contains_versioned_key_fields(tmp_path: Path) -> None:
-    TensorCache(tmp_path, kind="unit", namespace="tests").load_or_compute(
+    TensorCache(tmp_path, kind="unit").load_or_compute(
         key_fields={"entry": 1},
         expected_names=("value",),
         producer=lambda: _tensor_producer(1.0),
@@ -416,4 +364,3 @@ def test_metadata_is_json_and_contains_versioned_key_fields(tmp_path: Path) -> N
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["schema_version"] == 1
     assert metadata["key_fields"]["cache_schema_version"] == 1
-    assert metadata["key_fields"]["development_namespace"] == "tests"

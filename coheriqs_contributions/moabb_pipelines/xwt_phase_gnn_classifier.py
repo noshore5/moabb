@@ -267,7 +267,6 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         noise_bank_seed: int | None = None,
         input_cwt_cache_root: str | None = None,
         noise_bank_cache_root: str | None = None,
-        wct_cache_namespace: str | None = None,
         validation_split: float | list | tuple | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
@@ -298,7 +297,6 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         self.noise_bank_seed = noise_bank_seed
         self.input_cwt_cache_root = input_cwt_cache_root
         self.noise_bank_cache_root = noise_bank_cache_root
-        self.wct_cache_namespace = wct_cache_namespace
         self.transform_ = None
         self.X_mean_: float | None = None
         self.X_std_: float | None = None
@@ -358,7 +356,6 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
                     cwt_resample_n_time=self.cwt_resample_n_time,
                     transform_fn=self.transform_,
                     cache_root=input_cache_root,
-                    cache_namespace=self.wct_cache_namespace,
                     verbose=self.verbose,
                 )
             )
@@ -372,7 +369,6 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
                     cwt_resample_n_time=self.cwt_resample_n_time,
                     transform_fn=self.transform_,
                     cache_root=input_cache_root,
-                    cache_namespace=self.wct_cache_namespace,
                     verbose=0,
                 )
                 denominator = float(self.X_std_) + 1e-8
@@ -462,7 +458,6 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             seed=bank_seed,
             verbose=self.verbose,
             cache_root=self.noise_bank_cache_root,
-            cache_namespace=self.wct_cache_namespace,
         )
 
     def _prepare_training_state_on_device(self) -> None:
@@ -535,7 +530,6 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
         noise_bank_seed: int | None = None,
         input_cwt_cache_root: str | None = None,
         noise_bank_cache_root: str | None = None,
-        wct_cache_namespace: str | None = None,
         validation_split: float | list | tuple | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
@@ -578,7 +572,6 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
             noise_bank_seed=noise_bank_seed,
             input_cwt_cache_root=input_cwt_cache_root,
             noise_bank_cache_root=noise_bank_cache_root,
-            wct_cache_namespace=wct_cache_namespace,
             validation_split=validation_split,
             validation_group_column=validation_group_column,
             early_stopping_patience=early_stopping_patience,
@@ -880,7 +873,6 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
         noise_bank_seed: int | None = None,
         input_cwt_cache_root: str | None = None,
         noise_bank_cache_root: str | None = None,
-        wct_cache_namespace: str | None = None,
         validation_split: float | list | tuple | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
@@ -924,7 +916,6 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
             noise_bank_seed=noise_bank_seed,
             input_cwt_cache_root=input_cwt_cache_root,
             noise_bank_cache_root=noise_bank_cache_root,
-            wct_cache_namespace=wct_cache_namespace,
             validation_split=validation_split,
             validation_group_column=validation_group_column,
             early_stopping_patience=early_stopping_patience,

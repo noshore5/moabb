@@ -604,7 +604,6 @@ def _apply_cache_configuration(pipelines, parameters):
     cache_parameters = {
         "input_cwt_cache_root": parameters.input_cwt_cache_root,
         "noise_bank_cache_root": parameters.noise_bank_cache_root,
-        "wct_cache_namespace": parameters.wct_cache_namespace,
     }
     configured = {name: value for name, value in cache_parameters.items() if value}
     if not configured:
@@ -1062,14 +1061,6 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--noise-bank-cache-root",
         default=None,
         help="Optional shared root for deterministic paired noise-bank entries.",
-    )
-    parser.add_argument(
-        "--wct-cache-namespace",
-        default=None,
-        help=(
-            "Explicit development namespace permitting reusable entries from "
-            "dirty relevant sources."
-        ),
     )
     add_console_arguments(parser)
     parser.add_argument(
