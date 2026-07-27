@@ -69,6 +69,24 @@ class ValidationMetadataSpy(sklearn.base.ClassifierMixin, sklearn.base.BaseEstim
         return np.full((len(X), len(self.classes_)), 1 / len(self.classes_))
 
 
+class FitContextSpy(sklearn.base.ClassifierMixin, sklearn.base.BaseEstimator):
+    received_fit_contexts = []
+
+    def __init__(self, offset=0):
+        self.offset = offset
+
+    def fit(self, X, y, fit_context=None):
+        type(self).received_fit_contexts.append(dict(fit_context or {}))
+        self.classes_ = np.unique(y)
+        return self
+
+    def predict(self, X):
+        return np.repeat(self.classes_[0], len(X))
+
+    def predict_proba(self, X):
+        return np.full((len(X), len(self.classes_)), 1 / len(self.classes_))
+
+
 class TestWithinSess:
     """This is actually integration testing but I don't know how to do this
     better.
@@ -719,6 +737,35 @@ def test_cross_session_forwards_run_metadata_to_validation_estimators(param_grid
     assert all(
         metadata is not None and "run" in metadata.columns
         for metadata in ValidationMetadataSpy.received_metadata
+    )
+
+
+@pytest.mark.parametrize("param_grid", [None, {"spy": {"offset": [0, 1]}}])
+def test_cross_session_forwards_outer_fit_identity(param_grid):
+    FitContextSpy.received_fit_contexts.clear()
+    evaluation = ev.CrossSessionEvaluation(
+        paradigm=FakeImageryParadigm(),
+        datasets=[dataset],
+        overwrite=True,
+        fit_context={
+            "run_id": "context-test",
+            "artifact_root": "unused",
+            "effective_configuration_reference": "config:test",
+        },
+    )
+
+    results = evaluation.process({"spy": FitContextSpy()}, param_grid=param_grid)
+
+    assert len(results) > 0
+    assert FitContextSpy.received_fit_contexts
+    assert all(
+        context["run_id"] == "context-test"
+        and context["evaluation_type"] == "CrossSession"
+        and context["dataset"] == dataset.code
+        and context["pipeline"] == "spy"
+        and context["fit_role"] in {"auto", "final_refit"}
+        and context["expected_final_fit_samples"] > 0
+        for context in FitContextSpy.received_fit_contexts
     )
 
 

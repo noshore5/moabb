@@ -218,6 +218,23 @@ class WithinSessionEvaluation(BaseEvaluation):
                                 train_meta
                             )
                         fit_kwargs.update(self._validation_fit_kwargs(cvclf, train_meta))
+                        fit_kwargs.update(
+                            self._fit_context_kwargs(
+                                cvclf,
+                                evaluation_type="WithinSession",
+                                dataset=dataset.code,
+                                subject=subject,
+                                outer_session=session,
+                                pipeline=name,
+                                outer_fold=cv_ind,
+                                expected_final_fit_samples=len(train),
+                                fit_role=(
+                                    "auto"
+                                    if param_grid is not None and name in param_grid
+                                    else "final_refit"
+                                ),
+                            )
+                        )
 
                         duration, emissions, task_name = self._fit_cv(
                             cvclf,
@@ -453,6 +470,23 @@ class CrossSessionEvaluation(BaseEvaluation):
                             train_meta
                         )
                     fit_kwargs.update(self._validation_fit_kwargs(cvclf, train_meta))
+                    fit_kwargs.update(
+                        self._fit_context_kwargs(
+                            cvclf,
+                            evaluation_type="CrossSession",
+                            dataset=dataset.code,
+                            subject=subject,
+                            outer_session=test_session,
+                            pipeline=name,
+                            outer_fold=cv_ind,
+                            expected_final_fit_samples=len(train),
+                            fit_role=(
+                                "auto"
+                                if param_grid is not None and name in param_grid
+                                else "final_refit"
+                            ),
+                        )
+                    )
 
                     duration, emissions, task_name = self._fit_cv(
                         cvclf,
@@ -700,6 +734,23 @@ class CrossSubjectEvaluation(BaseEvaluation):
                         train_meta
                     )
                 fit_kwargs.update(self._validation_fit_kwargs(cvclf, train_meta))
+                fit_kwargs.update(
+                    self._fit_context_kwargs(
+                        cvclf,
+                        evaluation_type="CrossSubject",
+                        dataset=dataset.code,
+                        subject=subject,
+                        outer_session="",
+                        pipeline=name,
+                        outer_fold=cv_ind,
+                        expected_final_fit_samples=len(train),
+                        fit_role=(
+                            "auto"
+                            if param_grid is not None and name in param_grid
+                            else "final_refit"
+                        ),
+                    )
+                )
 
                 duration, emissions, task_name = self._fit_cv(
                     cvclf,
@@ -917,6 +968,19 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
                         fit_kwargs.update(
                             self._validation_fit_kwargs(search_model, train_meta)
                         )
+                        fit_kwargs.update(
+                            self._fit_context_kwargs(
+                                search_model,
+                                evaluation_type="GlobalFutureSession",
+                                dataset=dataset.code,
+                                subject=subject,
+                                outer_session=test_session,
+                                pipeline=name,
+                                outer_fold=cv_ind,
+                                expected_final_fit_samples=len(train),
+                                fit_role="inner_candidate",
+                            )
+                        )
                         self._fit_cv(
                             search_model,
                             X[train],
@@ -975,15 +1039,29 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
             if selected_params is not None:
                 final_model.set_params(**selected_params)
 
+            final_fit_kwargs = self._validation_fit_kwargs(
+                final_model,
+                fold["metadata"].iloc[fold["train"]].reset_index(drop=True),
+            )
+            final_fit_kwargs.update(
+                self._fit_context_kwargs(
+                    final_model,
+                    evaluation_type="GlobalFutureSession",
+                    dataset=fold["dataset"].code,
+                    subject=fold["subject"],
+                    outer_session=fold["session"],
+                    pipeline=fold["pipeline"],
+                    outer_fold=fold["outer_fold"],
+                    expected_final_fit_samples=len(fold["train"]),
+                    fit_role="final_refit",
+                )
+            )
             duration, emissions, task_name = self._fit_cv(
                 final_model,
                 fold["X"][fold["train"]],
                 fold["y"][fold["train"]],
                 tracker if _carbonfootprint else None,
-                fit_kwargs=self._validation_fit_kwargs(
-                    final_model,
-                    fold["metadata"].iloc[fold["train"]].reset_index(drop=True),
-                ),
+                fit_kwargs=final_fit_kwargs,
             )
 
             self._maybe_save_model_cv(

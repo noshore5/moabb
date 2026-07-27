@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import sys
 import time
-from typing import Callable, Iterator, Sequence
+from typing import Callable, Iterator, Mapping, Sequence
+from uuid import uuid4
 
 import numpy as np
 from scipy.signal import resample
@@ -27,6 +28,12 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 
+from coheriqs_contributions.checkpoint_selection import (
+    CheckpointCandidate,
+    CheckpointController,
+    TrainingState,
+    save_checkpoint_bundle,
+)
 from coheriqs_contributions.experiment_logging import (
     EventCategory,
     get_console_policy,
@@ -1104,6 +1111,21 @@ def augment_paired_cwt_batch(
     return raw_aug, real_aug, imag_aug
 
 
+@dataclass(frozen=True)
+class LoaderEvaluation:
+    """Prediction metrics with data loss separated from selector regularization."""
+
+    data_loss: float
+    selector_regularization: float
+    accuracy: float
+    roc_auc: float | None
+    selector_summary: list[dict[str, object]]
+
+    @property
+    def total_loss(self) -> float:
+        return self.data_loss + self.selector_regularization
+
+
 class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     """Reusable sklearn-compatible PyTorch classifier lifecycle."""
 
@@ -1118,6 +1140,11 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         validation_split: float | Sequence | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
+        clean_train_mode: str = "disabled",
+        checkpoint_scorer="val_loss",
+        candidate_generators=None,
+        clean_train_interval: int = 1,
+        save_selected_checkpoint: bool = False,
         device: str = "auto",
         seed: int | None = 42,
         use_class_weights: bool = False,
@@ -1136,6 +1163,11 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.validation_split = validation_split
         self.validation_group_column = validation_group_column
         self.early_stopping_patience = early_stopping_patience
+        self.clean_train_mode = clean_train_mode
+        self.checkpoint_scorer = checkpoint_scorer
+        self.candidate_generators = candidate_generators
+        self.clean_train_interval = clean_train_interval
+        self.save_selected_checkpoint = save_selected_checkpoint
         self.device = device
         self.seed = seed
         self.use_class_weights = use_class_weights
@@ -1168,6 +1200,17 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.best_epoch_ = None
         self.best_val_loss_ = None
         self.validation_split_summary_ = None
+        self.clean_train_loss_history_ = []
+        self.clean_train_accuracy_history_ = []
+        self.clean_train_roc_auc_history_ = []
+        self.selected_training_state_ = None
+        self.selected_checkpoint_metrics_ = {}
+        self.selected_checkpoint_bundle_ = None
+        self.fit_summary_ = None
+        self.stop_reason_ = None
+        self.optimizer_ = None
+        self.alpha_optimizer_ = None
+        self.cumulative_optimizer_steps_ = 0
 
     def _vprint(self, level: int, message: str) -> None:
         if is_experiment_logging_configured():
@@ -1313,9 +1356,66 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self._vprint(1, f"[Train] class weights: {weights_t.cpu().numpy()}")
         return nn.CrossEntropyLoss(weight=weights_t)
 
-    def fit(self, X, y, validation_groups: np.ndarray | None = None, metadata=None):
+    @staticmethod
+    def _resolve_fit_context(
+        fit_context: Mapping[str, object] | None,
+        *,
+        n_samples: int,
+    ) -> dict[str, object]:
+        context = {} if fit_context is None else dict(fit_context)
+        role = str(context.get("fit_role", "final_refit"))
+        if role == "auto":
+            expected = context.get("expected_final_fit_samples")
+            role = (
+                "final_refit"
+                if expected is not None and int(expected) == int(n_samples)
+                else "inner_candidate"
+            )
+        if role not in {"inner_candidate", "final_refit"}:
+            raise ValueError(
+                "fit_context.fit_role must be 'inner_candidate', 'final_refit', "
+                "or 'auto'."
+            )
+        context["fit_role"] = role
+        context.setdefault("fit_id", f"fit-{uuid4().hex}")
+        return context
+
+    def fit(
+        self,
+        X,
+        y,
+        validation_groups: np.ndarray | None = None,
+        metadata=None,
+        fit_context: Mapping[str, object] | None = None,
+    ):
         X = validate_eeg_X(X)
         self._validate_batch_control_params()
+        checkpoint_controller = CheckpointController(
+            mode=self.clean_train_mode,
+            checkpoint_scorer=self.checkpoint_scorer,
+            candidate_generators=self.candidate_generators,
+            clean_train_interval=self.clean_train_interval,
+        )
+        if (
+            self.clean_train_mode == "interval"
+            and int(self.clean_train_interval) > int(self.epochs)
+        ):
+            raise ValueError(
+                "clean_train_interval cannot exceed epochs in interval mode."
+            )
+        resolved_fit_context = self._resolve_fit_context(
+            fit_context,
+            n_samples=X.shape[0],
+        )
+        if (
+            self.save_selected_checkpoint
+            and resolved_fit_context["fit_role"] == "final_refit"
+            and not resolved_fit_context.get("artifact_root")
+        ):
+            raise ValueError(
+                "save_selected_checkpoint requires fit_context.artifact_root "
+                "for final refits."
+            )
         set_seed(self.seed)
         self.device_ = resolve_torch_device(self.device)
 
@@ -1360,15 +1460,29 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 f"[Train] validation groups ({self.validation_group_column}): "
                 f"{chosen_groups.tolist()} -> {val_idx.size}/{X.shape[0]} samples.",
             )
+        if val_idx.size == 0 and self.clean_train_mode != "disabled":
+            raise ValueError(
+                f"clean_train_mode='{self.clean_train_mode}' requires a non-empty "
+                "validation split."
+            )
 
         features = self._prepare_features(X, fit=True, train_idx=train_idx)
         tensors = to_float_tensors(features)
         y_tensor = torch.from_numpy(y_idx).long()
 
+        train_dataset = TensorDataset(
+            *(t[train_idx] for t in tensors), y_tensor[train_idx]
+        )
         train_loader = DataLoader(
-            TensorDataset(*(t[train_idx] for t in tensors), y_tensor[train_idx]),
+            train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
+            num_workers=0,
+        )
+        clean_train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
             num_workers=0,
         )
         val_loader = None
@@ -1426,12 +1540,22 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self._reset_histories()
         self._train_loop(
             train_loader,
+            clean_train_loader,
             val_loader,
             optimizer,
             criterion,
             n_classes,
+            checkpoint_controller=checkpoint_controller,
+            fit_context=resolved_fit_context,
             selector_specs=selector_specs,
             alpha_optimizer=alpha_optimizer,
+        )
+        self._finalize_fit_summary(
+            fit_context=resolved_fit_context,
+            checkpoint_controller=checkpoint_controller,
+            n_samples=X.shape[0],
+            train_count=train_idx.size,
+            validation_count=val_idx.size,
         )
         return self
 
@@ -1480,14 +1604,69 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             )
         return optimizer, alpha_optimizer, selector_specs
 
+    def _capture_training_state(
+        self,
+        *,
+        epoch: int,
+        optimizer_step_count: int,
+        optimizer,
+        alpha_optimizer,
+        selector_specs: Sequence[_SelectorTrainingSpec],
+    ) -> TrainingState:
+        optimizers = {"main": optimizer}
+        if alpha_optimizer is not None:
+            optimizers["selector_alpha"] = alpha_optimizer
+        return TrainingState(
+            epoch=int(epoch),
+            optimizer_step_count=int(optimizer_step_count),
+            model_state=deepcopy(self.model_.state_dict()),
+            optimizer_state=deepcopy(optimizer.state_dict()),
+            alpha_optimizer_state=(
+                None
+                if alpha_optimizer is None
+                else deepcopy(alpha_optimizer.state_dict())
+            ),
+            learning_rates={
+                name: [float(group["lr"]) for group in current.param_groups]
+                for name, current in optimizers.items()
+            },
+            selector_state={
+                "checkpoint_mode": self.clean_train_mode,
+                "selector_count": len(selector_specs),
+            },
+        )
+
+    def _restore_training_state(
+        self,
+        state: TrainingState,
+        *,
+        optimizer,
+        alpha_optimizer,
+    ) -> None:
+        self.model_.load_state_dict(state.model_state)
+        optimizer.load_state_dict(state.optimizer_state)
+        if alpha_optimizer is not None:
+            if state.alpha_optimizer_state is None:
+                raise ValueError("Selected state is missing selector-alpha optimizer state.")
+            alpha_optimizer.load_state_dict(state.alpha_optimizer_state)
+        elif state.alpha_optimizer_state is not None:
+            raise ValueError("Selected state unexpectedly contains selector optimizer state.")
+        self.selected_training_state_ = deepcopy(state)
+        self.optimizer_ = optimizer
+        self.alpha_optimizer_ = alpha_optimizer
+        self.cumulative_optimizer_steps_ = int(state.optimizer_step_count)
+
     def _train_loop(
         self,
         train_loader: DataLoader,
+        clean_train_loader: DataLoader,
         val_loader: DataLoader | None,
         optimizer,
         criterion,
         n_classes: int,
         *,
+        checkpoint_controller: CheckpointController,
+        fit_context: Mapping[str, object],
         selector_specs: Sequence[_SelectorTrainingSpec] | None = None,
         alpha_optimizer=None,
     ) -> None:
@@ -1548,10 +1727,12 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         prev_loss = None
         prev_acc = None
         prev_auc = None
-        best_state = None
-        best_epoch = -1
-        best_val_loss = float("inf")
-        no_improve_epochs = 0
+        no_improve_opportunities = 0
+        cumulative_optimizer_steps = 0
+        last_state = None
+        selected_candidate = None
+        epochs_completed = 0
+        stop_reason = "max_epochs"
         alpha_val_update_credit = 0.0
         pending_gradient_samples = 0
         optimizer_sample_credit = 0
@@ -1744,6 +1925,8 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             self.train_accuracy_history_.append(avg_acc)
             self.train_roc_auc_history_.append(avg_auc)
             self.optimizer_step_count_history_.append(optimizer_steps)
+            cumulative_optimizer_steps += optimizer_steps
+            epochs_completed = epoch + 1
             train_selector_summary = _finalize_selector_diagnostics(
                 train_selector_accumulators
             )
@@ -1774,34 +1957,82 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
 
             val_suffix = ""
             if val_loader is not None:
-                val_loss, val_acc, val_auc, val_selector_summary = self._evaluate_loader(
+                val_result = self._evaluate_loader(
                     val_loader,
                     criterion,
                     n_classes,
                     selector_specs=selector_specs,
-                    return_selector_summary=True,
                 )
-                self.val_loss_history_.append(val_loss)
-                self.val_accuracy_history_.append(val_acc)
-                self.val_roc_auc_history_.append(val_auc)
+                self.val_loss_history_.append(val_result.data_loss)
+                self.val_accuracy_history_.append(val_result.accuracy)
+                self.val_roc_auc_history_.append(val_result.roc_auc)
                 if selector_specs:
-                    self.selector_val_history_.append(val_selector_summary)
+                    self.selector_val_history_.append(val_result.selector_summary)
                     self._log_selector_diagnostics(
                         split="val",
                         epoch=epoch,
-                        summaries=val_selector_summary,
+                        summaries=val_result.selector_summary,
                     )
-                val_suffix = (
-                    f" val_loss={val_loss:.6f} val_acc={val_acc:.4f} "
-                    f"val_roc_auc={fmt_metric(val_auc)}"
+                checkpoint_metrics = {
+                    "epoch": epoch + 1,
+                    "val_data_loss": val_result.data_loss,
+                    "val_selector_regularization": val_result.selector_regularization,
+                    "val_accuracy": val_result.accuracy,
+                    "val_roc_auc": val_result.roc_auc,
+                }
+                if (
+                    checkpoint_controller.requires_interval_clean_evaluation
+                    and checkpoint_controller.is_eligible_epoch(epoch + 1)
+                ):
+                    clean_result = self._evaluate_loader(
+                        clean_train_loader,
+                        criterion,
+                        n_classes,
+                        selector_specs=selector_specs,
+                    )
+                    checkpoint_metrics.update(
+                        {
+                            "clean_train_data_loss": clean_result.data_loss,
+                            "clean_train_selector_regularization": (
+                                clean_result.selector_regularization
+                            ),
+                            "clean_train_accuracy": clean_result.accuracy,
+                            "clean_train_roc_auc": clean_result.roc_auc,
+                        }
+                    )
+                    self.clean_train_loss_history_.append(clean_result.data_loss)
+                    self.clean_train_accuracy_history_.append(clean_result.accuracy)
+                    self.clean_train_roc_auc_history_.append(clean_result.roc_auc)
+                observation = checkpoint_controller.observe(
+                    epoch=epoch + 1,
+                    metrics=checkpoint_metrics,
+                    state_factory=lambda: self._capture_training_state(
+                        epoch=epoch + 1,
+                        optimizer_step_count=cumulative_optimizer_steps,
+                        optimizer=optimizer,
+                        alpha_optimizer=alpha_optimizer,
+                        selector_specs=selector_specs,
+                    ),
                 )
-                if val_loss < best_val_loss - 1e-12:
-                    best_val_loss = val_loss
-                    best_epoch = epoch + 1
-                    best_state = deepcopy(self.model_.state_dict())
-                    no_improve_epochs = 0
-                else:
-                    no_improve_epochs += 1
+                if observation.opportunity:
+                    if observation.progress:
+                        no_improve_opportunities = 0
+                    else:
+                        no_improve_opportunities += 1
+                val_suffix = (
+                    f" val_loss={val_result.data_loss:.6f} "
+                    f"val_selector_reg={val_result.selector_regularization:.6f} "
+                    f"val_acc={val_result.accuracy:.4f} "
+                    f"val_roc_auc={fmt_metric(val_result.roc_auc)}"
+                )
+            else:
+                last_state = self._capture_training_state(
+                    epoch=epoch + 1,
+                    optimizer_step_count=cumulative_optimizer_steps,
+                    optimizer=optimizer,
+                    alpha_optimizer=alpha_optimizer,
+                    selector_specs=selector_specs,
+                )
 
             epoch_time = time.perf_counter() - epoch_start
             aux_suffix = "" if avg_aux is None else f" edge_density={avg_aux:.6f}"
@@ -1829,12 +2060,15 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 val_loader is not None
                 and self.early_stopping_patience is not None
                 and self.early_stopping_patience >= 0
-                and no_improve_epochs >= self.early_stopping_patience
+                and no_improve_opportunities >= self.early_stopping_patience
+                and no_improve_opportunities > 0
             ):
+                stop_reason = "early_stopping"
                 self._vprint(
                     1,
                     f"[Train] early stopping at epoch {epoch + 1}; "
-                    f"best epoch={best_epoch} best_val_loss={best_val_loss:.6f}",
+                    f"selection mode={self.clean_train_mode} "
+                    f"missed opportunities={no_improve_opportunities}",
                 )
                 break
 
@@ -1842,14 +2076,157 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         if pending_gradient_samples > 0:
             optimizer.zero_grad(set_to_none=True)
 
-        if val_loader is not None and best_state is not None:
-            self.model_.load_state_dict(best_state)
-            self.best_epoch_ = best_epoch
-            self.best_val_loss_ = best_val_loss
-            self._vprint(
-                1,
-                f"[Train] restored best model from epoch {best_epoch} "
-                f"(val_loss={best_val_loss:.6f})",
+        if val_loader is not None:
+            def enrich_candidate(
+                candidate: CheckpointCandidate,
+            ) -> Mapping[str, float | None]:
+                self.model_.load_state_dict(candidate.state.model_state)
+                result = self._evaluate_loader(
+                    clean_train_loader,
+                    criterion,
+                    n_classes,
+                    selector_specs=selector_specs,
+                )
+                return {
+                    "clean_train_data_loss": result.data_loss,
+                    "clean_train_selector_regularization": (
+                        result.selector_regularization
+                    ),
+                    "clean_train_accuracy": result.accuracy,
+                    "clean_train_roc_auc": result.roc_auc,
+                }
+
+            selected_candidate = checkpoint_controller.finalize(
+                enrich_candidate=(
+                    enrich_candidate
+                    if checkpoint_controller.mode == "deferred_candidates"
+                    else None
+                )
+            )
+            selected_state = selected_candidate.state
+        else:
+            if last_state is None:
+                raise RuntimeError("Training produced no checkpoint state.")
+            selected_state = last_state
+        self._restore_training_state(
+            selected_state,
+            optimizer=optimizer,
+            alpha_optimizer=alpha_optimizer,
+        )
+        self.best_epoch_ = selected_state.epoch
+        self.best_val_loss_ = (
+            None
+            if selected_candidate is None
+            else selected_candidate.metrics.get("val_data_loss")
+        )
+        self.selected_checkpoint_metrics_ = (
+            {} if selected_candidate is None else dict(selected_candidate.metrics)
+        )
+        self.stop_reason_ = stop_reason
+        self.epochs_completed_ = epochs_completed
+        self._vprint(
+            1,
+            f"[Train] restored selected state from epoch {selected_state.epoch} "
+            f"(mode={self.clean_train_mode})",
+        )
+
+    def _finalize_fit_summary(
+        self,
+        *,
+        fit_context: Mapping[str, object],
+        checkpoint_controller: CheckpointController,
+        n_samples: int,
+        train_count: int,
+        validation_count: int,
+    ) -> None:
+        fit_role = str(fit_context["fit_role"])
+        selected_metrics = dict(getattr(self, "selected_checkpoint_metrics_", {}))
+        clean_available = any(
+            key.startswith("clean_train_") and value is not None
+            for key, value in selected_metrics.items()
+        )
+        summary = {
+            "schema_version": 1,
+            "run_id": fit_context.get("run_id"),
+            "fit_id": str(fit_context["fit_id"]),
+            "pipeline": fit_context.get(
+                "pipeline", getattr(self, "model_label", self.__class__.__name__)
+            ),
+            "evaluation_type": fit_context.get("evaluation_type"),
+            "dataset": fit_context.get("dataset"),
+            "subject": fit_context.get("subject"),
+            "outer_session": fit_context.get("outer_session"),
+            "outer_fold": fit_context.get("outer_fold"),
+            "fit_role": fit_role,
+            "is_inner_candidate": fit_role == "inner_candidate",
+            "is_final_refit": fit_role == "final_refit",
+            "sample_count": int(n_samples),
+            "train_count": int(train_count),
+            "validation_count": int(validation_count),
+            "validation_split": dict(self.validation_split_summary_ or {}),
+            "model_seed": self.seed,
+            "training_seed": self.seed,
+            "checkpoint_policy": checkpoint_controller.policy_summary(),
+            "early_stopping_policy": {
+                "patience": self.early_stopping_patience,
+                "opportunity_unit": (
+                    "eligible_clean_evaluation"
+                    if self.clean_train_mode == "interval"
+                    else "epoch"
+                ),
+            },
+            "epochs_completed": int(getattr(self, "epochs_completed_", 0)),
+            "selected_epoch": self.best_epoch_,
+            "selected_optimizer_step_count": self.cumulative_optimizer_steps_,
+            "selected_learning_rates": (
+                None
+                if self.selected_training_state_ is None
+                else deepcopy(self.selected_training_state_.learning_rates)
+            ),
+            "selected_metrics": selected_metrics,
+            "clean_train_metrics_available": clean_available,
+            "stop_reason": self.stop_reason_,
+            "effective_configuration_reference": fit_context.get(
+                "effective_configuration_reference"
+            ),
+            "checkpoint_bundle": None,
+        }
+        if self.save_selected_checkpoint and fit_role == "final_refit":
+            if self.selected_training_state_ is None:
+                raise RuntimeError("Selected training state is unavailable.")
+            bundle = save_checkpoint_bundle(
+                artifact_root=fit_context["artifact_root"],
+                fit_id=str(fit_context["fit_id"]),
+                state=self.selected_training_state_,
+                metadata={
+                    "run_id": summary["run_id"],
+                    "pipeline": summary["pipeline"],
+                    "evaluation_type": summary["evaluation_type"],
+                    "dataset": summary["dataset"],
+                    "subject": summary["subject"],
+                    "outer_session": summary["outer_session"],
+                    "outer_fold": summary["outer_fold"],
+                    "fit_role": fit_role,
+                    "effective_configuration_reference": summary[
+                        "effective_configuration_reference"
+                    ],
+                    "selected_epoch": summary["selected_epoch"],
+                    "selected_scorer": summary["checkpoint_policy"][
+                        "checkpoint_scorer"
+                    ],
+                    "selected_metrics": selected_metrics,
+                },
+            )
+            self.selected_checkpoint_bundle_ = str(bundle)
+            summary["checkpoint_bundle"] = str(bundle)
+        self.fit_summary_ = summary
+        if is_experiment_logging_configured():
+            log_event(
+                log,
+                EventCategory.FIT_SUMMARY,
+                f"Fit {summary['fit_id']} selected epoch {self.best_epoch_} "
+                f"({fit_role}, mode={self.clean_train_mode}).",
+                data=summary,
             )
 
     def _update_selector_alpha_from_validation(
@@ -1910,48 +2287,54 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         n_classes: int,
         *,
         selector_specs: Sequence[_SelectorTrainingSpec] | None = None,
-        return_selector_summary: bool = False,
-    ) -> tuple[float, float, float | None] | tuple[
-        float,
-        float,
-        float | None,
-        list[dict[str, object]],
-    ]:
+    ) -> LoaderEvaluation:
         selector_specs = [] if selector_specs is None else list(selector_specs)
         selector_accumulators = _new_selector_diagnostic_accumulators(selector_specs)
+        was_training = self.model_.training
         self.model_.eval()
-        loss_sum = 0.0
+        data_loss_sum = 0.0
+        selector_regularization_sum = 0.0
         n_batches = 0
         n_correct = 0
         n_seen = 0
         y_all = []
         p_all = []
-        with torch.no_grad():
-            for batch in loader:
-                *batch_inputs, batch_y = batch
-                batch_inputs = tuple(x.to(self.device_) for x in batch_inputs)
-                batch_y = batch_y.to(self.device_)
-                logits, _ = self._model_forward(batch_inputs)
-                _record_selector_diagnostics(selector_accumulators, selector_specs)
-                loss = criterion(logits, batch_y)
-                # Validation reports the full regularized objective.
-                loss = loss + _selector_extra_loss(selector_specs, loss)
-                loss_sum += float(loss.item())
-                n_batches += 1
-                preds = torch.argmax(logits, dim=1)
-                n_correct += int((preds == batch_y).sum().item())
-                n_seen += int(batch_y.numel())
-                y_all.append(batch_y.detach().cpu().numpy())
-                p_all.append(torch.softmax(logits.detach(), dim=1).cpu().numpy())
+        try:
+            with torch.no_grad():
+                for batch in loader:
+                    *batch_inputs, batch_y = batch
+                    batch_inputs = tuple(x.to(self.device_) for x in batch_inputs)
+                    batch_y = batch_y.to(self.device_)
+                    logits, _ = self._model_forward(batch_inputs)
+                    _record_selector_diagnostics(selector_accumulators, selector_specs)
+                    data_loss = criterion(logits, batch_y)
+                    selector_regularization = _selector_extra_loss(
+                        selector_specs, data_loss
+                    )
+                    data_loss_sum += float(data_loss.item())
+                    selector_regularization_sum += float(
+                        selector_regularization.item()
+                    )
+                    n_batches += 1
+                    preds = torch.argmax(logits, dim=1)
+                    n_correct += int((preds == batch_y).sum().item())
+                    n_seen += int(batch_y.numel())
+                    y_all.append(batch_y.detach().cpu().numpy())
+                    p_all.append(torch.softmax(logits.detach(), dim=1).cpu().numpy())
+        finally:
+            self.model_.train(was_training)
 
-        result = (
-            loss_sum / max(1, n_batches),
-            n_correct / max(1, n_seen),
-            safe_roc_auc(np.concatenate(y_all), np.concatenate(p_all), n_classes),
+        if not y_all:
+            raise RuntimeError("Evaluation loader produced no batches.")
+        return LoaderEvaluation(
+            data_loss=data_loss_sum / n_batches,
+            selector_regularization=selector_regularization_sum / n_batches,
+            accuracy=n_correct / max(1, n_seen),
+            roc_auc=safe_roc_auc(
+                np.concatenate(y_all), np.concatenate(p_all), n_classes
+            ),
+            selector_summary=_finalize_selector_diagnostics(selector_accumulators),
         )
-        if return_selector_summary:
-            return (*result, _finalize_selector_diagnostics(selector_accumulators))
-        return result
 
     def _predict_logits(self, X) -> np.ndarray:
         if self.model_ is None or self.device_ is None:

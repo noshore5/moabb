@@ -1207,6 +1207,17 @@ def main(parameters: argparse.Namespace) -> None:
             f"{str(inner_group or 'none').replace('_', '-')}"
         )
         eval_kwargs["suffix"] = group_id
+        eval_kwargs["fit_context"] = {
+            "run_id": run_id,
+            "artifact_root": str(
+                Path(moabb_results_root).expanduser().resolve()
+                / run_id
+                / "checkpoints"
+            ),
+            "effective_configuration_reference": (
+                f"{Path(experiment_log_path).resolve()}#{group_id}"
+            ),
+        }
         if inner_group is not None:
             eval_kwargs.update(
                 inner_cv_class=StratifiedGroupKFold,

@@ -125,6 +125,9 @@ class BaseEvaluation(ABC):
         If used, it should be passed as a keyword-argument only.
     progress_bar: bool, default=True
         If True, show transient evaluation progress bars.
+    fit_context: dict, default=None
+        Run-level identity and artifact fields to merge with MOABB's outer-fold
+        identity for estimators whose ``fit`` method accepts ``fit_context``.
     codecarbon_config: dict of CodeCarbon parameters, default=dict(save_to_file=False, log_level="error")
         Allow CodeCarbon script level configurations.
         Can use combination of CodeCarbon environment variable and configuration files.
@@ -172,6 +175,7 @@ class BaseEvaluation(ABC):
         codecarbon_config=None,
         save_cv_split_indices=False,
         progress_bar=True,
+        fit_context=None,
     ):
         self.random_state = random_state
         self.n_jobs = n_jobs
@@ -196,6 +200,7 @@ class BaseEvaluation(ABC):
         self.time_out = time_out
         self.verbose = verbose
         self.progress_bar = bool(progress_bar)
+        self.fit_context = {} if fit_context is None else dict(fit_context)
         self.emissions = Emissions(codecarbon_config=codecarbon_config)
 
         self.additional_columns = additional_columns
@@ -417,6 +422,19 @@ class BaseEvaluation(ABC):
             return True
         return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
+    def _fit_param_name(self, model, param_name):
+        """Return the fit-parameter route to the estimator that consumes it."""
+
+        estimator = getattr(model, "estimator", model)
+        if hasattr(estimator, "steps") and estimator.steps:
+            step_name, final_estimator = estimator.steps[-1]
+            if self._fit_accepts_param(final_estimator, param_name):
+                return f"{step_name}__{param_name}"
+            return None
+        if self._fit_accepts_param(estimator, param_name):
+            return param_name
+        return None
+
     def _validation_fit_kwargs(self, model, train_metadata):
         """Build fit kwargs for estimators that use metadata-driven validation groups."""
         if train_metadata is None:
@@ -430,11 +448,46 @@ class BaseEvaluation(ABC):
             )
 
         kwargs = {}
-        if self._fit_accepts_param(model, "validation_groups"):
-            kwargs["validation_groups"] = train_metadata[col].values
-        if self._fit_accepts_param(model, "metadata"):
-            kwargs["metadata"] = train_metadata.reset_index(drop=True)
+        validation_groups_name = self._fit_param_name(model, "validation_groups")
+        metadata_name = self._fit_param_name(model, "metadata")
+        if validation_groups_name is not None:
+            kwargs[validation_groups_name] = train_metadata[col].values
+        if metadata_name is not None:
+            kwargs[metadata_name] = train_metadata.reset_index(drop=True)
         return kwargs
+
+    def _fit_context_kwargs(
+        self,
+        model,
+        *,
+        evaluation_type,
+        dataset,
+        subject,
+        outer_session,
+        pipeline,
+        outer_fold,
+        expected_final_fit_samples,
+        fit_role,
+    ):
+        """Attach authoritative MOABB outer-fit identity when supported."""
+
+        fit_context_name = self._fit_param_name(model, "fit_context")
+        if fit_context_name is None:
+            return {}
+        context = dict(self.fit_context)
+        context.update(
+            {
+                "evaluation_type": evaluation_type,
+                "dataset": dataset,
+                "subject": subject,
+                "outer_session": outer_session,
+                "pipeline": pipeline,
+                "outer_fold": outer_fold,
+                "expected_final_fit_samples": int(expected_final_fit_samples),
+                "fit_role": fit_role,
+            }
+        )
+        return {fit_context_name: context}
 
     def _maybe_save_model_cv(
         self, model, dataset, subject, session, name, cv_ind, eval_type
