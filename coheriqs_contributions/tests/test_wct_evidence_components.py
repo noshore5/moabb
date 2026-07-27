@@ -788,6 +788,9 @@ def test_noise_augmentation_controls_are_sklearn_parameter_grid_friendly() -> No
         noise_strength=0.25,
         noise_bank_size=7,
         noise_bank_seed=11,
+        input_cwt_cache_root="input-cache",
+        noise_bank_cache_root="noise-cache",
+        wct_cache_namespace="development",
     )
 
     params = estimator.get_params()
@@ -796,9 +799,14 @@ def test_noise_augmentation_controls_are_sklearn_parameter_grid_friendly() -> No
     assert params["noise_strength"] == 0.25
     assert params["noise_bank_size"] == 7
     assert params["noise_bank_seed"] == 11
+    assert params["input_cwt_cache_root"] == "input-cache"
+    assert params["noise_bank_cache_root"] == "noise-cache"
+    assert params["wct_cache_namespace"] == "development"
 
     sibling = WCTPhaseGNNClassifier(noise_strength=0.1)
     assert sibling.get_params()["noise_strength"] == 0.1
+    assert sibling.get_params()["input_cwt_cache_root"] is None
+    assert sibling.get_params()["noise_bank_cache_root"] is None
 
 
 def test_paired_cwt_noise_augmentation_preserves_pairing_and_shapes() -> None:

@@ -600,6 +600,24 @@ def _apply_fixed_param_overrides(pipelines, run_param_grid, fixed_overrides):
     }
 
 
+def _apply_cache_configuration(pipelines, parameters):
+    cache_parameters = {
+        "input_cwt_cache_root": parameters.input_cwt_cache_root,
+        "noise_bank_cache_root": parameters.noise_bank_cache_root,
+        "wct_cache_namespace": parameters.wct_cache_namespace,
+    }
+    configured = {name: value for name, value in cache_parameters.items() if value}
+    if not configured:
+        return
+    for estimator in pipelines.values():
+        supported = estimator.get_params(deep=False)
+        applicable = {
+            name: value for name, value in configured.items() if name in supported
+        }
+        if applicable:
+            estimator.set_params(**applicable)
+
+
 def _resolve_eval_modes(global_hyperparam_fit_mode):
     mode = str(global_hyperparam_fit_mode).lower()
     if mode == "false":
@@ -1035,6 +1053,24 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional free-form note describing this run's purpose.",
     )
+    parser.add_argument(
+        "--input-cwt-cache-root",
+        default=None,
+        help="Optional shared root for per-trial unnormalized input CWT entries.",
+    )
+    parser.add_argument(
+        "--noise-bank-cache-root",
+        default=None,
+        help="Optional shared root for deterministic paired noise-bank entries.",
+    )
+    parser.add_argument(
+        "--wct-cache-namespace",
+        default=None,
+        help=(
+            "Explicit development namespace permitting reusable entries from "
+            "dirty relevant sources."
+        ),
+    )
     add_console_arguments(parser)
     parser.add_argument(
         "--param-names",
@@ -1170,6 +1206,7 @@ def main(parameters: argparse.Namespace) -> None:
     runtime_param_grid = _apply_fixed_param_overrides(
         runtime_pipelines, runtime_param_grid, fixed_overrides
     )
+    _apply_cache_configuration(runtime_pipelines, parameters)
     _prepare_param_grid_for_run(runtime_pipelines, runtime_param_grid)
     runtime_candidates = _resolved_estimator_candidates(
         runtime_pipelines, runtime_param_grid
@@ -1241,6 +1278,7 @@ def main(parameters: argparse.Namespace) -> None:
         run_param_grid = _apply_fixed_param_overrides(
             pipelines, run_param_grid, fixed_overrides
         )
+        _apply_cache_configuration(pipelines, parameters)
         param_grid, singleton_applied = _prepare_param_grid_for_run(
             pipelines, run_param_grid
         )

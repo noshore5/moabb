@@ -14,6 +14,7 @@ try:
         TorchEEGClassifier,
         apply_global_zscore,
         augment_paired_cwt_batch,
+        compute_cached_cwt_real_imag_tensors,
         compute_paired_cwt_noise_bank,
         compute_cwt_real_imag_tensors,
         fit_global_zscore_stats,
@@ -27,6 +28,7 @@ except ModuleNotFoundError:
         TorchEEGClassifier,
         apply_global_zscore,
         augment_paired_cwt_batch,
+        compute_cached_cwt_real_imag_tensors,
         compute_paired_cwt_noise_bank,
         compute_cwt_real_imag_tensors,
         fit_global_zscore_stats,
@@ -263,6 +265,9 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         noise_strength: float = 0.0,
         noise_bank_size: int = 128,
         noise_bank_seed: int | None = None,
+        input_cwt_cache_root: str | None = None,
+        noise_bank_cache_root: str | None = None,
+        wct_cache_namespace: str | None = None,
         validation_split: float | list | tuple | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
@@ -291,6 +296,9 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         self.noise_strength = noise_strength
         self.noise_bank_size = noise_bank_size
         self.noise_bank_seed = noise_bank_seed
+        self.input_cwt_cache_root = input_cwt_cache_root
+        self.noise_bank_cache_root = noise_bank_cache_root
+        self.wct_cache_namespace = wct_cache_namespace
         self.transform_ = None
         self.X_mean_: float | None = None
         self.X_std_: float | None = None
@@ -298,6 +306,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         self.noise_channel_std_: torch.Tensor | None = None
         self.noise_bank_device_: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self.noise_channel_std_device_: torch.Tensor | None = None
+        self.input_cwt_cache_stats_ = None
         self._validate_noise_augmentation_params()
         self._init_torch_classifier(
             epochs=epochs,
@@ -327,26 +336,71 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
     def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):
         if fit:
             self._validate_noise_augmentation_params()
+        X = np.asarray(X, dtype=np.float32)
         if self.normalize_input:
             if fit:
                 ref = X if train_idx is None else X[train_idx]
                 self.X_mean_, self.X_std_ = fit_global_zscore_stats(ref)
             if self.X_mean_ is None or self.X_std_ is None:
                 raise ValueError("Input normalization stats are not initialized.")
-            X = apply_global_zscore(X, self.X_mean_, self.X_std_)
 
         if self.transform_ is None:
             self.transform_, _ = resolve_coherence_utils()
-        features = compute_cwt_real_imag_tensors(
-            X,
-            sampling_rate=self.sampling_rate,
-            highest=self.highest,
-            lowest=self.lowest,
-            nfreqs=self.nfreqs,
-            cwt_resample_n_time=self.cwt_resample_n_time,
-            transform_fn=self.transform_,
-            verbose=self.verbose,
-        )
+        input_cache_root = self.input_cwt_cache_root
+        if input_cache_root:
+            features, self.input_cwt_cache_stats_ = (
+                compute_cached_cwt_real_imag_tensors(
+                    X,
+                    sampling_rate=self.sampling_rate,
+                    highest=self.highest,
+                    lowest=self.lowest,
+                    nfreqs=self.nfreqs,
+                    cwt_resample_n_time=self.cwt_resample_n_time,
+                    transform_fn=self.transform_,
+                    cache_root=input_cache_root,
+                    cache_namespace=self.wct_cache_namespace,
+                    verbose=self.verbose,
+                )
+            )
+            if self.normalize_input:
+                ones_features, _ = compute_cached_cwt_real_imag_tensors(
+                    np.ones((1, 1, X.shape[2]), dtype=np.float32),
+                    sampling_rate=self.sampling_rate,
+                    highest=self.highest,
+                    lowest=self.lowest,
+                    nfreqs=self.nfreqs,
+                    cwt_resample_n_time=self.cwt_resample_n_time,
+                    transform_fn=self.transform_,
+                    cache_root=input_cache_root,
+                    cache_namespace=self.wct_cache_namespace,
+                    verbose=0,
+                )
+                denominator = float(self.X_std_) + 1e-8
+                features = (
+                    (features[0] - float(self.X_mean_) * ones_features[0])
+                    / denominator,
+                    (features[1] - float(self.X_mean_) * ones_features[1])
+                    / denominator,
+                    (features[2] - float(self.X_mean_) * ones_features[2])
+                    / denominator,
+                    features[3],
+                )
+        else:
+            transformed_X = (
+                apply_global_zscore(X, self.X_mean_, self.X_std_)
+                if self.normalize_input
+                else X
+            )
+            features = compute_cwt_real_imag_tensors(
+                transformed_X,
+                sampling_rate=self.sampling_rate,
+                highest=self.highest,
+                lowest=self.lowest,
+                nfreqs=self.nfreqs,
+                cwt_resample_n_time=self.cwt_resample_n_time,
+                transform_fn=self.transform_,
+                verbose=self.verbose,
+            )
         if fit:
             self._fit_noise_augmentation_state(features, X, train_idx)
         return features
@@ -407,6 +461,8 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             transform_fn=self.transform_,
             seed=bank_seed,
             verbose=self.verbose,
+            cache_root=self.noise_bank_cache_root,
+            cache_namespace=self.wct_cache_namespace,
         )
 
     def _prepare_training_state_on_device(self) -> None:
@@ -477,6 +533,9 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
         noise_strength: float = 0.0,
         noise_bank_size: int = 128,
         noise_bank_seed: int | None = None,
+        input_cwt_cache_root: str | None = None,
+        noise_bank_cache_root: str | None = None,
+        wct_cache_namespace: str | None = None,
         validation_split: float | list | tuple | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
@@ -517,6 +576,9 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
             noise_strength=noise_strength,
             noise_bank_size=noise_bank_size,
             noise_bank_seed=noise_bank_seed,
+            input_cwt_cache_root=input_cwt_cache_root,
+            noise_bank_cache_root=noise_bank_cache_root,
+            wct_cache_namespace=wct_cache_namespace,
             validation_split=validation_split,
             validation_group_column=validation_group_column,
             early_stopping_patience=early_stopping_patience,
@@ -816,6 +878,9 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
         noise_strength: float = 0.0,
         noise_bank_size: int = 128,
         noise_bank_seed: int | None = None,
+        input_cwt_cache_root: str | None = None,
+        noise_bank_cache_root: str | None = None,
+        wct_cache_namespace: str | None = None,
         validation_split: float | list | tuple | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
@@ -857,6 +922,9 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
             noise_strength=noise_strength,
             noise_bank_size=noise_bank_size,
             noise_bank_seed=noise_bank_seed,
+            input_cwt_cache_root=input_cwt_cache_root,
+            noise_bank_cache_root=noise_bank_cache_root,
+            wct_cache_namespace=wct_cache_namespace,
             validation_split=validation_split,
             validation_group_column=validation_group_column,
             early_stopping_patience=early_stopping_patience,

@@ -40,6 +40,12 @@ from coheriqs_contributions.experiment_logging import (
     is_experiment_logging_configured,
     log_event,
 )
+from coheriqs_contributions.wct_cache import (
+    TensorCache,
+    exact_array_identity,
+    implementation_identity,
+    library_versions,
+)
 
 
 log = logging.getLogger(__name__)
@@ -1016,6 +1022,135 @@ def compute_cwt_real_imag_tensors(
     )
 
 
+@dataclass(frozen=True)
+class CWTCacheStats:
+    hits: int = 0
+    misses: int = 0
+    bypasses: int = 0
+
+
+def _cache_reuse_policy(
+    identity: Mapping[str, object],
+    *,
+    namespace: str | None,
+) -> tuple[bool, str | None]:
+    if bool(identity["dirty"]) and not namespace:
+        return False, "relevant transform source is dirty and no development namespace was supplied"
+    return True, None
+
+
+def compute_cached_cwt_real_imag_tensors(
+    X: np.ndarray,
+    *,
+    sampling_rate: int,
+    highest: float,
+    lowest: float,
+    nfreqs: int,
+    cwt_resample_n_time: int | None,
+    transform_fn,
+    cache_root: str | os.PathLike[str],
+    cache_namespace: str | None,
+    verbose: int,
+) -> tuple[
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    CWTCacheStats,
+]:
+    """Load or compute exact per-trial unnormalized float32 CWT tensors."""
+
+    X = validate_eeg_X(X)
+    output_time = int(cwt_resample_n_time or X.shape[2])
+    transform_identity = implementation_identity(
+        compute_cached_cwt_real_imag_tensors,
+        compute_cwt_real_imag_tensors,
+        prepare_cwt_tf,
+        transform_fn,
+    )
+    reusable, bypass_reason = _cache_reuse_policy(
+        transform_identity,
+        namespace=cache_namespace,
+    )
+    cache = TensorCache(
+        cache_root,
+        kind="input-cwt",
+        namespace=cache_namespace,
+    )
+    transform_fields = {
+        "sampling_rate": int(sampling_rate),
+        "highest": float(highest),
+        "lowest": float(lowest),
+        "nfreqs": int(nfreqs),
+        "input_time": int(X.shape[2]),
+        "output_time": output_time,
+        "storage_dtype": np.dtype(np.float32).str,
+        "implementation": transform_identity,
+        "libraries": library_versions(),
+    }
+    raw_trials: list[np.ndarray] = []
+    real_trials: list[np.ndarray] = []
+    imag_trials: list[np.ndarray] = []
+    frequency_trials: list[np.ndarray] = []
+    hits = misses = bypasses = 0
+
+    with cwt_progress_context(
+        "cached-input-tensors",
+        verbose=verbose,
+        samples=int(X.shape[0]),
+        channels=int(X.shape[1]),
+        input_time=int(X.shape[2]),
+        output_time=output_time,
+        nfreqs=int(nfreqs),
+    ):
+        for trial in X:
+            trial_value = np.ascontiguousarray(trial, dtype=np.float32)
+
+            def produce(current: np.ndarray = trial_value) -> Mapping[str, np.ndarray]:
+                raw, real, imag, freqs = compute_cwt_real_imag_tensors(
+                    current[None, ...],
+                    sampling_rate=sampling_rate,
+                    highest=highest,
+                    lowest=lowest,
+                    nfreqs=nfreqs,
+                    cwt_resample_n_time=cwt_resample_n_time,
+                    transform_fn=transform_fn,
+                    verbose=0,
+                )
+                return {
+                    "raw": raw[0].numpy(),
+                    "real": real[0].numpy(),
+                    "imag": imag[0].numpy(),
+                    "freqs": freqs[0].numpy(),
+                }
+
+            result = cache.load_or_compute(
+                key_fields={
+                    "trial": exact_array_identity(trial_value),
+                    "transform": transform_fields,
+                },
+                expected_names=("raw", "real", "imag", "freqs"),
+                producer=produce,
+                reusable=reusable,
+                bypass_reason=bypass_reason,
+            )
+            hits += int(result.hit)
+            misses += int(not result.hit and result.bypass_reason is None)
+            bypasses += int(result.bypass_reason is not None)
+            raw_trials.append(result.tensors["raw"])
+            real_trials.append(result.tensors["real"])
+            imag_trials.append(result.tensors["imag"])
+            frequency_trials.append(result.tensors["freqs"])
+
+    reference_freqs = frequency_trials[0]
+    if any(not np.array_equal(reference_freqs, item) for item in frequency_trials[1:]):
+        raise ValueError("CWT frequency vectors differ between cached trial entries.")
+    tensors = (
+        torch.from_numpy(np.stack(raw_trials)).float(),
+        torch.from_numpy(np.stack(real_trials)).float(),
+        torch.from_numpy(np.stack(imag_trials)).float(),
+        torch.from_numpy(np.stack(frequency_trials)).float(),
+    )
+    return tensors, CWTCacheStats(hits=hits, misses=misses, bypasses=bypasses)
+
+
 def compute_paired_cwt_noise_bank(
     *,
     bank_size: int,
@@ -1028,6 +1163,8 @@ def compute_paired_cwt_noise_bank(
     transform_fn,
     seed: int,
     verbose: int,
+    cache_root: str | os.PathLike[str] | None = None,
+    cache_namespace: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build matched raw/CWT noise entries from the same white-noise segments."""
 
@@ -1036,22 +1173,69 @@ def compute_paired_cwt_noise_bank(
     if segment_length <= 0:
         raise ValueError("Noise segment length must be > 0.")
 
-    rng = np.random.default_rng(int(seed))
-    noise = rng.standard_normal((bank_size, 1, segment_length)).astype(np.float32)
-    raw_noise, cwt_real_noise, cwt_imag_noise, _ = compute_cwt_real_imag_tensors(
-        noise,
-        sampling_rate=sampling_rate,
-        highest=highest,
-        lowest=lowest,
-        nfreqs=nfreqs,
-        cwt_resample_n_time=cwt_resample_n_time,
-        transform_fn=transform_fn,
-        verbose=verbose,
-    )
-    return (
-        raw_noise[:, 0, :].contiguous(),
-        cwt_real_noise[:, 0, :, :].contiguous(),
-        cwt_imag_noise[:, 0, :, :].contiguous(),
+    def produce() -> Mapping[str, np.ndarray]:
+        rng = np.random.default_rng(int(seed))
+        noise = rng.standard_normal((bank_size, 1, segment_length)).astype(np.float32)
+        raw_noise, cwt_real_noise, cwt_imag_noise, _ = compute_cwt_real_imag_tensors(
+            noise,
+            sampling_rate=sampling_rate,
+            highest=highest,
+            lowest=lowest,
+            nfreqs=nfreqs,
+            cwt_resample_n_time=cwt_resample_n_time,
+            transform_fn=transform_fn,
+            verbose=verbose,
+        )
+        return {
+            "raw": raw_noise[:, 0, :].numpy(),
+            "real": cwt_real_noise[:, 0, :, :].numpy(),
+            "imag": cwt_imag_noise[:, 0, :, :].numpy(),
+        }
+
+    if cache_root is None:
+        tensors = produce()
+    else:
+        generator_identity = implementation_identity(
+            compute_paired_cwt_noise_bank,
+            compute_cwt_real_imag_tensors,
+            prepare_cwt_tf,
+            transform_fn,
+        )
+        reusable, bypass_reason = _cache_reuse_policy(
+            generator_identity,
+            namespace=cache_namespace,
+        )
+        bit_generator = np.random.default_rng(int(seed)).bit_generator
+        result = TensorCache(
+            cache_root,
+            kind="noise-bank",
+            namespace=cache_namespace,
+        ).load_or_compute(
+            key_fields={
+                "seed": int(seed),
+                "bit_generator": (
+                    f"{type(bit_generator).__module__}.{type(bit_generator).__qualname__}"
+                ),
+                "bank_size": int(bank_size),
+                "segment_length": int(segment_length),
+                "sampling_rate": int(sampling_rate),
+                "highest": float(highest),
+                "lowest": float(lowest),
+                "nfreqs": int(nfreqs),
+                "output_time": int(cwt_resample_n_time or segment_length),
+                "storage_dtype": np.dtype(np.float32).str,
+                "implementation": generator_identity,
+                "libraries": library_versions(),
+            },
+            expected_names=("raw", "real", "imag"),
+            producer=produce,
+            reusable=reusable,
+            bypass_reason=bypass_reason,
+        )
+        tensors = result.tensors
+    return tuple(
+        torch.from_numpy(np.array(tensors[name], copy=True)).float().contiguous()
+        for name in ("raw", "real", "imag")
     )
 
 
