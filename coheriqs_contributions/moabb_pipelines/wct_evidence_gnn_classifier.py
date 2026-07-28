@@ -1,21 +1,22 @@
+
 """Non-recurrent WCT evidence GNN classifier."""
-
+ 
 from __future__ import annotations
-
+ 
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
-
+ 
 import torch
 import torch.nn as nn
-
+ 
 from coheriqs_contributions.moabb_pipelines.common import (
     emit_initial_detail,
     make_gaussian_weight2d,
     resolve_torch_device,
 )
-
+ 
 try:
     from coheriqs_contributions.nn_components import (
         ActConfig,
@@ -50,7 +51,7 @@ except ModuleNotFoundError:
         build_conv2d_block,
         scoped_torch_init_seed,
     )
-
+ 
 try:
     from coheriqs_contributions.moabb_pipelines.wct_phase_gnn_classifier import (
         _BaseCWTGNNClassifier,
@@ -63,8 +64,8 @@ except ModuleNotFoundError:
         _compute_wct_window_features,
         _ordered_pair_indices,
     )
-
-
+ 
+ 
 WCT_EVIDENCE_COMPONENT_PROFILES = (
     "legacy",
 )
@@ -81,20 +82,20 @@ MESSAGE_MLP_SELECTOR_MODES = (
     "separate_val",
 )
 DEFAULT_MAX_WINDOWS_PER_CHUNK = 4
-
-
+ 
+ 
 @dataclass(frozen=True)
 class _WindowLayout:
     starts: list[int]
     ends: list[int]
     centers: list[int]
     feature_indices: list[int]
-
+ 
     @property
     def n_windows(self) -> int:
         return len(self.starts)
-
-
+ 
+ 
 def _window_layout(
     *,
     n_time: int,
@@ -108,7 +109,7 @@ def _window_layout(
             "Number of feature time steps must be greater than or equal to "
             "the number of full windows."
         )
-
+ 
     ends = [start + window_size for start in starts]
     centers = [start + (window_size // 2) for start in starts]
     feature_time_ratio = feature_time_steps / n_time
@@ -118,26 +119,26 @@ def _window_layout(
         for earlier, later in zip(feature_indices, feature_indices[1:], strict=False)
     ):
         raise ValueError("Corresponding feature time steps must be increasing.")
-
+ 
     return _WindowLayout(
         starts=starts,
         ends=ends,
         centers=centers,
         feature_indices=feature_indices,
     )
-
-
+ 
+ 
 def _dtype_nbytes(dtype: torch.dtype) -> int:
     return torch.empty((), dtype=dtype).element_size()
-
-
+ 
+ 
 def _shape_numel(shape: tuple[int, ...]) -> int:
     numel = 1
     for dim in shape:
         numel *= max(int(dim), 0)
     return numel
-
-
+ 
+ 
 def _format_bytes(n_bytes: int) -> str:
     value = float(n_bytes)
     for unit in ["B", "KiB", "MiB", "GiB"]:
@@ -145,12 +146,12 @@ def _format_bytes(n_bytes: int) -> str:
             return f"{value:.2f} {unit}"
         value /= 1024.0
     return f"{value:.2f} GiB"
-
-
+ 
+ 
 def _format_number_list(values: Sequence[float]) -> str:
     return "[" + ", ".join(f"{float(value):.3f}" for value in values) + "]"
-
-
+ 
+ 
 def _selector_mode_from_gate(gate) -> str:
     if gate.alpha_optim == "shared" and gate.alpha_update_split == "train":
         return "shared_train"
@@ -159,15 +160,15 @@ def _selector_mode_from_gate(gate) -> str:
     if gate.alpha_optim == "separate" and gate.alpha_update_split == "val":
         return "separate_val"
     return f"{gate.alpha_optim}_{gate.alpha_update_split}"
-
-
+ 
+ 
 def _conv1d_length(length: int, *, kernel_size: int, stride: int) -> int:
     return ((int(length) - int(kernel_size)) // int(stride)) + 1
-
-
+ 
+ 
 class WCTEvidenceGNNCore(nn.Module):
     """Torch core for windowed WCT message evidence accumulation."""
-
+ 
     def __init__(
         self,
         n_channels: int,
@@ -193,13 +194,13 @@ class WCTEvidenceGNNCore(nn.Module):
         select_message_mlp: list[dict] | None = None,
         select_message_mlp_gate: dict | None = None,
         message_mlp_selector_mode: str = "separate_train",
-
+ 
         feature_conv_kernel_size: int = 5,
         feature_conv_pool_size: int = 4,
         feature_conv_intermediate_channels: int | None  = None,
         feature_conv_intermediate_channels_reduced: int | None = None,
         feature_conv_feature_dim: int = 4,
-
+ 
         padding_time_dim: bool = False,
         padding_mode: Literal["reflect", "constant", "replicate"] = "reflect",
         smooth_kernel_sigma: tuple[float, float] = (None, None),
@@ -247,7 +248,7 @@ class WCTEvidenceGNNCore(nn.Module):
                 "message_mlp_selector_mode must be one of "
                 f"{MESSAGE_MLP_SELECTOR_MODES}."
             )
-
+ 
         self.n_channels = n_channels
         self.nfreqs = nfreqs
         self.hidden_dim = hidden_dim
@@ -269,7 +270,7 @@ class WCTEvidenceGNNCore(nn.Module):
                 f"Unsupported component_profile={component_profile!r}. "
                 f"Expected one of {WCT_EVIDENCE_COMPONENT_PROFILES}."
             )
-
+ 
         
         src_idx, dst_idx = _ordered_pair_indices(n_channels)
         self.register_buffer("src_idx", src_idx, persistent=False)
@@ -279,7 +280,7 @@ class WCTEvidenceGNNCore(nn.Module):
             torch.cat([src_idx, dst_idx]),
             persistent=False,
         )
-
+ 
         
         self.padding_time_dim = padding_time_dim
         self.padding_mode = padding_mode
@@ -290,10 +291,10 @@ class WCTEvidenceGNNCore(nn.Module):
         )
         self.window_compute_mode = window_compute_mode
         self.max_windows_per_chunk = max_windows_per_chunk
-
+ 
         self.feature_conv_kernel_size = feature_conv_kernel_size
         self.feature_conv_pool_size = feature_conv_pool_size
-
+ 
         if feature_conv_intermediate_channels is None:
             feature_conv_intermediate_channels = nfreqs
         
@@ -302,7 +303,7 @@ class WCTEvidenceGNNCore(nn.Module):
         self.feature_conv_intermediate_channels_reduced = feature_conv_intermediate_channels_reduced
         
         self.feature_conv_feature_dim = feature_conv_feature_dim
-
+ 
         payload_dim = self.feature_conv_feature_dim * 2
         if self.use_freq:
             payload_dim += 1
@@ -318,9 +319,9 @@ class WCTEvidenceGNNCore(nn.Module):
             raise ValueError("At least one payload component must be enabled.")
         self.payload_dim = payload_dim
         self._summary_context: dict[str, object] | None = None
-
+ 
         with scoped_torch_init_seed(model_init_seed):
-
+ 
             self.feature_conv = _build_feature_conv(
                 kernel_size=self.feature_conv_kernel_size,
                 intermediate_channels=self.feature_conv_intermediate_channels,
@@ -328,7 +329,7 @@ class WCTEvidenceGNNCore(nn.Module):
                 pool_size=self.feature_conv_pool_size,
                 intermediate_channels_reduced=self.feature_conv_intermediate_channels_reduced,
             )
-
+ 
             self.message_mlp = _build_message_mlp(
                 message_layer_norm=message_layer_norm,
                 in_features=payload_dim,
@@ -347,7 +348,7 @@ class WCTEvidenceGNNCore(nn.Module):
                 n_classes=n_classes,
                 init_seed=readout_init_seed,
             )
-
+ 
     def _aggregate_per_node(self, msg: torch.Tensor) -> torch.Tensor:
         """Aggregate [B, E, H] messages to [B, C, H] by destination."""
         batch_size, _, hidden_dim = msg.shape
@@ -360,7 +361,7 @@ class WCTEvidenceGNNCore(nn.Module):
         )
         agg.index_add_(1, self.dst_idx, msg)
         return agg
-
+ 
     def configure_summary_context(
         self,
         *,
@@ -375,7 +376,7 @@ class WCTEvidenceGNNCore(nn.Module):
             "dtype": dtype,
             "n_samples": None if n_samples is None else int(n_samples),
         }
-
+ 
     def print_custom_summary(self, header: str = "Model") -> None:
         effective_mode = self._resolve_window_compute_mode()
         chunk_cap = (
@@ -401,7 +402,7 @@ class WCTEvidenceGNNCore(nn.Module):
             f"padding_mode={self.padding_mode}"
         )
         self._print_selectable_message_mlp_summary(header)
-
+ 
         context = self._summary_context
         if context is None:
             emit_initial_detail(
@@ -409,7 +410,7 @@ class WCTEvidenceGNNCore(nn.Module):
                 "summary context was not configured."
             )
             return
-
+ 
         batch_size = int(context["batch_size"])
         n_time = int(context["n_time"])
         n_samples = context["n_samples"]
@@ -446,11 +447,11 @@ class WCTEvidenceGNNCore(nn.Module):
                 f"elements={numel} "
                 f"approx_memory={_format_bytes(numel * dtype_bytes)}"
             )
-
+ 
     def _print_selectable_message_mlp_summary(self, header: str) -> None:
         if not isinstance(self.message_mlp, SelectPath):
             return
-
+ 
         gate = self.message_mlp.gate
         probs = gate.probabilities().detach().float().cpu()
         probs_by_candidate = probs.reshape(-1, int(probs.shape[-1])).mean(dim=0)
@@ -476,7 +477,7 @@ class WCTEvidenceGNNCore(nn.Module):
             f"entropy={float(entropy.item()):.4f} "
             f"candidate_params={candidate_params}"
         )
-
+ 
     def _estimate_feature_time_steps(self, n_time: int) -> int:
         length = int(n_time)
         for kernel_size, stride in [(5, 1), (4, 4), (5, 1), (4, 4)]:
@@ -484,7 +485,7 @@ class WCTEvidenceGNNCore(nn.Module):
             if length <= 0:
                 return 0
         return length
-
+ 
     def _critical_tensor_estimates(
         self,
         *,
@@ -507,7 +508,7 @@ class WCTEvidenceGNNCore(nn.Module):
                 2,
             ),
         ]
-
+ 
         if effective_mode in {"single_pass_windowed", "single_pass_continuous"}:
             estimates.append(
                 (
@@ -601,7 +602,7 @@ class WCTEvidenceGNNCore(nn.Module):
                     ),
                 ]
             )
-
+ 
         estimates.extend(
             [
                 (
@@ -630,26 +631,26 @@ class WCTEvidenceGNNCore(nn.Module):
             ]
         )
         return estimates
-
+ 
     def _resolve_window_compute_mode(self) -> str:
         if self.window_compute_mode != "auto":
             return self.window_compute_mode
         if self._single_pass_windowed_supported():
             return "single_pass_windowed"
         return "chunked"
-
+ 
     def _single_pass_windowed_supported(self) -> bool:
         return (
             not self.padding_time_dim
             and self.smooth_kernel_size[0] <= self.window_size
         )
-
+ 
     def _single_pass_windowed_strided_supported(self) -> bool:
         return (
             not self.padding_time_dim
             and self.smooth_kernel_size[0] == self.window_size
         )
-
+ 
     def _validate_single_pass_windowed_supported(self) -> None:
         if self._single_pass_windowed_supported():
             return
@@ -657,7 +658,7 @@ class WCTEvidenceGNNCore(nn.Module):
             "single_pass_windowed requires padding_time_dim=False and "
             "smooth_kernel_size[0] <= window_size so window boundaries stay exact."
         )
-
+ 
     def _batched_freqs(self, freqs: torch.Tensor, batch_size: int) -> torch.Tensor:
         if freqs.ndim == 1:
             freqs = freqs.view(1, -1).expand(batch_size, -1)
@@ -667,7 +668,7 @@ class WCTEvidenceGNNCore(nn.Module):
                 f"{(self.nfreqs,)}, got {tuple(freqs.shape)}."
             )
         return freqs
-
+ 
     def _full_edge_wct_maps(
         self,
         w_real: torch.Tensor,
@@ -681,7 +682,7 @@ class WCTEvidenceGNNCore(nn.Module):
         imag_edges = w_imag.index_select(1, self.edge_pair_idx)
         src_r, dst_r = real_edges.split(num_edges, dim=1)
         src_i, dst_i = imag_edges.split(num_edges, dim=1)
-
+ 
         xwt_real = src_r * dst_r + src_i * dst_i
         xwt_imag = src_i * dst_r - src_r * dst_i
         mag = None
@@ -689,7 +690,7 @@ class WCTEvidenceGNNCore(nn.Module):
             mag = torch.sqrt(xwt_real * xwt_real + xwt_imag * xwt_imag + 1e-12)
         auto1 = src_r * src_r + src_i * src_i
         auto2 = dst_r * dst_r + dst_i * dst_i
-
+ 
         inv_scale = freqs.view(freqs.shape[0], 1, 1, self.nfreqs)
         return (
             mag,
@@ -698,7 +699,7 @@ class WCTEvidenceGNNCore(nn.Module):
             auto1 * inv_scale,
             auto2 * inv_scale,
         )
-
+ 
     def _smooth_wct_maps(
         self,
         xwt_real: torch.Tensor,
@@ -711,7 +712,7 @@ class WCTEvidenceGNNCore(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         smooth_kernel, pad = smooth_kernel_and_pad
         batch_size, num_edges, n_time, nfreqs = xwt_real.shape
-
+ 
         maps = torch.stack([xwt_real, xwt_imag, auto1, auto2], dim=2)
         maps = maps.view(batch_size * num_edges * 4, 1, n_time, nfreqs)
         maps = torch.nn.functional.pad(maps, pad, mode=self.padding_mode)
@@ -723,7 +724,7 @@ class WCTEvidenceGNNCore(nn.Module):
         smooth_auto2 = smoothed[:, :, 3]
         coh = (smooth_cross.abs() ** 2) / (smooth_auto1 * smooth_auto2 + 1e-12)
         return smooth_cross, coh.clamp(min=0.0, max=1.0), smooth_kernel
-
+ 
     def _window_mean(self, values: torch.Tensor, layout: _WindowLayout) -> torch.Tensor:
         batch_size, num_edges, _, nfreqs = values.shape
         if layout.n_windows == 0:
@@ -737,7 +738,7 @@ class WCTEvidenceGNNCore(nn.Module):
             nfreqs,
         )
         return values.mean(dim=3)
-
+ 
     def _compute_wct_features_single_pass_windowed(
         self,
         w_real: torch.Tensor,
@@ -752,7 +753,7 @@ class WCTEvidenceGNNCore(nn.Module):
         if layout.n_windows == 0:
             empty = w_real.new_empty(batch_size, num_edges, 0, self.nfreqs)
             return empty if self.use_mag else None, empty, empty
-
+ 
         mag, xwt_real, xwt_imag, auto1, auto2 = self._full_edge_wct_maps(
             w_real,
             w_imag,
@@ -760,7 +761,7 @@ class WCTEvidenceGNNCore(nn.Module):
             compute_mag=self.use_mag,
         )
         mean_mag = self._window_mean(mag, layout) if mag is not None else None
-
+ 
         if self._single_pass_windowed_strided_supported():
             smooth_cross, coh, _ = self._smooth_wct_maps(
                 xwt_real,
@@ -776,7 +777,7 @@ class WCTEvidenceGNNCore(nn.Module):
                     f"{coh.shape[2]} windows, expected {layout.n_windows}."
                 )
             return mean_mag, torch.angle(smooth_cross), coh
-
+ 
         smooth_cross, coh_by_time, smooth_kernel = self._smooth_wct_maps(
             xwt_real,
             xwt_imag,
@@ -790,13 +791,13 @@ class WCTEvidenceGNNCore(nn.Module):
             raise ValueError(
                 "single_pass_windowed requires smooth_kernel_size[0] <= window_size."
             )
-
+ 
         batch_size, num_edges, _, nfreqs = coh_by_time.shape
-
+ 
         starts = torch.tensor(layout.starts, device=coh_by_time.device)
         offsets = torch.arange(positions_per_window, device=coh_by_time.device)
         time_indices = (starts[:, None] + offsets[None, :]).reshape(-1)
-
+ 
         coh_windows = coh_by_time.index_select(2, time_indices).reshape(
             batch_size,
             num_edges,
@@ -819,7 +820,7 @@ class WCTEvidenceGNNCore(nn.Module):
         ).squeeze(3)
         mean_phase = torch.angle(smooth_cross)
         return mean_mag, mean_phase, coh
-
+ 
     def _compute_wct_features_single_pass_continuous(
         self,
         w_real: torch.Tensor,
@@ -834,7 +835,7 @@ class WCTEvidenceGNNCore(nn.Module):
             compute_mag=self.use_mag,
         )
         mean_mag = self._window_mean(mag, layout) if mag is not None else None
-
+ 
         smooth_kernel_and_pad = make_gaussian_weight2d(
             kernel_size=self.smooth_kernel_size,
             sigma=self.smooth_kernel_sigma,
@@ -849,12 +850,12 @@ class WCTEvidenceGNNCore(nn.Module):
             auto2,
             smooth_kernel_and_pad,
         )
-
+ 
         batch_size, num_edges, _, nfreqs = coh_by_time.shape
         if layout.n_windows == 0:
             empty = coh_by_time.new_empty(batch_size, num_edges, 0, nfreqs)
             return mean_mag, empty, empty
-
+ 
         coh_windows = coh_by_time[:, :, : layout.n_windows * self.window_size, :]
         coh_windows = coh_windows.reshape(
             batch_size,
@@ -879,7 +880,7 @@ class WCTEvidenceGNNCore(nn.Module):
         ).squeeze(3)
         mean_phase = torch.angle(smooth_cross)
         return mean_mag, mean_phase, coh
-
+ 
     def _compute_wct_features_chunked(
         self,
         w_real: torch.Tensor,
@@ -895,7 +896,7 @@ class WCTEvidenceGNNCore(nn.Module):
         if layout.n_windows == 0:
             empty = w_real.new_empty(batch_size, num_edges, 0, self.nfreqs)
             return empty if self.use_mag else None, empty, empty
-
+ 
         mean_mag_out = (
             w_real.new_empty(batch_size, num_edges, layout.n_windows, self.nfreqs)
             if self.use_mag
@@ -913,7 +914,7 @@ class WCTEvidenceGNNCore(nn.Module):
             layout.n_windows,
             self.nfreqs,
         )
-
+ 
         for first in range(0, layout.n_windows, max_windows_per_chunk):
             last = min(first + max_windows_per_chunk, layout.n_windows)
             chunk_starts = layout.starts[first:last]
@@ -942,10 +943,10 @@ class WCTEvidenceGNNCore(nn.Module):
                     dim=0,
                 )
                 chunk_freqs = freqs.repeat(chunk_size, 1)
-
+ 
             src_r, dst_r = real_edges.split(num_edges, dim=1)
             src_i, dst_i = imag_edges.split(num_edges, dim=1)
-
+ 
             mean_mag, mean_phase, coh = _compute_wct_window_features(
                 src_r,
                 src_i,
@@ -956,7 +957,7 @@ class WCTEvidenceGNNCore(nn.Module):
                 padding_mode=self.padding_mode,
                 compute_mag=self.use_mag,
             )
-
+ 
             if chunk_size == 1:
                 chunk_mean_mag = None if mean_mag is None else mean_mag.unsqueeze(2)
                 chunk_mean_phase = mean_phase.unsqueeze(2)
@@ -980,7 +981,7 @@ class WCTEvidenceGNNCore(nn.Module):
                     num_edges,
                     self.nfreqs,
                 ).permute(1, 2, 0, 3)
-
+ 
             if mean_mag_out is not None:
                 if chunk_mean_mag is None:
                     raise RuntimeError(
@@ -989,9 +990,9 @@ class WCTEvidenceGNNCore(nn.Module):
                 mean_mag_out[:, :, first:last, :] = chunk_mean_mag
             mean_phase_out[:, :, first:last, :] = chunk_mean_phase
             coh_out[:, :, first:last, :] = chunk_coh
-
+ 
         return mean_mag_out, mean_phase_out, coh_out
-
+ 
     def _compute_wct_features_for_mode(
         self,
         *,
@@ -1028,7 +1029,7 @@ class WCTEvidenceGNNCore(nn.Module):
                 max_windows_per_chunk=chunk_size,
             )
         raise ValueError(f"Unsupported resolved window compute mode: {mode!r}.")
-
+ 
     def _chunk_size(self, layout: _WindowLayout) -> int:
         requested = (
             self.max_windows_per_chunk
@@ -1036,7 +1037,7 @@ class WCTEvidenceGNNCore(nn.Module):
             else DEFAULT_MAX_WINDOWS_PER_CHUNK
         )
         return min(requested, max(layout.n_windows, 1))
-
+ 
     def _accumulate_evidence_from_window_features(
         self,
         *,
@@ -1052,30 +1053,30 @@ class WCTEvidenceGNNCore(nn.Module):
         batch_size, _, n_time = raw_x.shape
         num_edges = self.src_idx.numel()
         window_count = layout.n_windows
-
+ 
         if window_count == 0:
             evidence = raw_x.new_zeros(batch_size, self.n_channels, self.hidden_dim)
             return self._readout(evidence), 0.0
-
+ 
         gate_mask = (coh > self.coherence_threshold) & (
             mean_phase > self.phase_threshold_rad
         )
         gate_sum = float(gate_mask.sum().item())
         gate_count = float(gate_mask.numel())
-
+ 
         feature_indices = torch.tensor(
             layout.feature_indices,
             device=edge_src_conv.device,
             dtype=torch.long,
         )
         centers = torch.tensor(layout.centers, device=raw_x.device, dtype=torch.long)
-
+ 
         features = []
         src_conv = edge_src_conv.index_select(4, feature_indices).permute(0, 1, 4, 2, 3)
         dst_conv = edge_dst_conv.index_select(4, feature_indices).permute(0, 1, 4, 2, 3)
         features.append(src_conv)
         features.append(dst_conv)
-
+ 
         if self.use_freq:
             freq_features = (1.0 / freqs).view(batch_size, 1, 1, self.nfreqs, 1)
             features.append(
@@ -1087,7 +1088,7 @@ class WCTEvidenceGNNCore(nn.Module):
                     1,
                 )
             )
-
+ 
         if self.use_time:
             time_centers = raw_x.new_tensor(layout.centers, dtype=raw_x.dtype)
             time_centers = time_centers / float(max(n_time - 1, 1))
@@ -1100,7 +1101,7 @@ class WCTEvidenceGNNCore(nn.Module):
                     1,
                 )
             )
-
+ 
         if self.use_mag:
             if mean_mag is None:
                 raise RuntimeError("Magnitude payload is enabled but mean_mag is missing.")
@@ -1136,11 +1137,11 @@ class WCTEvidenceGNNCore(nn.Module):
                     ),
                 ]
             )
-
+ 
         msg = self.message_mlp(torch.cat(features, dim=-1))
         msg = msg * gate_mask.to(dtype=msg.dtype).unsqueeze(-1)
         evidence = self._aggregate_per_node(msg.sum(dim=(2, 3)))
-
+ 
         if self.evidence_norm == "all_slots":
             slots_per_destination = (self.n_channels - 1) * self.nfreqs * window_count
             evidence = evidence / float(slots_per_destination)
@@ -1156,10 +1157,10 @@ class WCTEvidenceGNNCore(nn.Module):
             )
             active_slots_per_node.index_add_(1, self.dst_idx, active_per_edge)
             evidence = evidence / active_slots_per_node.clamp_min(1.0).unsqueeze(-1)
-
+ 
         edge_density = (gate_sum / gate_count) if gate_count > 0 else 0.0
         return self._readout(evidence), edge_density
-
+ 
     def _readout(self, evidence: torch.Tensor) -> torch.Tensor:
         batch_size = evidence.shape[0]
         readout = (
@@ -1168,7 +1169,7 @@ class WCTEvidenceGNNCore(nn.Module):
             else evidence.mean(dim=1)
         )
         return self.classifier(readout)
-
+ 
     def forward(
         self,
         raw_x: torch.Tensor,
@@ -1179,10 +1180,10 @@ class WCTEvidenceGNNCore(nn.Module):
         batch_size, n_channels, n_time = raw_x.shape
         if n_channels != self.n_channels:
             raise ValueError(f"Expected {self.n_channels} channels, got {n_channels}.")
-
+ 
         device = raw_x.device
         dtype = raw_x.dtype
-
+ 
         smooth_kernel_and_pad = make_gaussian_weight2d(
             kernel_size=self.smooth_kernel_size,
             sigma=self.smooth_kernel_sigma,
@@ -1190,19 +1191,19 @@ class WCTEvidenceGNNCore(nn.Module):
             device=device,
             dtype=dtype,
         )
-
+ 
         # [B, 1, C, T] -> [B, F*D, C, T']
         # C' = feature_conv_feature_dim
         conv_features = self.feature_conv(raw_x.unsqueeze(1))
-
+ 
         feature_time_steps = conv_features.shape[3]
-
+ 
         layout = _window_layout(
             n_time=n_time,
             window_size=self.window_size,
             feature_time_steps=feature_time_steps,
         )
-
+ 
         # [B, F*D, C, T'] -> [B, F, D, C, T']
         conv_by_freq = conv_features.view(
             batch_size,
@@ -1213,11 +1214,11 @@ class WCTEvidenceGNNCore(nn.Module):
         )
         # [B, F, D, C, T'] -> [B, C, F, D, T']
         conv_by_freq = conv_by_freq.permute(0, 3, 1, 2, 4)
-
+ 
         # in edge form: [B, C, F, D, T'] -> [B, E, F, D, T']
         edge_src_conv = conv_by_freq.index_select(1, self.src_idx)
         edge_dst_conv = conv_by_freq.index_select(1, self.dst_idx)
-
+ 
         freqs = self._batched_freqs(freqs, batch_size).to(
             device=raw_x.device,
             dtype=raw_x.dtype,
@@ -1241,13 +1242,13 @@ class WCTEvidenceGNNCore(nn.Module):
             mean_phase=mean_phase,
             coh=coh,
         )
-
-
+ 
+ 
 class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
     """sklearn/MOABB wrapper around the non-recurrent WCT evidence GNN."""
-
+ 
     model_label = "WCT-Evidence"
-
+ 
     def __init__(
         self,
         sampling_rate: int = 250,
@@ -1312,6 +1313,8 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             "sequential",
         ] = "auto",
         max_windows_per_chunk: int | None = None,
+        # NEW
+        channel_subset: list[int] | list[str] | None = None,
         verbose: int = 0,
     ) -> None:
         self.coherence_threshold = coherence_threshold
@@ -1371,9 +1374,11 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             optimizer_step_batch_size=optimizer_step_batch_size,
             optimizer_step_batch_mode=optimizer_step_batch_mode,
             optimizer_step_remainder_policy=optimizer_step_remainder_policy,
+            # NEW
+            channel_subset=channel_subset,
             verbose=verbose,
         )
-
+ 
     def _build_model_from_features(self, features, n_classes: int, **kwargs) -> WCTEvidenceGNNCore:
         raw_x = features[0] if isinstance(features, tuple) else features
         model = self._build_model(
@@ -1388,7 +1393,7 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             n_samples=int(raw_x.shape[0]),
         )
         return model
-
+ 
     def _build_model(self, n_channels: int, n_classes: int, **kwargs) -> WCTEvidenceGNNCore:
         return WCTEvidenceGNNCore(
             n_channels=n_channels,
@@ -1427,8 +1432,8 @@ class WCTEvidenceGNNClassifier(_BaseCWTGNNClassifier):
             max_windows_per_chunk=self.max_windows_per_chunk,
             **kwargs,
         )
-
-
+ 
+ 
 def _build_feature_conv(
     *,
     kernel_size: int,
@@ -1450,10 +1455,10 @@ def _build_feature_conv(
         ),
     )
     max_pool1 = nn.MaxPool2d(kernel_size=(1, pool_size), stride=(1, pool_size))
-
+ 
     conv_blocks.append(conv1)
     conv_blocks.append(max_pool1)
-
+ 
     conv2_in_channels = intermediate_channels
     if intermediate_channels_reduced is not None:
         # use MLP-like conv 1x1 kernel to reduce channels
@@ -1465,7 +1470,7 @@ def _build_feature_conv(
                 kernel_size=(1, 1),
                 padding=0,
                 regularization=RegConfig(),
-
+ 
                 norm=NormConfig("batch"),
                 activation=ActConfig(kind="gelu"),
             ),
@@ -1485,10 +1490,10 @@ def _build_feature_conv(
     max_pool2 = nn.MaxPool2d(kernel_size=(1, pool_size), stride=(1, pool_size))
     conv_blocks.append(conv2)
     conv_blocks.append(max_pool2)
-
+ 
     return nn.Sequential(*conv_blocks)
-
-
+ 
+ 
 def _build_message_mlp(
     *,
     message_layer_norm: bool,
@@ -1522,8 +1527,8 @@ def _build_message_mlp(
         init_mode="torch_default",
         init_seed=init_seed,
     )
-
-
+ 
+ 
 _MESSAGE_MLP_CANDIDATE_KEYS = {
     "activation",
     "depth",
@@ -1545,8 +1550,8 @@ _MESSAGE_MLP_GATE_KEYS = {
     "mode",
     "temperature",
 }
-
-
+ 
+ 
 def _build_selectable_message_mlp(
     *,
     message_layer_norm: bool,
@@ -1565,7 +1570,7 @@ def _build_selectable_message_mlp(
         raise ValueError("select_message_mlp must be a non-empty list of dicts.")
     if len(select_message_mlp) == 0:
         raise ValueError("select_message_mlp must contain at least one candidate.")
-
+ 
     # Missing candidate init_seed values consume this active stream in order;
     # explicit candidate seeds use a nested fork and do not advance it.
     with scoped_torch_init_seed(init_seed):
@@ -1580,15 +1585,15 @@ def _build_selectable_message_mlp(
             )
             for index, candidate in enumerate(select_message_mlp)
         ]
-
+ 
     gate = _build_message_mlp_gate(
         num_choices=len(candidates),
         select_message_mlp_gate=select_message_mlp_gate,
         message_mlp_selector_mode=message_mlp_selector_mode,
     )
     return SelectPath(candidates, gate)
-
-
+ 
+ 
 def _build_message_mlp_candidate(
     candidate: dict,
     *,
@@ -1603,7 +1608,7 @@ def _build_message_mlp_candidate(
             "select_message_mlp candidates must be dicts; "
             f"candidate {candidate_index} has type {type(candidate).__name__}."
         )
-
+ 
     shape_keys = sorted(set(candidate).intersection(_MESSAGE_MLP_SHAPE_KEYS))
     if shape_keys:
         raise ValueError(
@@ -1620,7 +1625,7 @@ def _build_message_mlp_candidate(
             "select_message_mlp candidate cannot set both 'message_dim' and "
             "'hidden_features'."
         )
-
+ 
     candidate_hidden = candidate.get(
         "hidden_features",
         candidate.get("message_dim", hidden_features),
@@ -1638,8 +1643,8 @@ def _build_message_mlp_candidate(
         init_mode=str(candidate.get("init_mode", "torch_default")),
         init_seed=candidate.get("init_seed"),
     )
-
-
+ 
+ 
 def _build_message_mlp_gate(
     *,
     num_choices: int,
@@ -1659,7 +1664,7 @@ def _build_message_mlp_gate(
         if unknown:
             raise ValueError(f"Unsupported select_message_mlp_gate keys: {unknown}.")
         gate_overrides = dict(select_message_mlp_gate)
-
+ 
     alpha_optim = (
         "shared" if message_mlp_selector_mode == "shared_train" else "separate"
     )
@@ -1672,8 +1677,8 @@ def _build_message_mlp_gate(
         alpha_update_split=alpha_update_split,
         **gate_overrides,
     )
-
-
+ 
+ 
 def _build_single_message_mlp(
     *,
     message_layer_norm: bool,
@@ -1703,8 +1708,8 @@ def _build_single_message_mlp(
         # residual=ResidualConfig(norm_position="sandwich", shortcut="auto", rezero=True),
         init_seed=init_seed,
     )
-
-
+ 
+ 
 def _build_readout(
     *,
     in_features: int,
@@ -1724,3 +1729,4 @@ def _build_readout(
         ),
         init_seed=init_seed,
     )
+ 

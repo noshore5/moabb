@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Canonical experimental setup (subject 1, WCT-Evidence-GNN).
-# Lives in coheriqs_contributions/ next to run_wct_gnn.py.
+# Canonical experimental setup (subject 1, MSC-Evidence-GNN).
+# Lives in coheriqs_contributions/ next to run_msc_gnn.py.
 #
 # Keep this script aligned with the current canonical experimental CLI.
 # When the active run profile changes, update the arguments below to match
-# run_wct_gnn.py.
+# run_msc_gnn.py.
 #
 # Safe to invoke from repo root or coheriqs_contributions/ (cwd does not matter).
 # Usage (with moabb's Python env active):
@@ -15,7 +15,7 @@ set -euo pipefail
 
 CONTRIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$CONTRIB_DIR/.." && pwd)"
-RUNNER="$CONTRIB_DIR/run_wct_gnn.py"
+RUNNER="$CONTRIB_DIR/run_msc_gnn.py"
 
 if [[ ! -f "$RUNNER" ]]; then
   echo "error: expected runner at $RUNNER" >&2
@@ -26,10 +26,8 @@ cd "$REPO_ROOT"
 
 exec python "$RUNNER" \
   --subjects 1 \
-  --pipeline WCT-Evidence-GNN \
+  --pipeline MSC-Evidence-GNN \
   --run-id canonical \
-  --param-names window_compute_mode \
-  --param-values chunked \
   --console-all \
   --no-console-train-steps \
   --console-selector-every 0

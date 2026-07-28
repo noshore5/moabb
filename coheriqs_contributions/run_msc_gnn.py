@@ -23,7 +23,6 @@ from moabb.evaluations import CrossSessionEvaluation
 try:
     from moabb.evaluations import GlobalFutureSessionEvaluation
 except ImportError:
-    # Fallback to CrossSessionEvaluation if GlobalFutureSessionEvaluation not available
     GlobalFutureSessionEvaluation = None
 from moabb.paradigms import LeftRightImagery
 
@@ -32,25 +31,7 @@ repo_root_path = str(REPO_ROOT)
 if repo_root_path not in sys.path:
     sys.path.insert(0, repo_root_path)
 
-from coheriqs_contributions.moabb_pipelines.coherence_cnn_classifier import (
-    CoherenceCNNClassifier,
-)
-from coheriqs_contributions.moabb_pipelines.custom_classifiers import (
-    WaveletTransformClassifier,
-)
-from coheriqs_contributions.moabb_pipelines.CWT_CNN import CWTCNNClassifier
-from coheriqs_contributions.moabb_pipelines.EEGNet import EEGNetClassifier
-from coheriqs_contributions.moabb_pipelines.wct_phase_gnn_classifier import (
-    WCTPhaseGNNClassifier,
-    WCTPhaseGNNV2Classifier,
-)
-from coheriqs_contributions.moabb_pipelines.wct_evidence_gnn_classifier import (
-    WCTEvidenceGNNClassifier,
-)
-from coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
-    XWTPhaseGNNClassifier,
-    XWTPhaseGNNV2Classifier,
-)
+from coheriqs_contributions import run_wct_gnn as _wct_run
 from coheriqs_contributions.experiment_logging import (
     EventCategory,
     add_console_arguments,
@@ -59,57 +40,18 @@ from coheriqs_contributions.experiment_logging import (
     log_event,
     resolve_experiment_log_path,
 )
+from coheriqs_contributions.moabb_pipelines.msc_evidence_gnn import (
+    MSCEvidenceGNNClassifier,
+)
 
 
 log = logging.getLogger(__name__)
 
-
-class RunConfigurationError(ValueError):
-    """Configuration error that the CLI should report as an argument error."""
+RunConfigurationError = _wct_run.RunConfigurationError
 
 
-def _make_csp_lda():
-    return make_pipeline(
-        CSP(n_components=4, log=True, norm_trace=False, reg=None),
-        LinearDiscriminantAnalysis(solver="eigen"),
-    )
-
-
-def _make_wct_phase_gnn():
-    return WCTPhaseGNNClassifier(
-        sampling_rate=250,
-        lowest=8.0,
-        highest=35.0,
-        nfreqs=16,
-        cwt_resample_n_time=100,
-        coherence_threshold=0.7,
-        phase_threshold_deg=30.0,
-        window_size=25,
-        state_mode="per_node",
-        use_mag=True,
-        use_ang=False,
-        use_raw=True,
-        use_state_src=True,
-        use_state_dst=False,
-        hidden_dim=16,
-        message_dim=16,
-        epochs=20,
-        batch_size=8,
-        learning_rate=1e-3,
-        weight_decay=1e-4,
-        grad_clip_norm=0.1,
-        normalize_input=True,
-        validation_split=0.2,
-        validation_group_column=None,
-        early_stopping_patience=None,
-        device="auto",
-        seed=42,
-        verbose=2,
-    )
-
-
-def _make_wct_evidence_gnn():
-    return WCTEvidenceGNNClassifier(
+def _make_msc_evidence_gnn():
+    return MSCEvidenceGNNClassifier(
         sampling_rate=250,
         lowest=8.0,
         highest=35.0,
@@ -117,12 +59,10 @@ def _make_wct_evidence_gnn():
         cwt_resample_n_time=200,
         coherence_threshold=0.5,
         phase_threshold_deg=30.0,
-        window_size=25,
         use_mag=True,
         use_ang=False,
         use_raw=False,
         use_freq=True,
-        use_time=True,
         readout_mode="flatten",
         evidence_norm="none",
         hidden_dim=8,
@@ -152,311 +92,67 @@ def _make_wct_evidence_gnn():
         feature_conv_intermediate_channels=None,
         feature_conv_intermediate_channels_reduced=4,
         feature_conv_feature_dim=2,
-        padding_time_dim=False,
-        padding_mode="reflect",
-        smooth_kernel_size=(5, 3),
-        smooth_kernel_sigma=(None, None),
-        window_compute_mode="auto",
-        max_windows_per_chunk=None,
         select_message_mlp=None,
         select_message_mlp_gate=None,
         message_mlp_selector_mode="shared_train",
-        selector_alpha_val_update_rate=1.0,
-        last_batch_min_ratio=0.0,
+        selector_alpha_val_update_rate=0.5,
+        last_batch_min_ratio=0.5,
         optimizer_step_batch_size=None,
         optimizer_step_batch_mode="credit",
-        optimizer_step_remainder_policy="flush",
+        optimizer_step_remainder_policy="carry",
         channel_subset=[1, 5, 7, 8, 9, 10, 11, 13, 17],
         verbose=3,
     )
 
 
-def _make_xwt_phase_gnn():
-    return XWTPhaseGNNClassifier(
-        sampling_rate=250,
-        lowest=8.0,
-        highest=35.0,
-        nfreqs=32,
-        cwt_resample_n_time=100,
-        time_stride=1,
-        theta_dead_deg=30.0,
-        state_mode="per_node",
-        use_mag=True,
-        use_ang=False,
-        use_raw=True,
-        use_state_src=True,
-        use_state_dst=False,
-        hidden_dim=16,
-        message_dim=16,
-        epochs=10,
-        batch_size=8,
-        learning_rate=1e-3,
-        weight_decay=1e-4,
-        grad_clip_norm=0.1,
-        normalize_input=True,
-        validation_split=0.2,
-        validation_group_column=None,
-        early_stopping_patience=None,
-        device="auto",
-        seed=42,
-        verbose=2,
-    )
-
-
-def _make_wavelet_rf():
-    return WaveletTransformClassifier(
-        lowest=4,
-        highest=40,
-        nfreqs=50,
-        sampling_rate=250,
-        verbose=2,
-    )
-
-
-def _make_coherence_cnn():
-    return CoherenceCNNClassifier(
-        lowest=4,
-        highest=40,
-        nfreqs=50,
-        sampling_rate=250,
-        epochs=100,
-        batch_size=32,
-        learning_rate=0.001,
-        device="cpu",
-        use_class_weights=False,
-        verbose=2,
-    )
-
-
-def _make_cwt_cnn():
-    return CWTCNNClassifier(
-        lowest=4,
-        highest=40,
-        nfreqs=50,
-        sampling_rate=250,
-        epochs=100,
-        batch_size=32,
-        learning_rate=0.001,
-        device="cpu",
-        use_class_weights=False,
-        verbose=2,
-    )
-
-
-def _make_eegnet():
-    return EEGNetClassifier(
-        epochs=100,
-        batch_size=32,
-        learning_rate=0.001,
-        dropout_rate=0.5,
-        device="cpu",
-        verbose=1,
-    )
-
-
-def _make_wct_phase_gnn_v2():
-    return WCTPhaseGNNV2Classifier(
-        sampling_rate=250,
-        lowest=8.0,
-        highest=35.0,
-        nfreqs=8,
-        cwt_resample_n_time=100,
-        coherence_threshold=0.7,
-        phase_threshold_deg=30.0,
-        window_size=25,
-        message_dim=3,
-        hidden_state_dim=8,
-        encoder_dim=3,
-        use_encoder_batch_norm=True,
-        encoder_dropout=0.5,
-        use_local_residual=True,
-        use_prev_state_mean=True,
-        gru_input_dropout=0.35,
-        readout_dropout=0.2,
-        use_raw_in_message=False,
-        epochs=50,
-        batch_size=16,
-        learning_rate=1e-3,
-        weight_decay=2e-4,
-        grad_clip_norm=0.1,
-        normalize_input=True,
-        validation_split=0.2,
-        validation_group_column=None,
-        early_stopping_patience=None,
-        device="auto",
-        seed=42,
-        verbose=2,
-    )
-
-
-def _make_xwt_phase_gnn_v2():
-    return XWTPhaseGNNV2Classifier(
-        sampling_rate=250,
-        lowest=8.0,
-        highest=35.0,
-        nfreqs=32,
-        cwt_resample_n_time=100,
-        time_stride=1,
-        theta_dead_deg=25.0,
-        message_dim=3,
-        hidden_state_dim=16,
-        encoder_dim=3,
-        use_encoder_batch_norm=True,
-        encoder_dropout=0.4,
-        use_local_residual=False,
-        use_prev_state_mean=True,
-        gru_input_dropout=0.35,
-        readout_dropout=0.25,
-        use_raw_in_message=True,
-        epochs=50,
-        batch_size=1,
-        learning_rate=3e-3,
-        weight_decay=2e-4,
-        grad_clip_norm=0.1,
-        normalize_input=True,
-        validation_split=0.2,
-        validation_group_column=None,
-        early_stopping_patience=None,
-        device="auto",
-        seed=42,
-        verbose=2,
-    )
-
-
-PIPELINE_BUILDERS = {
-    "Coherence-CNN": _make_coherence_cnn,
-    "CSP+LDA": _make_csp_lda,
-    "CWT-CNN": _make_cwt_cnn,
-    "EEGNet": _make_eegnet,
-    "WCT-Evidence-GNN": _make_wct_evidence_gnn,
-    "WCT-Phase-GNN": _make_wct_phase_gnn,
-    "WCT-Phase-GNN-V2": _make_wct_phase_gnn_v2,
-    "Wavelet-RF": _make_wavelet_rf,
-    "XWT-Phase-GNN": _make_xwt_phase_gnn,
-    "XWT-Phase-GNN-V2": _make_xwt_phase_gnn_v2,
-}
-DEFAULT_PIPELINES = ["WCT-Evidence-GNN",]
-PIPELINE_PARAM_GRIDS = {
-    "CSP+LDA": {
-        "csp__n_components": [5, 6, 7],
-        "csp__log": [
-            True,
+PIPELINE_BUILDERS = dict(_wct_run.PIPELINE_BUILDERS)
+PIPELINE_BUILDERS["MSC-Evidence-GNN"] = _make_msc_evidence_gnn
+DEFAULT_PIPELINES = ["MSC-Evidence-GNN"]
+PIPELINE_PARAM_GRIDS = deepcopy(_wct_run.PIPELINE_PARAM_GRIDS)
+PIPELINE_PARAM_GRIDS["MSC-Evidence-GNN"] = {
+    "batch_size": [32],
+    "readout_mode": ["flatten"],
+    "evidence_norm": ["active_slots"],
+    "message_layer_norm": [False],
+    "seed": [42],
+    "select_message_mlp": [
+        [
+            {"init_seed": 101},
+            {"init_seed": 103},
+            {"init_seed": 104},
         ],
-        "lineardiscriminantanalysis__shrinkage": [
-            None,
-            "auto",
-        ],
-    },
-    "EEGNet": {
-        "epochs": [100],
-        "batch_size": [32],
-        "learning_rate": [0.001],
-        "dropout_rate": [0.5],
-        "validation_split": [0.0],
-        "weight_decay": [0.0],
-    },
-    "Wavelet-RF": {
-        "lowest": [4],
-        "highest": [40],
-        "nfreqs": [50],
-        "sampling_rate": [250],
-    },
-    "Coherence-CNN": {
-        "lowest": [4],
-        "highest": [40],
-        "nfreqs": [50],
-        "sampling_rate": [250],
-        "epochs": [100],
-        "batch_size": [32],
-        "learning_rate": [0.001],
-        "device": ["cpu"],
-        "use_class_weights": [False],
-    },
-    "CWT-CNN": {
-        "lowest": [4],
-        "highest": [40],
-        "nfreqs": [50],
-        "sampling_rate": [250],
-        "epochs": [100],
-        "batch_size": [32],
-        "learning_rate": [0.001],
-        "device": ["cpu"],
-        "use_class_weights": [False],
-    },
-    "WCT-Phase-GNN": {
-        "batch_size": [32],
-    },
-    "WCT-Evidence-GNN": {
-        "batch_size": [32],
-        "readout_mode": ["flatten"],
-        "evidence_norm": ["active_slots"],
-        "message_layer_norm": [False],
-        "seed": [42],
-        # "message_init_seed": [43],
-        # "readout_init_seed": [44],
-        "select_message_mlp": [
-            # None,  # To enable selectable message MLP candidates, replace None with:
-            [
-                {"init_seed": 101},
-                {
-                    "init_seed": 103,
-                    # "message_dim": 16,
-                    # "message_layer_norm": True,
-                },
-                {"init_seed": 104},
-
-            ],
-        ],
-        "select_message_mlp_gate": [
-            # None,
-            {"mode": "gumbel_hard"}
-        ],
-        "message_mlp_selector_mode": [
-            # "shared_train",
-            # "separate_train",
-            "separate_val",
-        ],
-        "selector_alpha_val_update_rate": [0.5],
-
-        "last_batch_min_ratio": [0.5],
-        "optimizer_step_batch_size": [None],
-        "optimizer_step_batch_mode": ["credit"],
-        "optimizer_step_remainder_policy": ["carry"],
-
-        "epochs": [50],
-        "normalize_input": [True],
-        "learning_rate": [1.0e-3],
-        "weight_decay": [1.0e-2],
-        "noise_augmentation_enabled": [True],
-        "noise_apply_prob": [1.0],
-        "noise_strength": [0.15],
-        "noise_bank_size": [20000],
-        "noise_bank_seed": [33],
-        "use_raw": [False],
-        "use_time": [True],
-        "use_freq": [True],
-        "use_mag": [False],
-        "use_ang": [False],
-        "max_windows_per_chunk": [1],
-        "window_compute_mode": ["single_pass_continuous"],
-        "verbose": [2],
-        "device": ["auto"],
-
-    },
-    "WCT-Phase-GNN-V2": {
-        "batch_size": [32],
-    },
-    "XWT-Phase-GNN": {
-        "batch_size": [32],
-    },
-    "XWT-Phase-GNN-V2": {
-        "batch_size": [32],
-    },
+    ],
+    "select_message_mlp_gate": [
+        {"mode": "gumbel_hard"},
+    ],
+    "message_mlp_selector_mode": [
+        "separate_val",
+    ],
+    "selector_alpha_val_update_rate": [0.5],
+    "last_batch_min_ratio": [0.5],
+    "optimizer_step_batch_size": [None],
+    "optimizer_step_batch_mode": ["credit"],
+    "optimizer_step_remainder_policy": ["carry"],
+    "epochs": [50],
+    "normalize_input": [True],
+    "learning_rate": [1.0e-3],
+    "weight_decay": [1.0e-2],
+    "noise_augmentation_enabled": [True],
+    "noise_apply_prob": [1.0],
+    "noise_strength": [0.15],
+    "noise_bank_size": [20000],
+    "noise_bank_seed": [33],
+    "use_raw": [False],
+    "use_freq": [True],
+    "use_mag": [False],
+    "use_ang": [False],
+    "verbose": [2],
+    "device": ["auto"],
+    "channel_subset": [[1, 5, 7, 8, 9, 10, 11, 13, 17]],
 }
 
 
 def _parse_param_value(raw_value):
-    """Parse a CLI parameter value without evaluating executable code."""
     normalized = raw_value.strip()
     named_literals = {"true": True, "false": False, "none": None, "null": None}
     if normalized.lower() in named_literals:
@@ -464,24 +160,19 @@ def _parse_param_value(raw_value):
     try:
         return ast.literal_eval(normalized)
     except (SyntaxError, ValueError):
-        # Bare values such as ``auto`` and ``flatten`` are estimator strings.
         return normalized
 
 
 def _normalize_param_names(param_names):
-    """Accept either comma-separated names or one CLI token per name."""
     if param_names is None:
         return None
-    normalized = [
-        name.strip() for token in param_names for name in token.split(",")
-    ]
+    normalized = [name.strip() for token in param_names for name in token.split(",")]
     if any(not name for name in normalized):
         raise ValueError("--param-names contains an empty parameter name.")
     return normalized
 
 
 def _normalize_param_values(raw_param_values):
-    """Accept a literal value list or one safely parsed CLI token per value."""
     if raw_param_values is None:
         return None
     if len(raw_param_values) == 1:
@@ -493,7 +184,6 @@ def _normalize_param_values(raw_param_values):
 
 
 def _values_are_type_compatible(value, reference):
-    """Accept the scalar type families sklearn estimators commonly accept."""
     if isinstance(value, numbers.Real) and not isinstance(value, bool):
         if not math.isfinite(value):
             return False
@@ -507,7 +197,6 @@ def _values_are_type_compatible(value, reference):
 
 
 def _validate_param_overrides(pipeline_names, param_names, raw_param_values):
-    """Return validated fixed estimator parameters for all selected pipelines."""
     if param_names is None and raw_param_values is None:
         return {}
     normalized_names = _normalize_param_names(param_names)
@@ -519,13 +208,10 @@ def _validate_param_overrides(pipeline_names, param_names, raw_param_values):
         )
     if len(normalized_names) != len(parsed_values):
         raise ValueError(
-            "--param-names and --param-values must contain the same number of "
-            "entries."
+            "--param-names and --param-values must contain the same number of entries."
         )
     duplicates = sorted(
-        name
-        for name in set(normalized_names)
-        if normalized_names.count(name) > 1
+        name for name in set(normalized_names) if normalized_names.count(name) > 1
     )
     if duplicates:
         raise ValueError(
@@ -545,9 +231,7 @@ def _validate_param_overrides(pipeline_names, param_names, raw_param_values):
         grid = PIPELINE_PARAM_GRIDS[pipeline_name]
         for name, value in overrides.items():
             references = [supported_params[name], *grid.get(name, [])]
-            typed_references = [
-                reference for reference in references if reference is not None
-            ]
+            typed_references = [reference for reference in references if reference is not None]
             is_compatible = (
                 any(reference is None for reference in references)
                 if value is None
@@ -573,162 +257,6 @@ def _validate_param_overrides(pipeline_names, param_names, raw_param_values):
     return overrides
 
 
-def _apply_fixed_param_overrides(pipelines, run_param_grid, fixed_overrides):
-    """Set fixed values and remove their dimensions from copied search grids."""
-    if not fixed_overrides:
-        return run_param_grid
-    for estimator in pipelines.values():
-        estimator.set_params(**fixed_overrides)
-    return {
-        label: {
-            name: values
-            for name, values in grid.items()
-            if name not in fixed_overrides
-        }
-        for label, grid in run_param_grid.items()
-    }
-
-
-def _resolve_eval_modes(global_hyperparam_fit_mode):
-    mode = str(global_hyperparam_fit_mode).lower()
-    if mode == "false":
-        return ["cross"]
-    if mode == "true":
-        return ["global"]
-    if mode == "both":
-        return ["cross", "global"]
-    raise ValueError(
-        f"Unsupported global_hyperparam_fit='{global_hyperparam_fit_mode}'. "
-        "Expected one of: false, true, both."
-    )
-
-
-def _build_pipeline_runs(
-    pipeline_names, inner_group_mode, global_hyperparam_fit_mode
-):
-    if inner_group_mode == "none":
-        inner_groups = [None]
-    elif inner_group_mode == "run":
-        inner_groups = ["run"]
-    elif inner_group_mode == "both":
-        inner_groups = [None, "run"]
-    else:
-        raise ValueError(
-            f"Unsupported inner_group_mode='{inner_group_mode}'. "
-            "Expected one of: none, run, both."
-        )
-
-    eval_modes = _resolve_eval_modes(global_hyperparam_fit_mode)
-    deduped_pipelines = list(dict.fromkeys(pipeline_names))
-    runs = []
-    for name in deduped_pipelines:
-        for eval_mode in eval_modes:
-            for inner_group in inner_groups:
-                label = (
-                    f"{name} [eval={eval_mode}] [inner_group={inner_group or 'None'}]"
-                )
-                runs.append(
-                    {
-                        "base_name": name,
-                        "eval_mode": eval_mode,
-                        "inner_group": inner_group,
-                        "label": label,
-                    }
-                )
-    return runs
-
-
-def _prepare_param_grid_for_run(pipelines, run_param_grid):
-    """Apply singleton grids directly and keep only multi-combo grids for search."""
-    effective_param_grid = {}
-    singleton_applied = {}
-
-    for label, estimator in pipelines.items():
-        if label not in run_param_grid:
-            continue
-
-        grid = run_param_grid[label]
-        combos = ParameterGrid(grid)
-        n_combos = len(combos)
-
-        if n_combos <= 1:
-            # Equivalent to GridSearchCV with one candidate + refit, but without inner CV.
-            params = next(iter(combos), {})
-            if params:
-                estimator.set_params(**params)
-            singleton_applied[label] = params
-        else:
-            effective_param_grid[label] = grid
-
-    return effective_param_grid, singleton_applied
-
-
-def _print_run_plan(subjects, selected_pipelines, pipeline_runs):
-    log_event(log, EventCategory.CONFIG, "=== Run plan ===")
-    log_event(log, EventCategory.CONFIG, f"Subjects: {subjects}")
-    log_event(log, EventCategory.CONFIG, f"Pipelines: {selected_pipelines}")
-    log_event(log, EventCategory.CONFIG, f"Evaluation runs: {len(pipeline_runs)}")
-    for run_cfg in pipeline_runs:
-        log_event(log, EventCategory.CONFIG, f"  - {run_cfg['label']}")
-
-
-def _safe_run_id(value):
-    """Return a filesystem-safe run identifier without hiding user mistakes."""
-    run_id = value or os.environ.get("LOCAL_ORCHESTRATION_EXECUTION_ID")
-    if run_id is None:
-        run_id = datetime.now().strftime("manual-%Y%m%d-%H%M%S-%f")
-    run_id = str(run_id)
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", run_id):
-        raise ValueError(
-            "Run ID must start with an alphanumeric character and contain only "
-            "letters, digits, dot, underscore, or hyphen."
-        )
-    return run_id
-
-
-def _configured_data_root():
-    """Report the configured root; MOABB reports each resolved dataset file."""
-    configured = (
-        os.environ.get("MNE_DATASETS_BNCI_PATH")
-        or get_config("MNE_DATASETS_BNCI_PATH")
-        or os.environ.get("MNE_DATA")
-        or get_config("MNE_DATA")
-    )
-    if configured is None:
-        configured = Path.home() / "mne_data"
-    data_root = Path(configured).expanduser().resolve()
-    log_event(
-        log,
-        EventCategory.CONFIG,
-        f"[Data] configured MOABB/MNE root: {data_root}",
-    )
-    return data_root
-
-
-def _configured_moabb_result_root():
-    configured = (
-        os.environ.get("MOABB_RESULTS")
-        or get_config("MOABB_RESULTS")
-        or os.environ.get("MNE_DATA")
-        or get_config("MNE_DATA")
-        or str(Path.home() / "mne_data")
-    )
-    return Path(configured).expanduser().resolve()
-
-
-def _markdown_table(frame, columns):
-    def clean(value):
-        return str(value).replace("|", "\\|").replace("\n", " ")
-
-    lines = [
-        "| " + " | ".join(columns) + " |",
-        "| " + " | ".join("---" for _ in columns) + " |",
-    ]
-    for row in frame[columns].itertuples(index=False, name=None):
-        lines.append("| " + " | ".join(clean(value) for value in row) + " |")
-    return lines
-
-
 def _write_group_artifacts(
     *,
     evaluation,
@@ -747,7 +275,6 @@ def _write_group_artifacts(
     console_policy=None,
     overwrite=True,
 ):
-    """Write compact human-readable companions beside MOABB's HDF5 store."""
     hdf5_path = Path(evaluation.results.filepath).resolve()
     artifact_dir = hdf5_path.parent
     scores_path = artifact_dir / f"scores_{group_id}.csv"
@@ -770,7 +297,7 @@ def _write_group_artifacts(
         .rename(columns={"score": "mean_score"})
     )
     lines = [
-        "# WCT run summary",
+        "# MSC run summary",
         "",
         f"- Run ID: `{run_id}`",
         f"- Group: `{group_id}`",
@@ -788,9 +315,9 @@ def _write_group_artifacts(
     lines.append(f"- Overwrite existing outputs: `{overwrite}`")
     lines.append(f"- Fixed parameter overrides: `{fixed_overrides or {}}`")
     lines.extend(["", "## Outer-CV rows", ""])
-    lines.extend(_markdown_table(group_results, outer_columns))
+    lines.extend(_wct_run._markdown_table(group_results, outer_columns))
     lines.extend(["", "## Subject/pipeline means", ""])
-    lines.extend(_markdown_table(means, ["subject", "pipeline", "mean_score"]))
+    lines.extend(_wct_run._markdown_table(means, ["subject", "pipeline", "mean_score"]))
     lines.extend(["", "## Run-grid configuration", ""])
     for label, configured_grid in run_param_grid.items():
         lines.append(f"### {label}")
@@ -815,61 +342,6 @@ def _write_group_artifacts(
     log_event(log, EventCategory.ARTIFACT, f"[Artifact] HDF5: {hdf5_path}")
     log_event(log, EventCategory.ARTIFACT, f"[Artifact] scores CSV: {scores_path}")
     log_event(log, EventCategory.ARTIFACT, f"[Artifact] summary: {summary_path}")
-
-
-def _print_inner_results(inner):
-    log_event(log, EventCategory.FINAL_RESULTS, "=== Inner cv_results_ ===")
-    if inner.empty:
-        log_event(
-            log,
-            EventCategory.FINAL_RESULTS,
-            "No inner cv_results_ collected.",
-        )
-        return
-
-    summary_cols = [
-        c
-        for c in [
-            "eval_type",
-            "dataset",
-            "subject",
-            "session",
-            "pipeline",
-            "outer_fold",
-            "params",
-            "mean_test_score",
-            "mean_train_score",
-            "rank_test_score",
-        ]
-        if c in inner.columns
-    ]
-    log_event(
-        log,
-        EventCategory.FINAL_RESULTS,
-        inner[summary_cols].to_string(index=False),
-    )
-
-    split_cols = [
-        c
-        for c in [
-            "subject",
-            "session",
-            "pipeline",
-            "outer_fold",
-            "params",
-            "mean_test_score",
-            "mean_train_score",
-        ]
-        + [f"split{i}_{t}_score" for t in ["train", "test"] for i in range(3)]
-        if c in inner.columns
-    ]
-    if split_cols != summary_cols:
-        log_event(log, EventCategory.FINAL_RESULTS, "=== Inner CV split scores ===")
-        log_event(
-            log,
-            EventCategory.FINAL_RESULTS,
-            inner[split_cols].to_string(index=False),
-        )
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
@@ -967,15 +439,12 @@ def _build_argument_parser() -> argparse.ArgumentParser:
 
 
 def parse_parameters(arguments: list[str] | None = None) -> argparse.Namespace:
-    """Parse runner parameters from explicit arguments or the process CLI."""
     return _build_argument_parser().parse_args(arguments)
 
 
 def main(parameters: argparse.Namespace) -> None:
-    run_id = _safe_run_id(parameters.run_id)
-    selected_pipelines = (
-        parameters.pipeline if parameters.pipeline else DEFAULT_PIPELINES
-    )
+    run_id = _wct_run._safe_run_id(parameters.run_id)
+    selected_pipelines = parameters.pipeline if parameters.pipeline else DEFAULT_PIPELINES
     try:
         fixed_overrides = _validate_param_overrides(
             selected_pipelines,
@@ -984,13 +453,13 @@ def main(parameters: argparse.Namespace) -> None:
         )
     except ValueError as exc:
         raise RunConfigurationError(str(exc)) from exc
-    pipeline_runs = _build_pipeline_runs(
+    pipeline_runs = _wct_run._build_pipeline_runs(
         pipeline_names=selected_pipelines,
         inner_group_mode=parameters.inner_group_mode,
         global_hyperparam_fit_mode=parameters.global_hyperparam_fit,
     )
     console_policy = console_policy_from_args(parameters)
-    moabb_results_root = _configured_moabb_result_root()
+    moabb_results_root = _wct_run._configured_moabb_result_root()
     try:
         experiment_log_path = resolve_experiment_log_path(
             parameters.experiment_log,
@@ -1020,7 +489,7 @@ def main(parameters: argparse.Namespace) -> None:
         EventCategory.CONFIG,
         f"Overwrite existing run outputs: {parameters.overwrite}",
     )
-    _print_run_plan(parameters.subjects, selected_pipelines, pipeline_runs)
+    _wct_run._print_run_plan(parameters.subjects, selected_pipelines, pipeline_runs)
     log_event(log, EventCategory.STATUS, f"Run ID: {run_id}")
     if fixed_overrides:
         log_event(
@@ -1031,7 +500,7 @@ def main(parameters: argparse.Namespace) -> None:
 
     dataset = BNCI2014_001()
     dataset.subject_list = parameters.subjects
-    data_root = _configured_data_root()
+    data_root = _wct_run._configured_data_root()
     log_event(
         log,
         EventCategory.CONFIG,
@@ -1087,10 +556,10 @@ def main(parameters: argparse.Namespace) -> None:
             cfg["label"]: deepcopy(PIPELINE_PARAM_GRIDS[cfg["base_name"]])
             for cfg in run_cfgs
         }
-        run_param_grid = _apply_fixed_param_overrides(
+        run_param_grid = _wct_run._apply_fixed_param_overrides(
             pipelines, run_param_grid, fixed_overrides
         )
-        param_grid, singleton_applied = _prepare_param_grid_for_run(
+        param_grid, singleton_applied = _wct_run._prepare_param_grid_for_run(
             pipelines, run_param_grid
         )
 
@@ -1178,7 +647,6 @@ def main(parameters: argparse.Namespace) -> None:
             if not group_inner.empty:
                 inner_chunks.append(group_inner)
         except (AttributeError, TypeError):
-            # Inner CV results not available in this moabb version
             pass
 
     results = pd.concat(results_chunks, ignore_index=True)
@@ -1227,12 +695,8 @@ def main(parameters: argparse.Namespace) -> None:
     )
 
     if parameters.show_inner_results:
-        _print_inner_results(inner)
+        _wct_run._print_inner_results(inner)
 
 
 if __name__ == "__main__":
-    argument_parser = _build_argument_parser()
-    try:
-        main(argument_parser.parse_args())
-    except RunConfigurationError as exc:
-        argument_parser.error(str(exc))
+    main(parse_parameters())

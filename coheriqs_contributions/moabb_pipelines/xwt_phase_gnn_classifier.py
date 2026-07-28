@@ -273,6 +273,9 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         optimizer_step_batch_size: int | None = None,
         optimizer_step_batch_mode: str = "credit",
         optimizer_step_remainder_policy: str = "flush",
+        # NEW: restrict which channels are used, by integer index (or by
+        # name if self.channel_names_ has been populated before fit()).
+        channel_subset: list[int] | list[str] | None = None,
         verbose: int = 0,
     ) -> None:
         self.sampling_rate = sampling_rate
@@ -286,6 +289,9 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         self.noise_strength = noise_strength
         self.noise_bank_size = noise_bank_size
         self.noise_bank_seed = noise_bank_seed
+        # NEW
+        self.channel_subset = channel_subset
+        self.channel_names_: list[str] | None = None
         self.transform_ = None
         self.X_mean_: float | None = None
         self.X_std_: float | None = None
@@ -314,7 +320,51 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             verbose=verbose,
         )
 
+    # NEW: resolves self.channel_subset (indices or names) into an index
+    # list and slices the channel axis of X. Returns X unchanged if no
+    # subset was requested.
+    def _apply_channel_subset(self, X: np.ndarray) -> np.ndarray:
+        if self.channel_subset is None:
+            return X
+        if len(self.channel_subset) == 0:
+            raise ValueError("channel_subset must not be empty.")
+
+        if all(isinstance(c, str) for c in self.channel_subset):
+            if self.channel_names_ is None:
+                raise ValueError(
+                    "channel_subset was given as channel names, but "
+                    "self.channel_names_ has not been set. Set "
+                    "channel_names_ (e.g. from your MNE info['ch_names']) "
+                    "before calling fit(), or pass channel_subset as "
+                    "integer indices instead."
+                )
+            missing = [c for c in self.channel_subset if c not in self.channel_names_]
+            if missing:
+                raise ValueError(f"channel_subset names not found: {missing}.")
+            idx = [self.channel_names_.index(name) for name in self.channel_subset]
+        elif all(isinstance(c, (int, np.integer)) for c in self.channel_subset):
+            idx = [int(c) for c in self.channel_subset]
+        else:
+            raise ValueError(
+                "channel_subset must be a list of all str (names) or all "
+                "int (indices), not a mix."
+            )
+
+        n_channels = X.shape[1]
+        out_of_range = [i for i in idx if i < 0 or i >= n_channels]
+        if out_of_range:
+            raise ValueError(
+                f"channel_subset indices out of range for {n_channels} "
+                f"channels: {out_of_range}."
+            )
+        return X[:, idx, :]
+
     def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):
+        # NEW: slice channels first, before normalization/CWT/anything else
+        # touches X, so every downstream step (z-score stats, CWT tensors,
+        # noise bank, n_channels inference) only ever sees the subset.
+        X = self._apply_channel_subset(X)
+
         if fit:
             self._validate_noise_augmentation_params()
         if self.normalize_input:
@@ -472,6 +522,8 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
         early_stopping_patience: int | None = None,
         device: str = "auto",
         seed: int = 42,
+        # NEW
+        channel_subset: list[int] | list[str] | None = None,
         verbose: int = 0,
     ) -> None:
         self.time_stride = time_stride
@@ -507,6 +559,8 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
             early_stopping_patience=early_stopping_patience,
             device=device,
             seed=seed,
+            # NEW
+            channel_subset=channel_subset,
             verbose=verbose,
         )
 
@@ -801,6 +855,8 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
         early_stopping_patience: int | None = None,
         device: str = "auto",
         seed: int = 42,
+        # NEW
+        channel_subset: list[int] | list[str] | None = None,
         verbose: int = 0,
     ) -> None:
         self.time_stride = time_stride
@@ -837,6 +893,8 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
             early_stopping_patience=early_stopping_patience,
             device=device,
             seed=seed,
+            # NEW
+            channel_subset=channel_subset,
             verbose=verbose,
         )
 

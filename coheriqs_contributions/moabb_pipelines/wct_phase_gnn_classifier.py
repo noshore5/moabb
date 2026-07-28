@@ -909,6 +909,8 @@ class WCTPhaseGNNClassifier(_BaseCWTGNNClassifier):
         early_stopping_patience: int | None = None,
         device: str = "auto",
         seed: int = 42,
+        # NEW
+        channel_subset: list[int] | list[str] | None = None,
         verbose: int = 0,
     ) -> None:
         self.coherence_threshold = coherence_threshold
@@ -944,6 +946,8 @@ class WCTPhaseGNNClassifier(_BaseCWTGNNClassifier):
             early_stopping_patience=early_stopping_patience,
             device=device,
             seed=seed,
+            # NEW
+            channel_subset=channel_subset,
             verbose=verbose,
         )
 
@@ -1009,6 +1013,8 @@ class WCTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
         early_stopping_patience: int | None = None,
         device: str = "auto",
         seed: int = 42,
+        # NEW
+        channel_subset: list[int] | list[str] | None = None,
         verbose: int = 0,
     ) -> None:
         self.coherence_threshold = coherence_threshold
@@ -1046,6 +1052,8 @@ class WCTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
             early_stopping_patience=early_stopping_patience,
             device=device,
             seed=seed,
+            # NEW
+            channel_subset=channel_subset,
             verbose=verbose,
         )
 
