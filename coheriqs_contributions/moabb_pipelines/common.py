@@ -805,14 +805,55 @@ def _choose_validation_groups(
     rng: np.random.Generator,
 ) -> np.ndarray:
     """Choose a seeded group subset, preferring class coverage on both sides."""
-    all_classes = np.unique(y_idx)
+    candidate_limit = 4096
+    combination_count = math.comb(int(unique_groups.size), int(n_val_groups))
+    if combination_count <= candidate_limit:
+        candidates = itertools.combinations(
+            range(unique_groups.size),
+            n_val_groups,
+        )
+    else:
+        sampled_candidates = []
+        seen_candidates = set()
+        for _ in range(candidate_limit * 4):
+            candidate_indices = tuple(
+                sorted(
+                    int(index)
+                    for index in rng.choice(
+                        unique_groups.size,
+                        size=n_val_groups,
+                        replace=False,
+                    )
+                )
+            )
+            if candidate_indices in seen_candidates:
+                continue
+            seen_candidates.add(candidate_indices)
+            sampled_candidates.append(candidate_indices)
+            if len(sampled_candidates) == candidate_limit:
+                break
+        candidates = sampled_candidates
+
+    _, class_indices = np.unique(y_idx, return_inverse=True)
+    total_class_counts = np.bincount(class_indices)
+    group_class_counts = np.zeros(
+        (unique_groups.size, total_class_counts.size),
+        dtype=np.int64,
+    )
+    for group_index, group in enumerate(unique_groups):
+        group_mask = np.isin(validation_groups, [group])
+        group_class_counts[group_index] = np.bincount(
+            class_indices[group_mask],
+            minlength=total_class_counts.size,
+        )
+
     best_groups = None
     best_score = None
-    for candidate_indices in itertools.combinations(range(unique_groups.size), n_val_groups):
+    for candidate_indices in candidates:
         candidate = unique_groups[list(candidate_indices)]
-        val_mask = np.isin(validation_groups, candidate)
-        val_coverage = np.intersect1d(np.unique(y_idx[val_mask]), all_classes).size
-        train_coverage = np.intersect1d(np.unique(y_idx[~val_mask]), all_classes).size
+        val_class_counts = group_class_counts[list(candidate_indices)].sum(axis=0)
+        val_coverage = np.count_nonzero(val_class_counts)
+        train_coverage = np.count_nonzero(total_class_counts - val_class_counts)
         # The seeded tie-break makes equally useful subsets reproducible while
         # avoiding a systematic preference for the first sorted group values.
         score = (val_coverage, train_coverage, float(rng.random()))
@@ -1441,6 +1482,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.selected_training_state_ = None
         self.selected_checkpoint_metrics_ = {}
         self.selected_checkpoint_bundle_ = None
+        self.selected_learning_rates_ = None
         self.fit_summary_ = None
         self.stop_reason_ = None
         self.optimizer_ = None
@@ -1858,6 +1900,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         optimizer,
         alpha_optimizer,
         selector_specs: Sequence[_SelectorTrainingSpec],
+        capture_optimizer_state: bool,
     ) -> TrainingState:
         optimizers = {"main": optimizer}
         if alpha_optimizer is not None:
@@ -1866,10 +1909,12 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             epoch=int(epoch),
             optimizer_step_count=int(optimizer_step_count),
             model_state=deepcopy(self.model_.state_dict()),
-            optimizer_state=deepcopy(optimizer.state_dict()),
+            optimizer_state=(
+                deepcopy(optimizer.state_dict()) if capture_optimizer_state else None
+            ),
             alpha_optimizer_state=(
                 None
-                if alpha_optimizer is None
+                if alpha_optimizer is None or not capture_optimizer_state
                 else deepcopy(alpha_optimizer.state_dict())
             ),
             learning_rates={
@@ -1885,21 +1930,14 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     def _restore_training_state(
         self,
         state: TrainingState,
-        *,
-        optimizer,
-        alpha_optimizer,
     ) -> None:
         self.model_.load_state_dict(state.model_state)
-        optimizer.load_state_dict(state.optimizer_state)
-        if alpha_optimizer is not None:
-            if state.alpha_optimizer_state is None:
-                raise ValueError("Selected state is missing selector-alpha optimizer state.")
-            alpha_optimizer.load_state_dict(state.alpha_optimizer_state)
-        elif state.alpha_optimizer_state is not None:
-            raise ValueError("Selected state unexpectedly contains selector optimizer state.")
-        self.selected_training_state_ = deepcopy(state)
-        self.optimizer_ = optimizer
-        self.alpha_optimizer_ = alpha_optimizer
+        self.selected_training_state_ = (
+            state if state.optimizer_state is not None else None
+        )
+        self.selected_learning_rates_ = deepcopy(state.learning_rates)
+        self.optimizer_ = None
+        self.alpha_optimizer_ = None
         self.cumulative_optimizer_steps_ = int(state.optimizer_step_count)
 
     def _train_loop(
@@ -1917,6 +1955,10 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         alpha_optimizer=None,
     ) -> None:
         selector_specs = [] if selector_specs is None else list(selector_specs)
+        capture_optimizer_state = bool(
+            self.save_selected_checkpoint
+            and fit_context["fit_role"] == "final_refit"
+        )
         optimizer_step_batch_size = self._effective_optimizer_step_batch_size()
         optimizer_step_batch_mode = self.optimizer_step_batch_mode
         remainder_policy = self.optimizer_step_remainder_policy
@@ -1975,7 +2017,6 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         prev_auc = None
         no_improve_opportunities = 0
         cumulative_optimizer_steps = 0
-        last_state = None
         selected_candidate = None
         epochs_completed = 0
         stop_reason = "max_epochs"
@@ -2258,6 +2299,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                         optimizer=optimizer,
                         alpha_optimizer=alpha_optimizer,
                         selector_specs=selector_specs,
+                        capture_optimizer_state=capture_optimizer_state,
                     ),
                 )
                 if observation.opportunity:
@@ -2271,15 +2313,6 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     f"val_acc={val_result.accuracy:.4f} "
                     f"val_roc_auc={fmt_metric(val_result.roc_auc)}"
                 )
-            else:
-                last_state = self._capture_training_state(
-                    epoch=epoch + 1,
-                    optimizer_step_count=cumulative_optimizer_steps,
-                    optimizer=optimizer,
-                    alpha_optimizer=alpha_optimizer,
-                    selector_specs=selector_specs,
-                )
-
             epoch_time = time.perf_counter() - epoch_start
             aux_suffix = "" if avg_aux is None else f" edge_density={avg_aux:.6f}"
             epoch_message = (
@@ -2351,14 +2384,17 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             )
             selected_state = selected_candidate.state
         else:
-            if last_state is None:
+            if epochs_completed == 0:
                 raise RuntimeError("Training produced no checkpoint state.")
-            selected_state = last_state
-        self._restore_training_state(
-            selected_state,
-            optimizer=optimizer,
-            alpha_optimizer=alpha_optimizer,
-        )
+            selected_state = self._capture_training_state(
+                epoch=epochs_completed,
+                optimizer_step_count=cumulative_optimizer_steps,
+                optimizer=optimizer,
+                alpha_optimizer=alpha_optimizer,
+                selector_specs=selector_specs,
+                capture_optimizer_state=capture_optimizer_state,
+            )
+        self._restore_training_state(selected_state)
         self.best_epoch_ = selected_state.epoch
         self.best_val_loss_ = (
             None
@@ -2426,8 +2462,8 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             "selected_optimizer_step_count": self.cumulative_optimizer_steps_,
             "selected_learning_rates": (
                 None
-                if self.selected_training_state_ is None
-                else deepcopy(self.selected_training_state_.learning_rates)
+                if self.selected_learning_rates_ is None
+                else deepcopy(self.selected_learning_rates_)
             ),
             "selected_metrics": selected_metrics,
             "clean_train_metrics_available": clean_available,
@@ -2465,6 +2501,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             )
             self.selected_checkpoint_bundle_ = str(bundle)
             summary["checkpoint_bundle"] = str(bundle)
+        self.selected_training_state_ = None
+        self.optimizer_ = None
+        self.alpha_optimizer_ = None
         self.fit_summary_ = summary
         if is_experiment_logging_configured():
             log_event(

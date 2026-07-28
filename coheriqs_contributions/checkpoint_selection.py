@@ -163,12 +163,12 @@ class CandidateGenerator:
 
 @dataclass
 class TrainingState:
-    """Tensor-bearing state needed to continue from a selected epoch."""
+    """Selected model state plus optional optimizer state for a saved bundle."""
 
     epoch: int
     optimizer_step_count: int
     model_state: dict
-    optimizer_state: dict
+    optimizer_state: dict | None
     alpha_optimizer_state: dict | None
     learning_rates: dict[str, list[float]]
     selector_state: dict[str, object] = field(default_factory=dict)

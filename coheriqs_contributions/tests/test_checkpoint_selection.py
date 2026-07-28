@@ -306,7 +306,7 @@ def test_clean_evaluation_is_deterministic_and_restores_model_state_and_mode():
         assert torch.equal(value, estimator.model_.state_dict()[name])
 
 
-def test_fit_restores_selected_optimizer_state_and_emits_exact_summary():
+def test_fit_discards_unrequested_optimizer_state_and_emits_exact_summary():
     estimator = _TinyClassifier(epochs=2)
     X, y = _tiny_data()
     estimator.fit(
@@ -325,17 +325,9 @@ def test_fit_restores_selected_optimizer_state_and_emits_exact_summary():
         },
     )
     assert estimator.best_epoch_ in {1, 2}
-    restored = estimator.optimizer_.state_dict()
-    selected = estimator.selected_training_state_.optimizer_state
-    assert restored["param_groups"] == selected["param_groups"]
-    assert restored["state"].keys() == selected["state"].keys()
-    for key in restored["state"]:
-        for name, value in restored["state"][key].items():
-            expected = selected["state"][key][name]
-            if torch.is_tensor(value):
-                assert torch.equal(value, expected)
-            else:
-                assert value == expected
+    assert estimator.optimizer_ is None
+    assert estimator.alpha_optimizer_ is None
+    assert estimator.selected_training_state_ is None
     assert estimator.fit_summary_["fit_id"] == "fit-1"
     assert estimator.fit_summary_["is_final_refit"] is True
     assert estimator.fit_summary_["selected_epoch"] == estimator.best_epoch_
@@ -391,6 +383,10 @@ def test_selected_bundle_is_final_refit_only_and_opt_in(tmp_path):
     )
     assert (tmp_path / "final" / "selected.pt").is_file()
     assert (tmp_path / "final" / "selected.json").is_file()
+    payload, _ = load_checkpoint_bundle(tmp_path / "final")
+    assert payload["training_state"]["optimizer_state"] is not None
+    assert final.optimizer_ is None
+    assert final.selected_training_state_ is None
 
 
 def test_checkpoint_bundle_completion_and_loading(tmp_path):

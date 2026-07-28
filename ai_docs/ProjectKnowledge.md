@@ -67,13 +67,26 @@ instead of failing the run. Per-group effective configuration and the optional
 
 - Checkpointing uses validation **loss**; MOABB reports outer **ROC-AUC** — they
   can disagree on small val splits.
-- No reusable on-disk CWT/noise-bank cache yet: every `fit` / `predict`
-  recomputes CWT (noise banks add another pass). A future cache must be
-  keyed from the actual transform inputs and configuration; fold-specific
-  normalization makes raw subject/session identity alone insufficient.
-  Per-execution MNE scratch state is deliberately not that cache.
+- Checkpoint candidate snapshots remain on the model's device. `disabled` mode
+  retains one; candidate modes retain at most
+  `min(eligible_epochs, sum(generator.top_k))` distinct epoch states. A
+  model-only snapshot is the tensor size of `model.state_dict()`. A saved Adam
+  continuation snapshot adds approximately twice the trainable-parameter bytes.
+  For the active 22-channel, two-class WCT-Evidence grid this is about 7.0 KiB
+  model-only or 20.1 KiB with Adam; even 180 distinct candidates are about
+  1.23 MiB or 3.54 MiB respectively. Recalculate before using substantially
+  wider models or large `top_k` values.
+- Full optimizer snapshots are retained only while selecting a final refit with
+  `save_selected_checkpoint=True`, then written to the continuation bundle and
+  released. Other fits retain model-only candidates and release them after
+  selection.
+- Optional input-CWT and noise-bank caches share `wct_cache_root`. Input CWT
+  entries are session-level memory-mapped arrays filled incrementally by trial
+  identity; noise-bank entries are deterministic whole-bank arrays.
 - Grouped validation needs groups/metadata in `fit()`; without them the trainer
-  falls back to a random stratified split.
+  falls back to a random stratified split. Group-subset selection examines all
+  combinations only up to 4,096; larger spaces use a seeded uniform sample of
+  at most 4,096 distinct subsets.
 - EEG/MOABB artifacts live under `MNE_DATA` / `MOABB_RESULTS`. Manual runs use
   the user MNE configuration; managed runs isolate `MOABB_RESULTS` per execution.
   `run_wct_gnn.py` writes uniquely suffixed HDF5 plus CSV/Markdown companions.
