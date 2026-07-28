@@ -41,8 +41,10 @@ from coheriqs_contributions.experiment_logging import (
     log_event,
 )
 from coheriqs_contributions.wct_cache import (
-    TensorCache,
-    exact_array_identity,
+    NoiseBankHandle,
+    SessionCWTCache,
+    array_digest,
+    load_or_compute_noise_bank,
 )
 
 
@@ -1026,9 +1028,71 @@ class CWTCacheStats:
     misses: int = 0
 
 
+def pack_xcwt(
+    raw: torch.Tensor | np.ndarray,
+    real: torch.Tensor | np.ndarray,
+    imag: torch.Tensor | np.ndarray,
+) -> np.ndarray:
+    raw_value = np.asarray(raw, dtype=np.float32)
+    real_value = np.asarray(real, dtype=np.float32)
+    imag_value = np.asarray(imag, dtype=np.float32)
+    if real_value.shape != imag_value.shape:
+        raise ValueError(
+            f"Real/imaginary CWT shapes differ: {real_value.shape} != "
+            f"{imag_value.shape}."
+        )
+    if raw_value.shape != real_value.shape[:-1]:
+        raise ValueError(
+            f"Raw shape {raw_value.shape} does not match CWT shape "
+            f"{real_value.shape}."
+        )
+    packed = np.empty(
+        (*raw_value.shape, real_value.shape[-1] + 1),
+        dtype=np.complex64,
+    )
+    packed[..., 0] = raw_value
+    packed[..., 1:] = real_value + 1j * imag_value
+    return packed
+
+
+def unpack_xcwt(
+    packed: np.ndarray,
+    freqs: np.ndarray,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    value = np.asarray(packed)
+    if value.dtype != np.dtype(np.complex64) or value.ndim != 4:
+        raise ValueError(
+            f"Packed session CWT must be complex64 [N,C,T,F+1], got "
+            f"{value.shape}/{value.dtype}."
+        )
+    raw = torch.from_numpy(np.ascontiguousarray(value[..., 0].real)).float()
+    cwt = value[..., 1:]
+    real = torch.from_numpy(np.ascontiguousarray(cwt.real)).float()
+    imag = torch.from_numpy(np.ascontiguousarray(cwt.imag)).float()
+    frequency_tensor = torch.from_numpy(
+        np.ascontiguousarray(freqs, dtype=np.float32)
+    ).expand(value.shape[0], -1)
+    return raw, real, imag, frequency_tensor
+
+
+def unpack_noise_xcwt(
+    packed: np.ndarray,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    value = np.asarray(packed)
+    if value.dtype != np.dtype(np.complex64) or value.ndim != 3:
+        raise ValueError(
+            f"Packed noise bank must be complex64 [N,T,F+1], got "
+            f"{value.shape}/{value.dtype}."
+        )
+    raw = torch.from_numpy(value[..., 0].real)
+    cwt = value[..., 1:]
+    return raw, torch.from_numpy(cwt.real), torch.from_numpy(cwt.imag)
+
+
 def compute_cached_cwt_real_imag_tensors(
     X: np.ndarray,
     *,
+    metadata,
     sampling_rate: int,
     highest: float,
     lowest: float,
@@ -1041,24 +1105,54 @@ def compute_cached_cwt_real_imag_tensors(
     tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     CWTCacheStats,
 ]:
-    """Load or compute exact per-trial unnormalized float32 CWT tensors."""
+    """Load or incrementally fill unnormalized packed subject-session CWTs."""
 
     X = validate_eeg_X(X)
+    if metadata is None:
+        raise ValueError("Session CWT caching requires sample metadata.")
+    metadata = metadata.reset_index(drop=True)
+    if len(metadata) != X.shape[0]:
+        raise ValueError(
+            f"Metadata length {len(metadata)} != input length {X.shape[0]}."
+        )
+    required_columns = {
+        "dataset",
+        "subject",
+        "session",
+        "session_trial_index",
+        "session_trial_count",
+    }
+    missing_columns = sorted(required_columns.difference(metadata.columns))
+    if missing_columns:
+        raise KeyError(
+            f"Session CWT metadata is missing columns: {missing_columns}."
+        )
+
     output_time = int(cwt_resample_n_time or X.shape[2])
-    cache = TensorCache(cache_root, kind="input-cwt")
+    cache = SessionCWTCache(cache_root)
+    _, frequencies = transform_fn(
+        np.ones(X.shape[2], dtype=np.float32),
+        sampling_rate,
+        highest,
+        lowest,
+        nfreqs=nfreqs,
+    )
+    frequencies = np.ascontiguousarray(frequencies, dtype=np.float32)
     transform_fields = {
         "sampling_rate": int(sampling_rate),
         "highest": float(highest),
         "lowest": float(lowest),
         "nfreqs": int(nfreqs),
+        "channels": int(X.shape[1]),
         "input_time": int(X.shape[2]),
         "output_time": output_time,
-        "storage_dtype": np.dtype(np.float32).str,
+        "frequency_digest": array_digest(frequencies),
+        "storage_dtype": np.dtype(np.complex64).str,
     }
-    raw_trials: list[np.ndarray] = []
-    real_trials: list[np.ndarray] = []
-    imag_trials: list[np.ndarray] = []
-    frequency_trials: list[np.ndarray] = []
+    packed_batch = np.empty(
+        (X.shape[0], X.shape[1], output_time, nfreqs + 1),
+        dtype=np.complex64,
+    )
     hits = misses = 0
 
     with cwt_progress_context(
@@ -1070,12 +1164,29 @@ def compute_cached_cwt_real_imag_tensors(
         output_time=output_time,
         nfreqs=int(nfreqs),
     ):
-        for trial in X:
-            trial_value = np.ascontiguousarray(trial, dtype=np.float32)
+        grouped = metadata.groupby(
+            ["dataset", "subject", "session"],
+            sort=False,
+            dropna=False,
+        ).indices
+        for (dataset, subject, session), group_positions in grouped.items():
+            positions = np.asarray(group_positions, dtype=np.int64)
+            group_metadata = metadata.iloc[positions]
+            counts = np.unique(
+                group_metadata["session_trial_count"].to_numpy(dtype=np.int64)
+            )
+            if counts.size != 1 or int(counts[0]) <= 0:
+                raise ValueError(
+                    "session_trial_count must be one positive value per session."
+                )
+            session_size = int(counts[0])
+            session_rows = group_metadata["session_trial_index"].to_numpy(
+                dtype=np.int64
+            )
 
-            def produce(current: np.ndarray = trial_value) -> Mapping[str, np.ndarray]:
-                raw, real, imag, freqs = compute_cwt_real_imag_tensors(
-                    current[None, ...],
+            def produce(missing_positions: np.ndarray) -> np.ndarray:
+                raw, real, imag, _ = compute_cwt_real_imag_tensors(
+                    X[positions[missing_positions]],
                     sampling_rate=sampling_rate,
                     highest=highest,
                     lowest=lowest,
@@ -1084,37 +1195,26 @@ def compute_cached_cwt_real_imag_tensors(
                     transform_fn=transform_fn,
                     verbose=0,
                 )
-                return {
-                    "raw": raw[0].numpy(),
-                    "real": real[0].numpy(),
-                    "imag": imag[0].numpy(),
-                    "freqs": freqs[0].numpy(),
-                }
+                return pack_xcwt(raw.numpy(), real.numpy(), imag.numpy())
 
-            result = cache.load_or_compute(
-                key_fields={
-                    "trial": exact_array_identity(trial_value),
-                    "transform": transform_fields,
+            result = cache.load_or_fill(
+                dataset=dataset,
+                subject=subject,
+                session=session,
+                parameter_fields={
+                    **transform_fields,
+                    "session_size": session_size,
                 },
-                expected_names=("raw", "real", "imag", "freqs"),
+                session_size=session_size,
+                requested_session_rows=session_rows,
+                packed_row_shape=(X.shape[1], output_time, nfreqs + 1),
                 producer=produce,
             )
-            hits += int(result.hit)
-            misses += int(not result.hit)
-            raw_trials.append(result.tensors["raw"])
-            real_trials.append(result.tensors["real"])
-            imag_trials.append(result.tensors["imag"])
-            frequency_trials.append(result.tensors["freqs"])
+            packed_batch[positions] = result.values
+            hits += result.hits
+            misses += result.misses
 
-    reference_freqs = frequency_trials[0]
-    if any(not np.array_equal(reference_freqs, item) for item in frequency_trials[1:]):
-        raise ValueError("CWT frequency vectors differ between cached trial entries.")
-    tensors = (
-        torch.from_numpy(np.stack(raw_trials)).float(),
-        torch.from_numpy(np.stack(real_trials)).float(),
-        torch.from_numpy(np.stack(imag_trials)).float(),
-        torch.from_numpy(np.stack(frequency_trials)).float(),
-    )
+    tensors = unpack_xcwt(packed_batch, frequencies)
     return tensors, CWTCacheStats(hits=hits, misses=misses)
 
 
@@ -1131,7 +1231,10 @@ def compute_paired_cwt_noise_bank(
     seed: int,
     verbose: int,
     cache_root: str | os.PathLike[str] | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    NoiseBankHandle,
+]:
     """Build matched raw/CWT noise entries from the same white-noise segments."""
 
     if bank_size <= 0:
@@ -1139,7 +1242,9 @@ def compute_paired_cwt_noise_bank(
     if segment_length <= 0:
         raise ValueError("Noise segment length must be > 0.")
 
-    def produce() -> Mapping[str, np.ndarray]:
+    output_time = int(cwt_resample_n_time or segment_length)
+
+    def produce() -> np.ndarray:
         rng = np.random.default_rng(int(seed))
         noise = rng.standard_normal((bank_size, 1, segment_length)).astype(np.float32)
         raw_noise, cwt_real_noise, cwt_imag_noise, _ = compute_cwt_real_imag_tensors(
@@ -1152,39 +1257,37 @@ def compute_paired_cwt_noise_bank(
             transform_fn=transform_fn,
             verbose=verbose,
         )
-        return {
-            "raw": raw_noise[:, 0, :].numpy(),
-            "real": cwt_real_noise[:, 0, :, :].numpy(),
-            "imag": cwt_imag_noise[:, 0, :, :].numpy(),
-        }
+        return pack_xcwt(
+            raw_noise[:, 0, :].numpy(),
+            cwt_real_noise[:, 0, :, :].numpy(),
+            cwt_imag_noise[:, 0, :, :].numpy(),
+        )
 
     if cache_root is None:
-        tensors = produce()
+        handle = NoiseBankHandle(
+            packed=produce(),
+            hit=False,
+            key="uncached",
+            path=None,
+        )
     else:
-        bit_generator = np.random.default_rng(int(seed)).bit_generator
-        result = TensorCache(cache_root, kind="noise-bank").load_or_compute(
+        handle = load_or_compute_noise_bank(
+            cache_root,
             key_fields={
                 "seed": int(seed),
-                "bit_generator": (
-                    f"{type(bit_generator).__module__}.{type(bit_generator).__qualname__}"
-                ),
                 "bank_size": int(bank_size),
                 "segment_length": int(segment_length),
                 "sampling_rate": int(sampling_rate),
                 "highest": float(highest),
                 "lowest": float(lowest),
                 "nfreqs": int(nfreqs),
-                "output_time": int(cwt_resample_n_time or segment_length),
-                "storage_dtype": np.dtype(np.float32).str,
+                "output_time": output_time,
+                "storage_dtype": np.dtype(np.complex64).str,
             },
-            expected_names=("raw", "real", "imag"),
+            expected_shape=(bank_size, output_time, nfreqs + 1),
             producer=produce,
         )
-        tensors = result.tensors
-    return tuple(
-        torch.from_numpy(np.array(tensors[name], copy=True)).float().contiguous()
-        for name in ("raw", "real", "imag")
-    )
+    return unpack_noise_xcwt(handle.packed), handle
 
 
 def augment_paired_cwt_batch(
@@ -1454,6 +1557,11 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):
         raise NotImplementedError
 
+    def _prepare_features_with_metadata(
+        self, X: np.ndarray, *, fit: bool, train_idx=None, metadata=None
+    ):
+        return self._prepare_features(X, fit=fit, train_idx=train_idx)
+
     def _build_model_from_features(self, features, n_classes: int, **kwargs) -> nn.Module:
         raise NotImplementedError
 
@@ -1520,6 +1628,10 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         metadata=None,
         fit_context: Mapping[str, object] | None = None,
     ):
+        if getattr(X, "_moabb_metadata_array", False):
+            if metadata is None:
+                metadata = X.metadata
+            X = X.X
         X = validate_eeg_X(X)
         self._validate_batch_control_params()
         checkpoint_controller = CheckpointController(
@@ -1598,7 +1710,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 "validation split."
             )
 
-        features = self._prepare_features(X, fit=True, train_idx=train_idx)
+        features = self._prepare_features_with_metadata(
+            X, fit=True, train_idx=train_idx, metadata=metadata
+        )
         tensors = to_float_tensors(features)
         y_tensor = torch.from_numpy(y_idx).long()
 
@@ -2471,8 +2585,16 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     def _predict_logits(self, X) -> np.ndarray:
         if self.model_ is None or self.device_ is None:
             raise ValueError("Model has not been fitted yet.")
+        metadata = None
+        if getattr(X, "_moabb_metadata_array", False):
+            metadata = X.metadata
+            X = X.X
         X = validate_eeg_X(X)
-        tensors = to_float_tensors(self._prepare_features(X, fit=False))
+        tensors = to_float_tensors(
+            self._prepare_features_with_metadata(
+                X, fit=False, metadata=metadata
+            )
+        )
         loader = DataLoader(
             TensorDataset(*tensors),
             batch_size=self.batch_size,

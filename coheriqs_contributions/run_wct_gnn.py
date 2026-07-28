@@ -61,6 +61,7 @@ from coheriqs_contributions.experiment_logging import (
     serialize_event_data,
 )
 from coheriqs_contributions.runtime_context import collect_runtime_context
+from coheriqs_contributions.wct_cache import refresh_wct_cache
 
 
 log = logging.getLogger(__name__)
@@ -601,20 +602,12 @@ def _apply_fixed_param_overrides(pipelines, run_param_grid, fixed_overrides):
 
 
 def _apply_cache_configuration(pipelines, parameters):
-    cache_parameters = {
-        "input_cwt_cache_root": parameters.input_cwt_cache_root,
-        "noise_bank_cache_root": parameters.noise_bank_cache_root,
-    }
-    configured = {name: value for name, value in cache_parameters.items() if value}
-    if not configured:
+    if not parameters.wct_cache_root:
         return
     for estimator in pipelines.values():
         supported = estimator.get_params(deep=False)
-        applicable = {
-            name: value for name, value in configured.items() if name in supported
-        }
-        if applicable:
-            estimator.set_params(**applicable)
+        if "wct_cache_root" in supported:
+            estimator.set_params(wct_cache_root=parameters.wct_cache_root)
 
 
 def _resolve_eval_modes(global_hyperparam_fit_mode):
@@ -1053,14 +1046,14 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         help="Optional free-form note describing this run's purpose.",
     )
     parser.add_argument(
-        "--input-cwt-cache-root",
+        "--wct-cache-root",
         default=None,
-        help="Optional shared root for per-trial unnormalized input CWT entries.",
+        help="Optional shared root for session CWT and deterministic noise caches.",
     )
     parser.add_argument(
-        "--noise-bank-cache-root",
-        default=None,
-        help="Optional shared root for deterministic paired noise-bank entries.",
+        "--refresh-wct-cache",
+        action="store_true",
+        help="Clear the configured WCT caches once before this run.",
     )
     add_console_arguments(parser)
     parser.add_argument(
@@ -1107,6 +1100,23 @@ def main(parameters: argparse.Namespace) -> None:
         )
     except ValueError as exc:
         raise RunConfigurationError(str(exc)) from exc
+    fixed_cache_root = fixed_overrides.get("wct_cache_root")
+    if (
+        parameters.wct_cache_root
+        and fixed_cache_root
+        and Path(parameters.wct_cache_root).resolve()
+        != Path(fixed_cache_root).resolve()
+    ):
+        raise RunConfigurationError(
+            "--wct-cache-root conflicts with the wct_cache_root fixed parameter."
+        )
+    if parameters.wct_cache_root is None and fixed_cache_root is not None:
+        parameters.wct_cache_root = fixed_cache_root
+    if parameters.refresh_wct_cache and not parameters.wct_cache_root:
+        raise RunConfigurationError(
+            "--refresh-wct-cache requires --wct-cache-root or a fixed "
+            "wct_cache_root parameter."
+        )
     pipeline_runs = _build_pipeline_runs(
         pipeline_names=selected_pipelines,
         inner_group_mode=parameters.inner_group_mode,
@@ -1162,6 +1172,15 @@ def main(parameters: argparse.Namespace) -> None:
             EventCategory.CONFIG,
             f"Fixed parameter overrides: {fixed_overrides}",
         )
+    if parameters.wct_cache_root:
+        log_event(
+            log,
+            EventCategory.CONFIG,
+            f"WCT cache root: {Path(parameters.wct_cache_root).resolve()}",
+        )
+    if parameters.refresh_wct_cache:
+        refresh_wct_cache(parameters.wct_cache_root)
+        log_event(log, EventCategory.STATUS, "WCT caches refreshed.")
 
     dataset = BNCI2014_001()
     dataset.subject_list = parameters.subjects

@@ -242,6 +242,7 @@ class WithinSessionEvaluation(BaseEvaluation):
                             y_[train],
                             tracker if _carbonfootprint else None,
                             fit_kwargs=fit_kwargs,
+                            sample_metadata=train_meta,
                         )
                         durations.append(duration)
 
@@ -280,12 +281,18 @@ class WithinSessionEvaluation(BaseEvaluation):
                                 cvclf,
                                 X_[test],
                                 y_[test],
+                                sample_metadata=meta_.iloc[test],
                             )
                             if _carbonfootprint:
                                 self._attach_emissions(res, emissions, task_name)
                             yield res
                         else:
-                            score = scorer(cvclf, X_[test], y_[test])
+                            estimator_input = self._prepare_estimator_input(
+                                cvclf,
+                                X_[test],
+                                meta_.iloc[test],
+                            )
+                            score = scorer(cvclf, estimator_input, y_[test])
                             acc.append(score)
 
                     if _carbonfootprint:
@@ -494,6 +501,7 @@ class CrossSessionEvaluation(BaseEvaluation):
                         y[train],
                         tracker if _carbonfootprint else None,
                         fit_kwargs=fit_kwargs,
+                        sample_metadata=train_meta,
                     )
 
                     self._maybe_store_inner_cv_results(
@@ -529,6 +537,7 @@ class CrossSessionEvaluation(BaseEvaluation):
                         cvclf,
                         X[test],
                         y[test],
+                        sample_metadata=metadata.iloc[test],
                     )
 
                     if _carbonfootprint:
@@ -758,6 +767,7 @@ class CrossSubjectEvaluation(BaseEvaluation):
                     y[train],
                     tracker if _carbonfootprint else None,
                     fit_kwargs=fit_kwargs,
+                    sample_metadata=train_meta,
                 )
 
                 self._maybe_store_inner_cv_results(
@@ -799,6 +809,7 @@ class CrossSubjectEvaluation(BaseEvaluation):
                         cvclf,
                         X[test[ix]],
                         y[test[ix]],
+                        sample_metadata=metadata.iloc[test[ix]],
                     )
 
                     if _carbonfootprint:
@@ -987,6 +998,7 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
                             y[train],
                             tracker=None,
                             fit_kwargs=fit_kwargs,
+                            sample_metadata=train_meta,
                         )
                         self._maybe_store_inner_cv_results(
                             search_model,
@@ -1062,6 +1074,7 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
                 fold["y"][fold["train"]],
                 tracker if _carbonfootprint else None,
                 fit_kwargs=final_fit_kwargs,
+                sample_metadata=fold["metadata"].iloc[fold["train"]],
             )
 
             self._maybe_save_model_cv(
@@ -1087,6 +1100,7 @@ class GlobalFutureSessionEvaluation(BaseEvaluation):
                 final_model,
                 fold["X"][fold["test"]],
                 fold["y"][fold["test"]],
+                sample_metadata=fold["metadata"].iloc[fold["test"]],
             )
 
             if _carbonfootprint:

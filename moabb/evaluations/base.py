@@ -2,10 +2,12 @@ import logging
 import math
 import inspect
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from time import perf_counter
 from uuid import uuid4
 from warnings import warn
 
+import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from sklearn.base import BaseEstimator
@@ -32,6 +34,41 @@ from moabb.utils import verbose
 search_methods, optuna_available = check_search_available()
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class MetadataArray:
+    """Sample-aligned data and metadata for explicitly supporting estimators."""
+
+    _moabb_metadata_array = True
+    X: object
+    metadata: pd.DataFrame
+
+    def __post_init__(self):
+        if len(self.X) != len(self.metadata):
+            raise ValueError(
+                f"X length {len(self.X)} != metadata length {len(self.metadata)}."
+            )
+
+    @property
+    def shape(self):
+        return self.X.shape
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, key):
+        row_key = key
+        if isinstance(key, tuple):
+            row_key, *remaining = key
+            if any(item is not Ellipsis and item != slice(None) for item in remaining):
+                raise IndexError("MetadataArray supports sample-axis indexing only.")
+        positions = np.atleast_1d(np.arange(len(self))[row_key])
+        return type(self)(
+            self.X[positions],
+            self.metadata.iloc[positions].reset_index(drop=True),
+        )
+
 
 class _SplitLoggingCV:
     """Wrap a CV object and log train/test indices for each split."""
@@ -339,12 +376,38 @@ class BaseEvaluation(ABC):
         )
         if subjects is not None:
             kwargs["subjects"] = subjects
-        return self.paradigm.get_data(**kwargs)
+        X, y, metadata = self.paradigm.get_data(**kwargs)
+        metadata = metadata.copy()
+        metadata["dataset"] = str(dataset.code)
+        session_groups = metadata.groupby(
+            ["subject", "session"],
+            sort=False,
+            dropna=False,
+        )
+        metadata["session_trial_index"] = session_groups.cumcount().astype(np.int64)
+        metadata["session_trial_count"] = session_groups["session"].transform(
+            "size"
+        ).astype(np.int64)
+        return X, y, metadata
 
     @staticmethod
     def _get_nchan(X):
         """Extract number of channels from data (Epochs or ndarray)."""
         return _get_nchan(X)
+
+    @staticmethod
+    def _accepts_metadata_array(model):
+        estimator = getattr(model, "estimator", model)
+        if hasattr(estimator, "steps"):
+            return False
+        return bool(getattr(estimator, "accepts_metadata_array", False))
+
+    def _prepare_estimator_input(self, model, X, sample_metadata):
+        if not self._accepts_metadata_array(model):
+            return X
+        if sample_metadata is None:
+            raise ValueError("Metadata-aware estimator input requires sample metadata.")
+        return MetadataArray(X, sample_metadata.reset_index(drop=True))
 
     def _build_scored_result(
         self,
@@ -359,6 +422,7 @@ class BaseEvaluation(ABC):
         model,
         X_test,
         y_test,
+        sample_metadata=None,
         split_metadata=None,
         **extra,
     ):
@@ -382,14 +446,27 @@ class BaseEvaluation(ABC):
             **metadata,
         )
         try:
-            return _score_and_update(res, scorer, model, X_test, y_test)
+            estimator_input = self._prepare_estimator_input(
+                model,
+                X_test,
+                sample_metadata,
+            )
+            return _score_and_update(res, scorer, model, estimator_input, y_test)
         except ValueError as err:
             if self.error_score == "raise":
                 raise err
             res["score"] = self.error_score
             return res
 
-    def _fit_cv(self, model, X_train, y_train, tracker=None, fit_kwargs=None):
+    def _fit_cv(
+        self,
+        model,
+        X_train,
+        y_train,
+        tracker=None,
+        fit_kwargs=None,
+        sample_metadata=None,
+    ):
         """Fit a model for a CV fold with optional CodeCarbon tracking."""
         task_name = None
         emissions = math.nan
@@ -398,7 +475,12 @@ class BaseEvaluation(ABC):
             tracker.start_task(task_name)
         t_start = perf_counter()
         fit_kwargs = {} if fit_kwargs is None else fit_kwargs
-        model.fit(X_train, y_train, **fit_kwargs)
+        estimator_input = self._prepare_estimator_input(
+            model,
+            X_train,
+            sample_metadata,
+        )
+        model.fit(estimator_input, y_train, **fit_kwargs)
         duration = perf_counter() - t_start
         if tracker is not None:
             emissions_data = tracker.stop_task()

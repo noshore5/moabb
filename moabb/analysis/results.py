@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mne import get_config, set_config
 from mne.datasets.utils import _get_path
-from sklearn.base import BaseEstimator
+from sklearn.base import BaseEstimator, clone
 from sklearn.pipeline import Pipeline
 
 from moabb.utils import _open_lock_hdf5
@@ -24,9 +24,32 @@ except ImportError:
     _carbonfootprint = False
 
 
+def _canonical_result_estimator(obj):
+    if not isinstance(obj, BaseEstimator):
+        return obj
+    replacements = {}
+    candidates = {"": obj}
+    candidates.update(
+        (name, value)
+        for name, value in obj.get_params(deep=True).items()
+        if isinstance(value, BaseEstimator)
+    )
+    for prefix, estimator in candidates.items():
+        ignored = getattr(estimator, "_moabb_result_ignored_params", None)
+        if ignored:
+            for name, canonical_value in ignored.items():
+                key = f"{prefix}__{name}" if prefix else name
+                replacements[key] = canonical_value
+    if not replacements:
+        return obj
+    canonical = clone(obj)
+    canonical.set_params(**replacements)
+    return canonical
+
+
 def get_string_rep(obj):
     if issubclass(type(obj), BaseEstimator):
-        str_repr = repr(obj.get_params())
+        str_repr = repr(_canonical_result_estimator(obj).get_params())
     else:
         str_repr = repr(obj)
     if "<lambda> at " in str_repr:

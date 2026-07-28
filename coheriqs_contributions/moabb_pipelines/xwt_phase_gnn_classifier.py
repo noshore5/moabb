@@ -244,6 +244,8 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
     """Shared sklearn wrapper logic for XWT/WCT CWT-tensor GNNs."""
 
     _estimator_type = "classifier"
+    accepts_metadata_array = True
+    _moabb_result_ignored_params = {"wct_cache_root": None}
     model_label = "CWT-GNN"
 
     def _init_cwt_gnn_classifier(
@@ -265,8 +267,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         noise_strength: float = 0.0,
         noise_bank_size: int = 128,
         noise_bank_seed: int | None = None,
-        input_cwt_cache_root: str | None = None,
-        noise_bank_cache_root: str | None = None,
+        wct_cache_root: str | None = None,
         validation_split: float | list | tuple | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
@@ -295,12 +296,13 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         self.noise_strength = noise_strength
         self.noise_bank_size = noise_bank_size
         self.noise_bank_seed = noise_bank_seed
-        self.input_cwt_cache_root = input_cwt_cache_root
-        self.noise_bank_cache_root = noise_bank_cache_root
+        self.wct_cache_root = wct_cache_root
         self.transform_ = None
         self.X_mean_: float | None = None
         self.X_std_: float | None = None
         self.noise_bank_: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+        self.noise_bank_handle_ = None
+        self.normalization_basis_ = None
         self.noise_channel_std_: torch.Tensor | None = None
         self.noise_bank_device_: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self.noise_channel_std_device_: torch.Tensor | None = None
@@ -331,7 +333,16 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             verbose=verbose,
         )
 
-    def _prepare_features(self, X: np.ndarray, *, fit: bool, train_idx=None):
+    def _prepare_features_with_metadata(
+        self, X: np.ndarray, *, fit: bool, train_idx=None, metadata=None
+    ):
+        return self._prepare_features(
+            X, fit=fit, train_idx=train_idx, metadata=metadata
+        )
+
+    def _prepare_features(
+        self, X: np.ndarray, *, fit: bool, train_idx=None, metadata=None
+    ):
         if fit:
             self._validate_noise_augmentation_params()
         X = np.asarray(X, dtype=np.float32)
@@ -344,7 +355,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
 
         if self.transform_ is None:
             self.transform_, _ = resolve_coherence_utils()
-        input_cache_root = self.input_cwt_cache_root
+        input_cache_root = self.wct_cache_root
         if input_cache_root:
             features, self.input_cwt_cache_stats_ = (
                 compute_cached_cwt_real_imag_tensors(
@@ -356,21 +367,23 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
                     cwt_resample_n_time=self.cwt_resample_n_time,
                     transform_fn=self.transform_,
                     cache_root=input_cache_root,
+                    metadata=metadata,
                     verbose=self.verbose,
                 )
             )
             if self.normalize_input:
-                ones_features, _ = compute_cached_cwt_real_imag_tensors(
-                    np.ones((1, 1, X.shape[2]), dtype=np.float32),
-                    sampling_rate=self.sampling_rate,
-                    highest=self.highest,
-                    lowest=self.lowest,
-                    nfreqs=self.nfreqs,
-                    cwt_resample_n_time=self.cwt_resample_n_time,
-                    transform_fn=self.transform_,
-                    cache_root=input_cache_root,
-                    verbose=0,
-                )
+                if fit or self.normalization_basis_ is None:
+                    self.normalization_basis_ = compute_cwt_real_imag_tensors(
+                        np.ones((1, 1, X.shape[2]), dtype=np.float32),
+                        sampling_rate=self.sampling_rate,
+                        highest=self.highest,
+                        lowest=self.lowest,
+                        nfreqs=self.nfreqs,
+                        cwt_resample_n_time=self.cwt_resample_n_time,
+                        transform_fn=self.transform_,
+                        verbose=0,
+                    )
+                ones_features = self.normalization_basis_
                 denominator = float(self.X_std_) + 1e-8
                 features = (
                     (features[0] - float(self.X_mean_) * ones_features[0])
@@ -427,6 +440,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         train_idx,
     ) -> None:
         self.noise_bank_ = None
+        self.noise_bank_handle_ = None
         self.noise_channel_std_ = None
         self.noise_bank_device_ = None
         self.noise_channel_std_device_ = None
@@ -446,7 +460,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             if self.noise_bank_seed is not None
             else int(self.seed or 0) + 10_003
         )
-        self.noise_bank_ = compute_paired_cwt_noise_bank(
+        self.noise_bank_, self.noise_bank_handle_ = compute_paired_cwt_noise_bank(
             bank_size=int(self.noise_bank_size),
             segment_length=int(X.shape[2]),
             sampling_rate=self.sampling_rate,
@@ -457,7 +471,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             transform_fn=self.transform_,
             seed=bank_seed,
             verbose=self.verbose,
-            cache_root=self.noise_bank_cache_root,
+            cache_root=self.wct_cache_root,
         )
 
     def _prepare_training_state_on_device(self) -> None:
@@ -528,8 +542,7 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
         noise_strength: float = 0.0,
         noise_bank_size: int = 128,
         noise_bank_seed: int | None = None,
-        input_cwt_cache_root: str | None = None,
-        noise_bank_cache_root: str | None = None,
+        wct_cache_root: str | None = None,
         validation_split: float | list | tuple | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
@@ -570,8 +583,7 @@ class XWTPhaseGNNClassifier(_BaseCWTGNNClassifier):
             noise_strength=noise_strength,
             noise_bank_size=noise_bank_size,
             noise_bank_seed=noise_bank_seed,
-            input_cwt_cache_root=input_cwt_cache_root,
-            noise_bank_cache_root=noise_bank_cache_root,
+            wct_cache_root=wct_cache_root,
             validation_split=validation_split,
             validation_group_column=validation_group_column,
             early_stopping_patience=early_stopping_patience,
@@ -871,8 +883,7 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
         noise_strength: float = 0.0,
         noise_bank_size: int = 128,
         noise_bank_seed: int | None = None,
-        input_cwt_cache_root: str | None = None,
-        noise_bank_cache_root: str | None = None,
+        wct_cache_root: str | None = None,
         validation_split: float | list | tuple | None = 0.2,
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
@@ -914,8 +925,7 @@ class XWTPhaseGNNV2Classifier(_BaseCWTGNNClassifier):
             noise_strength=noise_strength,
             noise_bank_size=noise_bank_size,
             noise_bank_seed=noise_bank_seed,
-            input_cwt_cache_root=input_cwt_cache_root,
-            noise_bank_cache_root=noise_bank_cache_root,
+            wct_cache_root=wct_cache_root,
             validation_split=validation_split,
             validation_group_column=validation_group_column,
             early_stopping_patience=early_stopping_patience,

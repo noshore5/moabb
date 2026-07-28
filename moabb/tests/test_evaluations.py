@@ -5,6 +5,7 @@ import warnings
 from collections import OrderedDict
 
 import numpy as np
+import pandas as pd
 import pytest
 import sklearn.base
 from pyriemann.estimation import Covariances
@@ -12,13 +13,13 @@ from pyriemann.spatialfilters import CSP
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.dummy import DummyClassifier as Dummy
 from sklearn.pipeline import FunctionTransformer, Pipeline, make_pipeline
-from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
+from sklearn.model_selection import GridSearchCV, StratifiedGroupKFold, StratifiedKFold
 
 from moabb.analysis.results import get_digest, get_string_rep
 from moabb.datasets.compound_dataset import compound
 from moabb.datasets.fake import FakeDataset
 from moabb.evaluations import evaluations as ev
-from moabb.evaluations.base import optuna_available
+from moabb.evaluations.base import MetadataArray, optuna_available
 from moabb.evaluations.splitters import LearningCurveSplitter
 from moabb.evaluations.utils import _create_save_path as create_save_path
 from moabb.evaluations.utils import _save_model_cv as save_model_cv
@@ -44,6 +45,26 @@ class DummyClassifier(sklearn.base.BaseEstimator):
 
     def __init__(self, kernel):
         self.kernel = kernel
+
+
+class MetadataAwareClassifier(
+    sklearn.base.ClassifierMixin, sklearn.base.BaseEstimator
+):
+    accepts_metadata_array = True
+    _moabb_result_ignored_params = {"cache_root": None}
+
+    def __init__(self, scientific=1, cache_root=None):
+        self.scientific = scientific
+        self.cache_root = cache_root
+
+    def fit(self, X, y):
+        assert isinstance(X, MetadataArray)
+        self.classes_ = np.unique(y)
+        return self
+
+    def predict(self, X):
+        assert isinstance(X, MetadataArray)
+        return np.repeat(self.classes_[0], len(X))
 
 
 class ValidationMetadataSpy(sklearn.base.ClassifierMixin, sklearn.base.BaseEstimator):
@@ -250,6 +271,42 @@ class TestWithinSess:
 
     def test_digest_distinguishes_strings_with_spaces(self):
         assert get_digest({"x": "a b"}) != get_digest({"x": "ab"})
+
+    def test_metadata_input_is_opt_in_and_not_forwarded_through_pipeline(self):
+        X = np.zeros((4, 1, 3))
+        metadata = pd.DataFrame({"session_trial_index": [0, 1, 2, 3]})
+
+        aware = self.eval._prepare_estimator_input(
+            MetadataAwareClassifier(), X, metadata
+        )
+        ordinary = self.eval._prepare_estimator_input(Dummy(), X, metadata)
+        piped = self.eval._prepare_estimator_input(
+            make_pipeline(MetadataAwareClassifier()), X, metadata
+        )
+
+        assert isinstance(aware, MetadataArray)
+        assert aware.metadata.equals(metadata)
+        assert ordinary is X
+        assert piped is X
+
+        search = GridSearchCV(
+            MetadataAwareClassifier(),
+            {"scientific": [1, 2]},
+            cv=2,
+        )
+        search_input = self.eval._prepare_estimator_input(search, X, metadata)
+        search.fit(search_input, np.array([0, 0, 1, 1]))
+
+    def test_result_digest_ignores_declared_operational_parameters(self):
+        first = MetadataAwareClassifier(scientific=1, cache_root="first")
+        relocated = MetadataAwareClassifier(scientific=1, cache_root="second")
+        changed = MetadataAwareClassifier(scientific=2, cache_root="first")
+
+        assert get_digest(first) == get_digest(relocated)
+        assert get_digest(first) != get_digest(changed)
+        assert get_digest(make_pipeline(first)) == get_digest(
+            make_pipeline(relocated)
+        )
 
     def test_postprocess_pipeline(self):
         cov = Covariances("oas")
