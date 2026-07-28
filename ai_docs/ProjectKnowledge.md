@@ -82,7 +82,11 @@ instead of failing the run. Per-group effective configuration and the optional
   selection.
 - Optional input-CWT and noise-bank caches share `wct_cache_root`. Input CWT
   entries are session-level memory-mapped arrays filled incrementally by trial
-  identity; noise-bank entries are deterministic whole-bank arrays.
+  identity; noise-bank entries are deterministic whole-bank arrays. Noise-bank
+  cache preparation and device materialization are timed separately. Before the
+  training loop, CPU fits copy the full bank out of the mmap into contiguous
+  RAM, while accelerator fits transfer the full bank to the selected device, so
+  cache I/O does not leak into epoch timings.
 - Grouped validation needs groups/metadata in `fit()`; without them the trainer
   falls back to a random stratified split. Group-subset selection examines all
   combinations only up to 4,096; larger spaces use a seeded uniform sample of

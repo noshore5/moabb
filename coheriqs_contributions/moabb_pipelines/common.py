@@ -1491,11 +1491,12 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
 
     def _vprint(self, level: int, message: str) -> None:
         if is_experiment_logging_configured():
-            category = (
-                EventCategory.TRAIN_STEP
-                if message.startswith("[Train][Epoch") and " step=" in message
-                else EventCategory.STATUS
-            )
+            if message.startswith("[CWT]"):
+                category = EventCategory.CWT
+            elif message.startswith("[Train][Epoch") and " step=" in message:
+                category = EventCategory.TRAIN_STEP
+            else:
+                category = EventCategory.STATUS
             log_event(log, category, message)
         elif self.verbose >= level:
             print(message, flush=True)

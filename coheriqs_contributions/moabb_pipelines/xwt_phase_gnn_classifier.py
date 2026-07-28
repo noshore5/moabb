@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Callable
 
 import numpy as np
@@ -302,6 +303,10 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
         self.X_std_: float | None = None
         self.noise_bank_: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         self.noise_bank_handle_ = None
+        self.noise_bank_cache_hit_: bool | None = None
+        self.noise_bank_cache_bytes_: int | None = None
+        self.noise_bank_cache_prepare_seconds_: float | None = None
+        self.noise_bank_device_materialize_seconds_: float | None = None
         self.normalization_basis_ = None
         self.noise_channel_std_: torch.Tensor | None = None
         self.noise_bank_device_: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
@@ -441,6 +446,10 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
     ) -> None:
         self.noise_bank_ = None
         self.noise_bank_handle_ = None
+        self.noise_bank_cache_hit_ = None
+        self.noise_bank_cache_bytes_ = None
+        self.noise_bank_cache_prepare_seconds_ = None
+        self.noise_bank_device_materialize_seconds_ = None
         self.noise_channel_std_ = None
         self.noise_bank_device_ = None
         self.noise_channel_std_device_ = None
@@ -460,6 +469,7 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             if self.noise_bank_seed is not None
             else int(self.seed or 0) + 10_003
         )
+        started = time.perf_counter()
         self.noise_bank_, self.noise_bank_handle_ = compute_paired_cwt_noise_bank(
             bank_size=int(self.noise_bank_size),
             segment_length=int(X.shape[2]),
@@ -473,24 +483,67 @@ class _BaseCWTGNNClassifier(TorchEEGClassifier):
             verbose=self.verbose,
             cache_root=self.wct_cache_root,
         )
+        self.noise_bank_cache_prepare_seconds_ = time.perf_counter() - started
+        self.noise_bank_cache_hit_ = bool(self.noise_bank_handle_.hit)
+        self.noise_bank_cache_bytes_ = int(self.noise_bank_handle_.packed.nbytes)
+        cache_status = (
+            "disabled"
+            if self.noise_bank_handle_.path is None
+            else "hit"
+            if self.noise_bank_cache_hit_
+            else "miss"
+        )
+        self._vprint(
+            1,
+            "[CWT][noise-bank-cache-prepare] complete "
+            f"cache={cache_status} bytes={self.noise_bank_cache_bytes_} "
+            f"elapsed={self.noise_bank_cache_prepare_seconds_:.4f}s",
+        )
 
     def _prepare_training_state_on_device(self) -> None:
         self.noise_bank_device_ = None
         self.noise_channel_std_device_ = None
+        self.noise_bank_device_materialize_seconds_ = None
         if not self._uses_noise_augmentation():
             return
         if self.device_ is None:
             raise ValueError("Torch device is not initialized.")
         if self.noise_bank_ is None or self.noise_channel_std_ is None:
             raise ValueError("Noise augmentation state is not initialized.")
-        self.noise_bank_device_ = tuple(
-            tensor.to(device=self.device_, dtype=torch.float32)
-            for tensor in self.noise_bank_
-        )
+        if self.device_.type == "cuda":
+            torch.cuda.synchronize(self.device_)
+        started = time.perf_counter()
+        if self.device_.type == "cpu":
+            self.noise_bank_device_ = tuple(
+                tensor.to(dtype=torch.float32).clone(
+                    memory_format=torch.contiguous_format
+                )
+                for tensor in self.noise_bank_
+            )
+        else:
+            self.noise_bank_device_ = tuple(
+                tensor.to(device=self.device_, dtype=torch.float32)
+                for tensor in self.noise_bank_
+            )
         self.noise_channel_std_device_ = self.noise_channel_std_.to(
             device=self.device_,
             dtype=torch.float32,
         )
+        if self.device_.type == "cuda":
+            torch.cuda.synchronize(self.device_)
+        self.noise_bank_device_materialize_seconds_ = time.perf_counter() - started
+        materialized_bytes = sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in self.noise_bank_device_
+        )
+        self._vprint(
+            1,
+            "[CWT][noise-bank-device-materialize] complete "
+            f"device={self.device_} bytes={materialized_bytes} "
+            f"elapsed={self.noise_bank_device_materialize_seconds_:.4f}s",
+        )
+        self.noise_bank_ = None
+        self.noise_bank_handle_ = None
 
     def _augment_train_batch_inputs(
         self, batch_inputs: tuple[torch.Tensor, ...]
