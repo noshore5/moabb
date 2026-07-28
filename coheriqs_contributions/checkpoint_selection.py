@@ -14,23 +14,11 @@ from uuid import uuid4
 import torch
 
 
-VALID_METRICS = frozenset(
-    {
-        "val_data_loss",
-        "val_selector_regularization",
-        "val_accuracy",
-        "val_roc_auc",
-        "clean_train_data_loss",
-        "clean_train_selector_regularization",
-        "clean_train_accuracy",
-        "clean_train_roc_auc",
-    }
-)
-CLEAN_TRAIN_METRICS = frozenset(
-    metric for metric in VALID_METRICS if metric.startswith("clean_train_")
-)
 CHECKPOINT_FORMAT_VERSION = 1
 CHECKPOINT_METADATA_VERSION = 1
+MetricRecord = Mapping[str, float | None]
+MetricHistory = Sequence[MetricRecord]
+ScoreFunction = Callable[[MetricRecord, MetricHistory], float | None]
 
 
 def _json_default(value):
@@ -49,98 +37,88 @@ def _json_default(value):
     raise TypeError(f"{type(value).__name__} is not JSON serializable")
 
 
-@dataclass(frozen=True)
-class MetricTerm:
-    """One explicitly transformed term in a checkpoint score."""
+def _optional_metric_value(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
 
-    metric: str
-    weight: float = 1.0
-    scale: float = 1.0
-    offset: float = 0.0
-    smoothing_window: int = 1
 
-    def __post_init__(self) -> None:
-        if self.metric not in VALID_METRICS:
-            raise ValueError(
-                f"Unknown checkpoint metric '{self.metric}'. "
-                f"Expected one of {sorted(VALID_METRICS)}."
-            )
-        for name, value in (
-            ("weight", self.weight),
-            ("scale", self.scale),
-            ("offset", self.offset),
-        ):
-            if not math.isfinite(float(value)):
-                raise ValueError(f"{name} must be finite.")
-        if (
-            isinstance(self.smoothing_window, bool)
-            or not isinstance(self.smoothing_window, int)
-            or self.smoothing_window < 1
-        ):
-            raise ValueError("smoothing_window must be a positive integer.")
+def require_metric(metrics: MetricRecord, name: str) -> float:
+    """Select one current metric and require a finite numeric value."""
 
-    def transformed_value(
-        self,
-        metrics: Mapping[str, float | None],
-        history: Sequence[Mapping[str, float | None]],
-    ) -> float:
-        if float(self.weight) == 0.0:
-            return 0.0
-        current = metrics.get(self.metric)
-        if current is None or not math.isfinite(float(current)):
-            raise ValueError(
-                f"Required checkpoint metric '{self.metric}' is unavailable "
-                "for the current weights."
-            )
-        values: list[float] = [float(current)]
-        for record in reversed(history):
-            if len(values) == self.smoothing_window:
-                break
-            value = record.get(self.metric)
-            if value is not None and math.isfinite(float(value)):
-                values.append(float(value))
-        if len(values) != self.smoothing_window:
-            raise ValueError(
-                f"Metric '{self.metric}' needs {self.smoothing_window} fresh "
-                "value(s) for causal scoring."
-            )
-        value = sum(values) / len(values)
-        return float(self.weight) * (float(self.scale) * value + float(self.offset))
+    value = _optional_metric_value(metrics.get(name))
+    if value is None:
+        raise ValueError(
+            f"Required checkpoint metric '{name}' is missing or non-finite."
+        )
+    return value
+
+
+def select_metric(
+    records: MetricHistory,
+    name: str,
+) -> tuple[float | None, ...]:
+    """Select one aligned metric history, preserving unavailable values."""
+
+    return tuple(_optional_metric_value(record.get(name)) for record in records)
+
+
+def recent_history(
+    history: MetricHistory,
+    window: int,
+) -> tuple[MetricRecord, ...]:
+    """Return up to ``window`` prior records in chronological order."""
+
+    if isinstance(window, bool) or not isinstance(window, int) or window < 0:
+        raise ValueError("window must be a non-negative integer.")
+    if window == 0:
+        return ()
+    return tuple(history[-window:])
 
 
 @dataclass(frozen=True)
 class CheckpointScorer:
-    """A maximized or minimized explicit weighted metric formula."""
+    """A named custom checkpoint utility; larger finite scores are better."""
 
-    terms: tuple[MetricTerm, ...]
-    direction: str
-    name: str = "weighted"
-    min_delta: float = 1e-12
+    function: ScoreFunction
+    name: str
+    min_delta: float = 0.0
 
     def __post_init__(self) -> None:
-        if not self.terms:
-            raise ValueError("A checkpoint scorer needs at least one metric term.")
-        if self.direction not in {"min", "max"}:
-            raise ValueError("direction must be 'min' or 'max'.")
+        if not callable(self.function):
+            raise TypeError("function must be callable.")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("name must be a non-empty string.")
         if not math.isfinite(float(self.min_delta)) or self.min_delta < 0:
             raise ValueError("min_delta must be finite and >= 0.")
 
-    @property
-    def required_metrics(self) -> frozenset[str]:
-        return frozenset(term.metric for term in self.terms if term.weight != 0.0)
-
     def score(
         self,
-        metrics: Mapping[str, float | None],
-        history: Sequence[Mapping[str, float | None]] = (),
-    ) -> float:
-        return sum(term.transformed_value(metrics, history) for term in self.terms)
+        metrics: MetricRecord,
+        history: MetricHistory = (),
+    ) -> float | None:
+        score = self.function(metrics, history)
+        if score is None:
+            return None
+        try:
+            numeric = float(score)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"Checkpoint scorer '{self.name}' must return a number or None."
+            ) from exc
+        if not math.isfinite(numeric):
+            raise ValueError(
+                f"Checkpoint scorer '{self.name}' returned a non-finite score."
+            )
+        return numeric
 
     def is_better(self, score: float, incumbent: float | None) -> bool:
         if incumbent is None:
             return True
-        if self.direction == "min":
-            return score < incumbent - self.min_delta
         return score > incumbent + self.min_delta
 
 
@@ -153,8 +131,18 @@ class CandidateGenerator:
     name: str | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.top_k, bool) or not isinstance(self.top_k, int) or self.top_k < 1:
+        if not isinstance(self.scorer, CheckpointScorer):
+            raise TypeError("scorer must be a CheckpointScorer.")
+        if (
+            isinstance(self.top_k, bool)
+            or not isinstance(self.top_k, int)
+            or self.top_k < 1
+        ):
             raise ValueError("top_k must be a positive integer.")
+        if self.name is not None and (
+            not isinstance(self.name, str) or not self.name.strip()
+        ):
+            raise ValueError("name must be None or a non-empty string.")
 
     @property
     def label(self) -> str:
@@ -189,34 +177,45 @@ class SelectionObservation:
     progress: bool
 
 
-def _single_metric_scorer(
-    metric: str,
-    direction: str,
-    *,
-    smoothing_window: int = 1,
-    name: str | None = None,
-) -> CheckpointScorer:
-    return CheckpointScorer(
-        terms=(MetricTerm(metric, smoothing_window=smoothing_window),),
-        direction=direction,
-        name=name or metric,
-    )
+def _negative_val_data_loss(metrics: MetricRecord, history: MetricHistory) -> float:
+    return -require_metric(metrics, "val_data_loss")
+
+
+def _val_roc_auc(metrics: MetricRecord, history: MetricHistory) -> float:
+    return require_metric(metrics, "val_roc_auc")
+
+
+def _negative_clean_train_data_loss(
+    metrics: MetricRecord,
+    history: MetricHistory,
+) -> float:
+    return -require_metric(metrics, "clean_train_data_loss")
+
+
+def _clean_train_roc_auc(metrics: MetricRecord, history: MetricHistory) -> float:
+    return require_metric(metrics, "clean_train_roc_auc")
 
 
 _SCORER_ALIASES = {
-    "val_loss": _single_metric_scorer("val_data_loss", "min", name="val_loss"),
-    "val_data_loss": _single_metric_scorer("val_data_loss", "min"),
-    "val_roc_auc": _single_metric_scorer("val_roc_auc", "max"),
-    "clean_train_loss": _single_metric_scorer(
-        "clean_train_data_loss", "min", name="clean_train_loss"
+    "val_loss": CheckpointScorer(_negative_val_data_loss, name="val_loss"),
+    "val_data_loss": CheckpointScorer(
+        _negative_val_data_loss, name="val_data_loss"
     ),
-    "clean_train_data_loss": _single_metric_scorer("clean_train_data_loss", "min"),
-    "clean_train_roc_auc": _single_metric_scorer("clean_train_roc_auc", "max"),
+    "val_roc_auc": CheckpointScorer(_val_roc_auc, name="val_roc_auc"),
+    "clean_train_loss": CheckpointScorer(
+        _negative_clean_train_data_loss, name="clean_train_loss"
+    ),
+    "clean_train_data_loss": CheckpointScorer(
+        _negative_clean_train_data_loss, name="clean_train_data_loss"
+    ),
+    "clean_train_roc_auc": CheckpointScorer(
+        _clean_train_roc_auc, name="clean_train_roc_auc"
+    ),
 }
 
 
 def resolve_scorer(
-    config: str | CheckpointScorer | Mapping[str, object],
+    config: str | CheckpointScorer,
 ) -> CheckpointScorer:
     """Validate a scorer config and return its canonical immutable form."""
 
@@ -228,35 +227,12 @@ def resolve_scorer(
         except KeyError as exc:
             raise ValueError(
                 f"Unknown checkpoint scorer '{config}'. "
-                f"Expected one of {sorted(_SCORER_ALIASES)} or a scorer mapping."
+                f"Expected one of {sorted(_SCORER_ALIASES)} or a "
+                "CheckpointScorer."
             ) from exc
-    if not isinstance(config, Mapping):
-        raise TypeError("checkpoint scorer must be a string, mapping, or CheckpointScorer.")
-
-    if "terms" in config:
-        raw_terms = config["terms"]
-        if not isinstance(raw_terms, Sequence) or isinstance(raw_terms, (str, bytes)):
-            raise TypeError("scorer 'terms' must be a sequence.")
-        terms = tuple(
-            term if isinstance(term, MetricTerm) else MetricTerm(**dict(term))
-            for term in raw_terms
-        )
-    else:
-        metric = str(config.get("metric", ""))
-        terms = (
-            MetricTerm(
-                metric=metric,
-                weight=float(config.get("weight", 1.0)),
-                scale=float(config.get("scale", 1.0)),
-                offset=float(config.get("offset", 0.0)),
-                smoothing_window=int(config.get("smoothing_window", 1)),
-            ),
-        )
-    return CheckpointScorer(
-        terms=terms,
-        direction=str(config.get("direction", "min")),
-        name=str(config.get("name", "weighted")),
-        min_delta=float(config.get("min_delta", 1e-12)),
+    raise TypeError(
+        "checkpoint scorer must be a built-in string or CheckpointScorer; "
+        "wrap custom callables explicitly to give them a stable name."
     )
 
 
@@ -271,14 +247,15 @@ def resolve_generators(
             generators.append(config)
             continue
         if not isinstance(config, Mapping):
-            raise TypeError("candidate generators must be mappings or CandidateGenerator.")
-        scorer_config = config.get("scorer", config.get("metric", "val_loss"))
-        if "metric" in config and "scorer" not in config:
-            scorer_config = {
-                key: value
-                for key, value in config.items()
-                if key not in {"top_k", "name"}
-            }
+            raise TypeError(
+                "candidate generators must be mappings or CandidateGenerator."
+            )
+        unknown = set(config).difference({"scorer", "top_k", "name"})
+        if unknown:
+            raise ValueError(
+                f"Unsupported candidate generator keys: {sorted(unknown)}."
+            )
+        scorer_config = config.get("scorer", "val_loss")
         generators.append(
             CandidateGenerator(
                 scorer=resolve_scorer(scorer_config),
@@ -297,8 +274,6 @@ def resolve_generators(
 def validate_selection_config(
     *,
     mode: str,
-    scorer: CheckpointScorer,
-    generators: Sequence[CandidateGenerator],
     interval: int,
 ) -> None:
     if mode not in {"disabled", "interval", "deferred_candidates"}:
@@ -308,15 +283,6 @@ def validate_selection_config(
         )
     if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
         raise ValueError("clean_train_interval must be a positive integer.")
-    if mode == "disabled" and scorer.required_metrics & CLEAN_TRAIN_METRICS:
-        raise ValueError("disabled mode cannot score clean-training metrics.")
-    if mode == "deferred_candidates":
-        for generator in generators:
-            if generator.scorer.required_metrics & CLEAN_TRAIN_METRICS:
-                raise ValueError(
-                    "deferred candidate generators must be validation-only; "
-                    f"'{generator.label}' requires clean-training metrics."
-                )
 
 
 class CheckpointController:
@@ -326,7 +292,7 @@ class CheckpointController:
         self,
         *,
         mode: str = "disabled",
-        checkpoint_scorer: str | CheckpointScorer | Mapping[str, object] = "val_loss",
+        checkpoint_scorer: str | CheckpointScorer = "val_loss",
         candidate_generators: Sequence[
             CandidateGenerator | Mapping[str, object]
         ]
@@ -341,8 +307,6 @@ class CheckpointController:
         self.clean_train_interval = clean_train_interval
         validate_selection_config(
             mode=mode,
-            scorer=self.scorer,
-            generators=self.generators,
             interval=clean_train_interval,
         )
         self.history: list[dict[str, float | None]] = []
@@ -375,11 +339,8 @@ class CheckpointController:
             return SelectionObservation(opportunity=False, progress=False)
 
         if self.mode == "disabled":
-            try:
-                score = self.scorer.score(record, prior_history)
-            except ValueError as exc:
-                if "fresh value(s) for causal scoring" not in str(exc):
-                    raise
+            score = self.scorer.score(record, prior_history)
+            if score is None:
                 return SelectionObservation(opportunity=False, progress=False)
             progress = self.scorer.is_better(score, self._best_score)
             if progress:
@@ -402,11 +363,8 @@ class CheckpointController:
         progress = False
         ready_generators = 0
         for generator in self.generators:
-            try:
-                score = generator.scorer.score(record, prior_history)
-            except ValueError as exc:
-                if "fresh value(s) for causal scoring" not in str(exc):
-                    raise
+            score = generator.scorer.score(record, prior_history)
+            if score is None:
                 continue
             ready_generators += 1
             ranking = self._rankings[generator.label]
@@ -424,10 +382,7 @@ class CheckpointController:
                 generator_scores={generator.label: score},
             )
             ranking.append((score, candidate))
-            ranking.sort(
-                key=lambda item: item[0],
-                reverse=generator.scorer.direction == "max",
-            )
+            ranking.sort(key=lambda item: item[0], reverse=True)
             del ranking[generator.top_k :]
             progress = True
         return SelectionObservation(
@@ -462,7 +417,9 @@ class CheckpointController:
             raise RuntimeError("No checkpoint candidates were retained.")
         if self.mode == "deferred_candidates":
             if enrich_candidate is None:
-                raise ValueError("deferred_candidates requires a clean metric evaluator.")
+                raise ValueError(
+                    "deferred_candidates requires a clean metric evaluator."
+                )
             for candidate in candidates:
                 candidate.metrics.update(dict(enrich_candidate(candidate)))
                 for history_record in self.history:
@@ -479,12 +436,16 @@ class CheckpointController:
                 if int(metrics.get("epoch", 0) or 0) < candidate.epoch
             )
             score = self.scorer.score(candidate.metrics, history)
+            if score is None:
+                continue
             candidate.final_score = score
             if self.scorer.is_better(score, best_score):
                 best = candidate
                 best_score = score
         if best is None:
-            raise RuntimeError("Final checkpoint scoring produced no selection.")
+            raise RuntimeError(
+                "No candidate was eligible for final checkpoint scoring."
+            )
         return best
 
     def policy_summary(self) -> dict[str, object]:
@@ -506,9 +467,7 @@ class CheckpointController:
 def scorer_to_dict(scorer: CheckpointScorer) -> dict[str, object]:
     return {
         "name": scorer.name,
-        "direction": scorer.direction,
         "min_delta": scorer.min_delta,
-        "terms": [asdict(term) for term in scorer.terms],
     }
 
 

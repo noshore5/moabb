@@ -67,6 +67,23 @@ instead of failing the run. Per-group effective configuration and the optional
 
 - Checkpointing uses validation **loss**; MOABB reports outer **ROC-AUC** — they
   can disagree on small val splits.
+- Built-in checkpoint scorers are named strings. Custom scorers use a
+  `CheckpointScorer(function=..., name=...)`; the callable receives current
+  metrics plus chronological prior-epoch records and returns a finite utility
+  to maximize or `None` to skip that epoch/candidate. Parameterized
+  module-level functions wrapped with `functools.partial` are supported by
+  sklearn cloning. `recent_history`, `select_metric`, and `require_metric`
+  provide optional history/metric selection without prescribing a formula.
+- Final fit-summary messages name the final scorer, report its selected utility,
+  and render every stored validation/clean-training metric for the selected
+  epoch. They reuse candidate metrics already collected for selection and do
+  not trigger another evaluation pass.
+- Validation and clean-training checkpoint metrics use the same non-shuffled
+  evaluation path. It temporarily switches the model to evaluation mode, runs
+  without gradients, bypasses training-only input augmentation, and restores
+  the prior model mode afterward. Selectors default to deterministic `argmax`
+  evaluation; explicitly configuring a stochastic selector with
+  `eval_mode="same"` intentionally makes evaluation stochastic.
 - Checkpoint candidate snapshots remain on the model's device. `disabled` mode
   retains one; candidate modes retain at most
   `min(eligible_epochs, sum(generator.top_k))` distinct epoch states. A

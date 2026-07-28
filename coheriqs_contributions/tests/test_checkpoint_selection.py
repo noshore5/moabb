@@ -1,20 +1,26 @@
 from copy import deepcopy
+from functools import partial
+from pickle import dumps, loads
 
 import numpy as np
 import pytest
 import torch
 import torch.nn as nn
+from sklearn.base import clone
 from torch.utils.data import DataLoader, TensorDataset
 
 from coheriqs_contributions.checkpoint_selection import (
     CandidateGenerator,
     CheckpointController,
     CheckpointScorer,
-    MetricTerm,
     TrainingState,
     load_checkpoint_bundle,
+    recent_history,
+    require_metric,
     save_checkpoint_bundle,
+    select_metric,
 )
+import coheriqs_contributions.moabb_pipelines.common as common_module
 from coheriqs_contributions.moabb_pipelines.common import (
     LoaderEvaluation,
     TorchEEGClassifier,
@@ -71,44 +77,96 @@ def test_all_neural_estimators_expose_checkpoint_configuration(classifier):
     assert params["save_selected_checkpoint"] is False
 
 
-def test_weighted_and_causal_scorers_are_explicit():
+def _nonlinear_recent_score(metrics, history, *, window, recent_weight):
+    prior = recent_history(history, window - 1)
+    prior_losses = select_metric(prior, "val_data_loss")
+    if len(prior_losses) != window - 1 or any(
+        value is None for value in prior_losses
+    ):
+        return None
+    losses = (*prior_losses, require_metric(metrics, "val_data_loss"))
+    weights = (*range(1, window), recent_weight)
+    return -sum(
+        weight * np.log1p(loss)
+        for weight, loss in zip(weights, losses)
+    ) / sum(weights)
+
+
+def _clean_loss_with_validation_auc(metrics, history, *, auc_weight):
+    return (
+        -require_metric(metrics, "clean_train_data_loss")
+        + auc_weight * require_metric(metrics, "val_roc_auc")
+    )
+
+
+def test_custom_scorer_supports_history_nonlinearity_and_warmup():
     scorer = CheckpointScorer(
-        terms=(
-            MetricTerm("val_data_loss", weight=2.0, scale=0.5, smoothing_window=2),
-            MetricTerm("val_roc_auc", weight=-1.0, offset=0.25),
+        function=partial(
+            _nonlinear_recent_score,
+            window=3,
+            recent_weight=5.0,
         ),
-        direction="min",
+        name="recent-log-loss-3-5",
     )
+    history = [{"val_data_loss": 4.0}, {"val_data_loss": 2.0}]
+    assert scorer.score({"val_data_loss": 1.0}, history[:1]) is None
+    assert select_metric(
+        [{"val_data_loss": 4.0}, {}, {"val_data_loss": np.nan}],
+        "val_data_loss",
+    ) == (4.0, None, None)
     score = scorer.score(
-        {"val_data_loss": 2.0, "val_roc_auc": 0.8},
-        [{"val_data_loss": 4.0, "val_roc_auc": 0.7}],
+        {"val_data_loss": 1.0},
+        history,
     )
-    assert score == pytest.approx(2.0 * 0.5 * 3.0 - (0.8 + 0.25))
+    expected = -(
+        np.log1p(4.0) + 2 * np.log1p(2.0) + 5 * np.log1p(1.0)
+    ) / 8
+    assert score == pytest.approx(expected)
 
 
-def test_mode_metric_availability_is_validated():
-    with pytest.raises(ValueError, match="disabled mode"):
+def test_custom_scorers_must_be_explicitly_named_and_wrapped():
+    with pytest.raises(TypeError, match="built-in string or CheckpointScorer"):
         CheckpointController(
             mode="disabled",
-            checkpoint_scorer="clean_train_loss",
+            checkpoint_scorer=_nonlinear_recent_score,
         )
-    with pytest.raises(ValueError, match="validation-only"):
+    with pytest.raises(TypeError, match="built-in string or CheckpointScorer"):
+        CheckpointController(
+            mode="disabled",
+            checkpoint_scorer={"metric": "val_data_loss"},
+        )
+    with pytest.raises(ValueError, match="Unsupported candidate generator keys"):
         CheckpointController(
             mode="deferred_candidates",
-            candidate_generators=[
-                {"name": "bad", "metric": "clean_train_data_loss", "direction": "min"}
-            ],
+            candidate_generators=[{"metric": "val_data_loss"}],
         )
-    CheckpointController(
-        mode="disabled",
-        checkpoint_scorer=CheckpointScorer(
-            (
-                MetricTerm("val_data_loss"),
-                MetricTerm("clean_train_data_loss", weight=0.0),
-            ),
-            "min",
+
+
+def test_none_score_skips_epoch_without_capturing_state():
+    scorer = CheckpointScorer(
+        function=partial(
+            _nonlinear_recent_score,
+            window=2,
+            recent_weight=2.0,
         ),
+        name="two-value-log-loss",
     )
+    controller = CheckpointController(mode="disabled", checkpoint_scorer=scorer)
+
+    first = controller.observe(
+        epoch=1,
+        metrics={"epoch": 1, "val_data_loss": 0.8},
+        state_factory=lambda: pytest.fail("warm-up must not capture state"),
+    )
+    second = controller.observe(
+        epoch=2,
+        metrics={"epoch": 2, "val_data_loss": 0.6},
+        state_factory=lambda: _state(2),
+    )
+
+    assert first.opportunity is False
+    assert second == type(second)(opportunity=True, progress=True)
+    assert controller.finalize().epoch == 2
 
 
 def test_disabled_selects_online_without_candidate_pool():
@@ -132,13 +190,19 @@ def test_interval_counts_only_eligible_opportunities_and_deduplicates_union():
         candidate_generators=(
             CandidateGenerator(
                 CheckpointScorer(
-                    (MetricTerm("val_data_loss"),), "min", name="loss"
+                    lambda metrics, history: -require_metric(
+                        metrics, "val_data_loss"
+                    ),
+                    name="loss",
                 ),
                 top_k=2,
             ),
             CandidateGenerator(
                 CheckpointScorer(
-                    (MetricTerm("val_roc_auc"),), "max", name="auc"
+                    lambda metrics, history: require_metric(
+                        metrics, "val_roc_auc"
+                    ),
+                    name="auc",
                 ),
                 top_k=2,
             ),
@@ -181,8 +245,8 @@ def test_deferred_enriches_only_bounded_union():
         mode="deferred_candidates",
         checkpoint_scorer="clean_train_loss",
         candidate_generators=[
-            {"name": "loss", "metric": "val_data_loss", "direction": "min", "top_k": 2},
-            {"name": "auc", "metric": "val_roc_auc", "direction": "max", "top_k": 2},
+            {"name": "loss", "scorer": "val_data_loss", "top_k": 2},
+            {"name": "auc", "scorer": "val_roc_auc", "top_k": 2},
         ],
     )
     for epoch in range(1, 8):
@@ -213,8 +277,10 @@ class _ModeProbe(nn.Module):
         self.batch_norm = nn.BatchNorm1d(2)
         self.dropout = nn.Dropout(0.8)
         self.linear = nn.Linear(2, 2)
+        self.forward_contexts = []
 
     def forward(self, x):
+        self.forward_contexts.append((self.training, torch.is_grad_enabled()))
         return self.linear(self.dropout(self.batch_norm(x)))
 
 
@@ -301,9 +367,78 @@ def test_clean_evaluation_is_deterministic_and_restores_model_state_and_mode():
     first = estimator._evaluate_loader(loader, nn.CrossEntropyLoss(), 2)
     second = estimator._evaluate_loader(loader, nn.CrossEntropyLoss(), 2)
     assert estimator.model_.training is True
+    assert set(estimator.model_.forward_contexts) == {(False, False)}
     assert first == second
     for name, value in before.items():
         assert torch.equal(value, estimator.model_.state_dict()[name])
+
+
+def test_interval_fit_uses_named_custom_partial_with_clean_metrics(monkeypatch):
+    events = []
+
+    def capture_event(logger, category, message, **kwargs):
+        events.append((category, message, kwargs))
+
+    monkeypatch.setattr(
+        common_module,
+        "is_experiment_logging_configured",
+        lambda: True,
+    )
+    monkeypatch.setattr(common_module, "log_event", capture_event)
+    scorer = CheckpointScorer(
+        function=partial(
+            _clean_loss_with_validation_auc,
+            auc_weight=0.25,
+        ),
+        name="clean-loss-plus-quarter-val-auc",
+    )
+    estimator = _TinyClassifier(
+        epochs=4,
+        clean_train_mode="interval",
+        clean_train_interval=2,
+        checkpoint_scorer=scorer,
+    )
+    X, y = _tiny_data()
+
+    estimator.fit(X, y)
+
+    assert estimator.best_epoch_ in {2, 4}
+    assert len(estimator.clean_train_loss_history_) == 2
+    assert estimator.selected_checkpoint_metrics_["clean_train_data_loss"] is not None
+    assert estimator.fit_summary_["checkpoint_policy"]["checkpoint_scorer"] == {
+        "name": "clean-loss-plus-quarter-val-auc",
+        "min_delta": 0.0,
+    }
+    assert estimator.fit_summary_["selected_score"] is not None
+    fit_message = next(
+        message
+        for category, message, _ in events
+        if category == common_module.EventCategory.FIT_SUMMARY
+    )
+    assert "scorer=clean-loss-plus-quarter-val-auc" in fit_message
+    assert "score=" in fit_message
+    assert "val_data_loss=" in fit_message
+    assert "val_roc_auc=" in fit_message
+    assert "clean_train_data_loss=" in fit_message
+    assert "clean_train_roc_auc=" in fit_message
+
+
+def test_named_partial_scorer_survives_sklearn_clone_and_serialization():
+    scorer = CheckpointScorer(
+        function=partial(
+            _clean_loss_with_validation_auc,
+            auc_weight=0.25,
+        ),
+        name="clean-loss-plus-quarter-val-auc",
+    )
+
+    cloned = clone(_TinyClassifier(checkpoint_scorer=scorer))
+    round_tripped = loads(dumps(cloned.checkpoint_scorer))
+
+    assert cloned.checkpoint_scorer.name == scorer.name
+    assert round_tripped.score(
+        {"clean_train_data_loss": 0.4, "val_roc_auc": 0.8},
+    ) == pytest.approx(-0.2)
 
 
 def test_fit_discards_unrequested_optimizer_state_and_emits_exact_summary():

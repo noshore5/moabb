@@ -531,6 +531,39 @@ def fmt_metric(value: float | None, ndigits: int = 4) -> str:
     return f"{value:.{ndigits}f}"
 
 
+def format_checkpoint_metrics(metrics: Mapping[str, object]) -> str:
+    """Render every stored selected-checkpoint metric in a stable order."""
+
+    preferred_order = (
+        "epoch",
+        "val_data_loss",
+        "val_selector_regularization",
+        "val_accuracy",
+        "val_roc_auc",
+        "clean_train_data_loss",
+        "clean_train_selector_regularization",
+        "clean_train_accuracy",
+        "clean_train_roc_auc",
+    )
+    ordered_names = [
+        *[name for name in preferred_order if name in metrics],
+        *sorted(set(metrics).difference(preferred_order)),
+    ]
+    rendered = []
+    for name in ordered_names:
+        value = metrics[name]
+        if value is None:
+            text = "n/a"
+        elif name == "epoch":
+            text = str(int(value))
+        elif isinstance(value, (int, float, np.number)) and not isinstance(value, bool):
+            text = f"{float(value):.6f}"
+        else:
+            text = str(value)
+        rendered.append(f"{name}={text}")
+    return " ".join(rendered) if rendered else "none"
+
+
 def print_torch_parameter_summary(model: nn.Module, header: str = "Model") -> None:
     emit_initial_detail(f"[{header}] Parameter summary")
     total_params = 0
@@ -2405,6 +2438,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.selected_checkpoint_metrics_ = (
             {} if selected_candidate is None else dict(selected_candidate.metrics)
         )
+        self.selected_checkpoint_score_ = (
+            None if selected_candidate is None else selected_candidate.final_score
+        )
         self.stop_reason_ = stop_reason
         self.epochs_completed_ = epochs_completed
         self._vprint(
@@ -2467,6 +2503,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 else deepcopy(self.selected_learning_rates_)
             ),
             "selected_metrics": selected_metrics,
+            "selected_score": getattr(self, "selected_checkpoint_score_", None),
             "clean_train_metrics_available": clean_available,
             "stop_reason": self.stop_reason_,
             "effective_configuration_reference": fit_context.get(
@@ -2497,6 +2534,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     "selected_scorer": summary["checkpoint_policy"][
                         "checkpoint_scorer"
                     ],
+                    "selected_score": summary["selected_score"],
                     "selected_metrics": selected_metrics,
                 },
             )
@@ -2507,11 +2545,18 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.alpha_optimizer_ = None
         self.fit_summary_ = summary
         if is_experiment_logging_configured():
+            scorer_name = summary["checkpoint_policy"]["checkpoint_scorer"]["name"]
+            selected_score = summary["selected_score"]
+            score_text = (
+                "n/a" if selected_score is None else f"{float(selected_score):.8f}"
+            )
             log_event(
                 log,
                 EventCategory.FIT_SUMMARY,
                 f"Fit {summary['fit_id']} selected epoch {self.best_epoch_} "
-                f"({fit_role}, mode={self.clean_train_mode}).",
+                f"with scorer={scorer_name} score={score_text} "
+                f"({fit_role}, mode={self.clean_train_mode}); "
+                f"metrics: {format_checkpoint_metrics(selected_metrics)}.",
                 data=summary,
             )
 
