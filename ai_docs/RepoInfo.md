@@ -38,6 +38,9 @@ MOABB LeftRightImagery (BNCI2014-001) CWT/WCT/XWT GNN + baselines.
   Start here for runs and hyperparams.
 - `coheriqs_contributions/moabb_pipelines/common.py` — shared torch fit/train,
   CWT feature prep helpers. Open for training loop / shared preprocessing.
+- `coheriqs_contributions/checkpoint_selection.py` — named checkpoint scores,
+  clean-pass scheduling, lightweight rankings, state-bearing candidate sources,
+  and selected-checkpoint bundles.
 - `coheriqs_contributions/moabb_pipelines/wct_evidence_gnn_classifier.py` —
   default active model. Open for WCT-Evidence architecture changes.
 - `coheriqs_contributions/moabb_pipelines/xwt_phase_gnn_classifier.py` —

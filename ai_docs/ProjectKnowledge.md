@@ -67,26 +67,49 @@ instead of failing the run. Per-group effective configuration and the optional
 
 - Checkpointing uses validation **loss**; MOABB reports outer **ROC-AUC** — they
   can disagree on small val splits.
-- Built-in checkpoint scorers are named strings. Custom scorers use a
-  `CheckpointScorer(function=..., name=...)`; the callable receives current
-  metrics plus chronological prior-epoch records and returns a finite utility
-  to maximize or `None` to skip that epoch/candidate. Parameterized
-  module-level functions wrapped with `functools.partial` are supported by
-  sklearn cloning. `recent_history`, `select_metric`, and `require_metric`
-  provide optional history/metric selection without prescribing a formula.
-- Final fit-summary messages name the final scorer, report its selected utility,
-  and render every stored validation/clean-training metric for the selected
-  epoch. They reuse candidate metrics already collected for selection and do
-  not trigger another evaluation pass.
+- The named checkpoint policy parameters are `final_checkpoint_score`,
+  `checkpoint_scores`, `clean_train_scores`, `candidate_sources`,
+  `prediction_metrics`, and `checkpoint_reporting`.
+- Built-in checkpoint scores are implicit names. Custom scores use
+  `CheckpointScorer(function=..., name=...)`; all selection, candidate, and
+  reporting references use registered names. Utilities are maximized, exact
+  ties prefer the earlier epoch, and `None` means scorer warm-up/abstention.
+  There is no `min_delta`.
+- `ScoreRanking` stores lightweight top-K observations for diagnostics.
+  `CandidateSource` retains a smaller state-bearing prefix of an explicitly
+  configured ranking. `selection_runner_ups` controls a separate lightweight
+  final-score presentation and never retains runner-up states or triggers
+  evaluation passes. `checkpoint_reporting` is operational and excluded from
+  MOABB result identity; scoring, gating, prediction metrics, and candidate
+  depths remain semantic.
+- Non-clean-gated scores run after every validation record. Clean-gated scores
+  run only with a fresh clean pass: on eligible epochs in `interval`, and over
+  the fully enriched candidate union after training in `deferred_candidates`.
+  `disabled` permits clean-gated diagnostics to remain configured but dormant.
+- Online scorer history contains only prior records. Deferred clean-gated
+  scorers receive the complete available trajectory except their own current
+  record, including later epochs. Use `history_before_epoch` for causal
+  behavior, `history_after_epoch` for future records, and
+  `history_except_epoch` for the complete non-current view; `recent_history`
+  remains a mechanical tail operation on the sequence supplied to it.
+- `PredictionMetric(function=..., name=...)` consumes encoded targets and the
+  full probability matrix already accumulated during validation/clean loader
+  evaluation. It adds fields such as `val_brier_score` and
+  `clean_train_brier_score` without another model forward pass.
+- Schema-v2 fit summaries and readable checkpoint messages include the selected
+  raw metrics and named scores, authoritative final ranking/scope, candidate
+  nominations, configured end diagnostics, and inactive-score reasons.
+  Runner-up and diagnostic output reuses cached observations.
 - Validation and clean-training checkpoint metrics use the same non-shuffled
   evaluation path. It temporarily switches the model to evaluation mode, runs
   without gradients, bypasses training-only input augmentation, and restores
   the prior model mode afterward. Selectors default to deterministic `argmax`
   evaluation; explicitly configuring a stochastic selector with
   `eval_mode="same"` intentionally makes evaluation stochastic.
-- Checkpoint candidate snapshots remain on the model's device. `disabled` mode
-  retains one; candidate modes retain at most
-  `min(eligible_epochs, sum(generator.top_k))` distinct epoch states. A
+- Checkpoint candidate snapshots remain on the model's device. `disabled` and
+  direct interval selection retain only the current final-score winner, plus
+  any explicitly configured candidate-source prefixes. Deferred mode retains
+  at most `min(eligible_epochs, sum(source.top_k))` distinct epoch states. A
   model-only snapshot is the tensor size of `model.state_dict()`. A saved Adam
   continuation snapshot adds approximately twice the trainable-parameter bytes.
   For the active 22-channel, two-class WCT-Evidence grid this is about 7.0 KiB

@@ -10,7 +10,7 @@ import os
 import random
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import sys
 import time
@@ -31,6 +31,8 @@ from tqdm.auto import tqdm
 from coheriqs_contributions.checkpoint_selection import (
     CheckpointCandidate,
     CheckpointController,
+    CheckpointReporting,
+    PredictionMetric,
     TrainingState,
     save_checkpoint_bundle,
 )
@@ -535,7 +537,6 @@ def format_checkpoint_metrics(metrics: Mapping[str, object]) -> str:
     """Render every stored selected-checkpoint metric in a stable order."""
 
     preferred_order = (
-        "epoch",
         "val_data_loss",
         "val_selector_regularization",
         "val_accuracy",
@@ -547,19 +548,26 @@ def format_checkpoint_metrics(metrics: Mapping[str, object]) -> str:
     )
     ordered_names = [
         *[name for name in preferred_order if name in metrics],
-        *sorted(set(metrics).difference(preferred_order)),
+        *sorted(set(metrics).difference(preferred_order).difference({"epoch"})),
     ]
     rendered = []
     for name in ordered_names:
         value = metrics[name]
         if value is None:
             text = "n/a"
-        elif name == "epoch":
-            text = str(int(value))
         elif isinstance(value, (int, float, np.number)) and not isinstance(value, bool):
             text = f"{float(value):.6f}"
         else:
             text = str(value)
+        rendered.append(f"{name}={text}")
+    return " ".join(rendered) if rendered else "none"
+
+
+def format_checkpoint_scores(scores: Mapping[str, object]) -> str:
+    rendered = []
+    for name in sorted(scores):
+        value = scores[name]
+        text = "n/a" if value is None else f"{float(value):.8f}"
         rendered.append(f"{name}={text}")
     return " ".join(rendered) if rendered else "none"
 
@@ -1429,14 +1437,31 @@ class LoaderEvaluation:
     accuracy: float
     roc_auc: float | None
     selector_summary: list[dict[str, object]]
+    prediction_metrics: Mapping[str, float | None] = field(default_factory=dict)
 
     @property
     def total_loss(self) -> float:
         return self.data_loss + self.selector_regularization
 
+    def checkpoint_metrics(self, prefix: str) -> dict[str, float | None]:
+        """Return one consistently prefixed raw checkpoint metric record."""
+
+        return {
+            f"{prefix}_data_loss": self.data_loss,
+            f"{prefix}_selector_regularization": self.selector_regularization,
+            f"{prefix}_accuracy": self.accuracy,
+            f"{prefix}_roc_auc": self.roc_auc,
+            **{
+                f"{prefix}_{name}": value
+                for name, value in self.prediction_metrics.items()
+            },
+        }
+
 
 class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     """Reusable sklearn-compatible PyTorch classifier lifecycle."""
+
+    _moabb_result_ignored_params = {"checkpoint_reporting": None}
 
     def _init_torch_classifier(
         self,
@@ -1450,8 +1475,12 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         validation_group_column: str | None = None,
         early_stopping_patience: int | None = None,
         clean_train_mode: str = "disabled",
-        checkpoint_scorer="val_loss",
-        candidate_generators=None,
+        final_checkpoint_score: str = "val_loss",
+        checkpoint_scores=(),
+        clean_train_scores=(),
+        candidate_sources=(),
+        prediction_metrics=(),
+        checkpoint_reporting: CheckpointReporting | None = None,
         clean_train_interval: int = 1,
         save_selected_checkpoint: bool = False,
         device: str = "auto",
@@ -1473,8 +1502,12 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.validation_group_column = validation_group_column
         self.early_stopping_patience = early_stopping_patience
         self.clean_train_mode = clean_train_mode
-        self.checkpoint_scorer = checkpoint_scorer
-        self.candidate_generators = candidate_generators
+        self.final_checkpoint_score = final_checkpoint_score
+        self.checkpoint_scores = checkpoint_scores
+        self.clean_train_scores = clean_train_scores
+        self.candidate_sources = candidate_sources
+        self.prediction_metrics = prediction_metrics
+        self.checkpoint_reporting = checkpoint_reporting
         self.clean_train_interval = clean_train_interval
         self.save_selected_checkpoint = save_selected_checkpoint
         self.device = device
@@ -1487,12 +1520,62 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.optimizer_step_remainder_policy = optimizer_step_remainder_policy
         self.verbose = verbose
         self._validate_batch_control_params()
+        self._validate_prediction_metrics()
+        self._validate_checkpoint_metric_names()
 
         self.model_ = None
         self.classes_ = None
         self.class_to_idx_ = None
         self.device_ = None
         self._reset_histories()
+
+    def _validate_prediction_metrics(self) -> None:
+        reserved = {
+            "epoch",
+            "data_loss",
+            "selector_regularization",
+            "accuracy",
+            "roc_auc",
+        }
+        names = []
+        for metric in self.prediction_metrics:
+            if not isinstance(metric, PredictionMetric):
+                raise TypeError(
+                    "prediction_metrics must contain PredictionMetric objects."
+                )
+            if metric.name in reserved:
+                raise ValueError(
+                    f"Prediction metric name '{metric.name}' is reserved."
+                )
+            names.append(metric.name)
+        if len(names) != len(set(names)):
+            raise ValueError("prediction_metrics names must be unique.")
+
+    def _validate_checkpoint_metric_names(self) -> None:
+        reporting = self.checkpoint_reporting
+        if reporting is None:
+            return
+        if not isinstance(reporting, CheckpointReporting):
+            raise TypeError(
+                "checkpoint_reporting must be CheckpointReporting or None."
+            )
+        base_names = {
+            "data_loss",
+            "selector_regularization",
+            "accuracy",
+            "roc_auc",
+        }
+        custom_names = {metric.name for metric in self.prediction_metrics}
+        available = {
+            f"{prefix}_{name}"
+            for prefix in ("val", "clean_train")
+            for name in base_names | custom_names
+        }
+        unknown = set(reporting.show_epoch_metrics).difference(available)
+        if unknown:
+            raise ValueError(
+                f"Unknown show_epoch_metrics names: {sorted(unknown)}."
+            )
 
     def _reset_histories(self) -> None:
         self.train_loss_history_ = []
@@ -1514,6 +1597,11 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.clean_train_roc_auc_history_ = []
         self.selected_training_state_ = None
         self.selected_checkpoint_metrics_ = {}
+        self.selected_checkpoint_scores_ = {}
+        self.checkpoint_selection_ranking_ = []
+        self.checkpoint_diagnostic_rankings_ = {}
+        self.checkpoint_candidate_nominations_ = {}
+        self.checkpoint_final_scope_ = None
         self.selected_checkpoint_bundle_ = None
         self.selected_learning_rates_ = None
         self.fit_summary_ = None
@@ -1710,10 +1798,15 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             X = X.X
         X = validate_eeg_X(X)
         self._validate_batch_control_params()
+        self._validate_prediction_metrics()
+        self._validate_checkpoint_metric_names()
         checkpoint_controller = CheckpointController(
             mode=self.clean_train_mode,
-            checkpoint_scorer=self.checkpoint_scorer,
-            candidate_generators=self.candidate_generators,
+            final_checkpoint_score=self.final_checkpoint_score,
+            checkpoint_scores=self.checkpoint_scores,
+            clean_train_scores=self.clean_train_scores,
+            candidate_sources=self.candidate_sources,
+            reporting=self.checkpoint_reporting,
             clean_train_interval=self.clean_train_interval,
         )
         if (
@@ -2058,6 +2151,16 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         pending_gradient_samples = 0
         optimizer_sample_credit = 0
         optimizer.zero_grad(set_to_none=True)
+        inactive_scores = checkpoint_controller.policy_summary()["inactive_scores"]
+        if inactive_scores:
+            self._vprint(
+                1,
+                "[Train] inactive checkpoint scores: "
+                + "; ".join(
+                    f"{name} ({reason})"
+                    for name, reason in inactive_scores.items()
+                ),
+            )
 
         for epoch in range(self.epochs):
             epoch_start = time.perf_counter()
@@ -2277,6 +2380,8 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             prev_auc = avg_auc
 
             val_suffix = ""
+            checkpoint_suffix = ""
+            checkpoint_event_data = {}
             if val_loader is not None:
                 val_result = self._evaluate_loader(
                     val_loader,
@@ -2296,11 +2401,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     )
                 checkpoint_metrics = {
                     "epoch": epoch + 1,
-                    "val_data_loss": val_result.data_loss,
-                    "val_selector_regularization": val_result.selector_regularization,
-                    "val_accuracy": val_result.accuracy,
-                    "val_roc_auc": val_result.roc_auc,
+                    **val_result.checkpoint_metrics("val"),
                 }
+                clean_evaluated = False
                 if (
                     checkpoint_controller.requires_interval_clean_evaluation
                     and checkpoint_controller.is_eligible_epoch(epoch + 1)
@@ -2312,15 +2415,9 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                         selector_specs=selector_specs,
                     )
                     checkpoint_metrics.update(
-                        {
-                            "clean_train_data_loss": clean_result.data_loss,
-                            "clean_train_selector_regularization": (
-                                clean_result.selector_regularization
-                            ),
-                            "clean_train_accuracy": clean_result.accuracy,
-                            "clean_train_roc_auc": clean_result.roc_auc,
-                        }
+                        clean_result.checkpoint_metrics("clean_train")
                     )
+                    clean_evaluated = True
                     self.clean_train_loss_history_.append(clean_result.data_loss)
                     self.clean_train_accuracy_history_.append(clean_result.accuracy)
                     self.clean_train_roc_auc_history_.append(clean_result.roc_auc)
@@ -2335,6 +2432,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                         selector_specs=selector_specs,
                         capture_optimizer_state=capture_optimizer_state,
                     ),
+                    clean_evaluated=clean_evaluated,
                 )
                 if observation.opportunity:
                     if observation.progress:
@@ -2347,6 +2445,14 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     f"val_acc={val_result.accuracy:.4f} "
                     f"val_roc_auc={fmt_metric(val_result.roc_auc)}"
                 )
+                checkpoint_suffix = (
+                    checkpoint_controller.format_epoch_metrics(checkpoint_metrics)
+                    + checkpoint_controller.format_epoch_rankings(observation)
+                )
+                checkpoint_event_data = checkpoint_controller.epoch_event_data(
+                    metrics=checkpoint_metrics,
+                    observation=observation,
+                )
             epoch_time = time.perf_counter() - epoch_start
             aux_suffix = "" if avg_aux is None else f" edge_density={avg_aux:.6f}"
             epoch_message = (
@@ -2356,7 +2462,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                 f"roc_auc={fmt_metric(avg_auc)} "
                 f"(delta {fmt_metric(auc_delta) if auc_delta is not None else 'n/a'})"
                 f" optimizer_steps={optimizer_steps}{aux_suffix} "
-                f"epoch_time={epoch_time:.2f}s{val_suffix}"
+                f"epoch_time={epoch_time:.2f}s{val_suffix}{checkpoint_suffix}"
             )
             if is_experiment_logging_configured():
                 log_event(
@@ -2365,6 +2471,10 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     epoch_message,
                     epoch=epoch + 1,
                     total_epochs=int(self.epochs),
+                    data={
+                        "epoch": epoch + 1,
+                        **checkpoint_event_data,
+                    },
                 )
             else:
                 self._vprint(1, epoch_message)
@@ -2400,14 +2510,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     n_classes,
                     selector_specs=selector_specs,
                 )
-                return {
-                    "clean_train_data_loss": result.data_loss,
-                    "clean_train_selector_regularization": (
-                        result.selector_regularization
-                    ),
-                    "clean_train_accuracy": result.accuracy,
-                    "clean_train_roc_auc": result.roc_auc,
-                }
+                return result.checkpoint_metrics("clean_train")
 
             selected_candidate = checkpoint_controller.finalize(
                 enrich_candidate=(
@@ -2441,6 +2544,24 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.selected_checkpoint_score_ = (
             None if selected_candidate is None else selected_candidate.final_score
         )
+        self.selected_checkpoint_scores_ = (
+            {} if selected_candidate is None else dict(selected_candidate.score_values)
+        )
+        if selected_candidate is not None:
+            self.checkpoint_selection_ranking_ = (
+                checkpoint_controller.final_ranking_summary()
+            )
+            self.checkpoint_diagnostic_rankings_ = (
+                checkpoint_controller.score_rankings_summary(
+                    only_show_at_end=True
+                )
+            )
+            self.checkpoint_candidate_nominations_ = (
+                checkpoint_controller.candidate_nominations_summary()
+            )
+            self.checkpoint_final_scope_ = checkpoint_controller.final_ranking_scope
+            self._emit_checkpoint_selection_output(checkpoint_controller)
+            checkpoint_controller.release_unselected_candidate_states()
         self.stop_reason_ = stop_reason
         self.epochs_completed_ = epochs_completed
         self._vprint(
@@ -2448,6 +2569,53 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             f"[Train] restored selected state from epoch {selected_state.epoch} "
             f"(mode={self.clean_train_mode})",
         )
+
+    def _emit_checkpoint_selection_output(
+        self,
+        checkpoint_controller: CheckpointController,
+    ) -> None:
+        final_name = checkpoint_controller.final_score_name
+        selected_score = self.selected_checkpoint_score_
+        score_text = (
+            "n/a" if selected_score is None else f"{float(selected_score):.8f}"
+        )
+        selected_entry = self.checkpoint_selection_ranking_[0]
+        source_ranks = selected_entry["candidate_source_ranks"]
+        provenance = (
+            "none"
+            if not source_ranks
+            else ",".join(
+                f"{name}#{rank}" for name, rank in sorted(source_ranks.items())
+            )
+        )
+        self._vprint(
+            0,
+            f"[Checkpoint] selected epoch={self.best_epoch_} "
+            f"{final_name}={score_text} scope={self.checkpoint_final_scope_}; "
+            f"nominated_by={provenance}; "
+            f"metrics: {format_checkpoint_metrics(self.selected_checkpoint_metrics_)}; "
+            f"scores: {format_checkpoint_scores(self.selected_checkpoint_scores_)}",
+        )
+        for entry in self.checkpoint_selection_ranking_[1:]:
+            self._vprint(
+                0,
+                f"[Checkpoint] final runner-up rank=#{entry['rank']} "
+                f"epoch={entry['epoch']} {final_name}={float(entry['score']):.8f}; "
+                f"metrics: {format_checkpoint_metrics(entry['metrics'])}; "
+                f"scores: {format_checkpoint_scores(entry['scores'])}",
+            )
+        for name, entries in self.checkpoint_diagnostic_rankings_.items():
+            for entry in entries:
+                selected = " selected" if entry["selected"] else ""
+                provenance = ",".join(entry["candidate_sources"]) or "none"
+                self._vprint(
+                    0,
+                    f"[Checkpoint] diagnostic ranking={name} "
+                    f"rank=#{entry['rank']} epoch={entry['epoch']} "
+                    f"score={float(entry['score']):.8f}{selected} "
+                    f"nominated_by={provenance}; "
+                    f"metrics: {format_checkpoint_metrics(entry['metrics'])}",
+                )
 
     def _finalize_fit_summary(
         self,
@@ -2465,7 +2633,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             for key, value in selected_metrics.items()
         )
         summary = {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": fit_context.get("run_id"),
             "fit_id": str(fit_context["fit_id"]),
             "pipeline": fit_context.get(
@@ -2488,11 +2656,11 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             "checkpoint_policy": checkpoint_controller.policy_summary(),
             "early_stopping_policy": {
                 "patience": self.early_stopping_patience,
-                "opportunity_unit": (
-                    "eligible_clean_evaluation"
-                    if self.clean_train_mode == "interval"
-                    else "epoch"
-                ),
+                "opportunity_unit": {
+                    "disabled": "validation_epoch",
+                    "interval": "eligible_clean_evaluation",
+                    "deferred_candidates": "candidate_prefix_observation",
+                }[self.clean_train_mode],
             },
             "epochs_completed": int(getattr(self, "epochs_completed_", 0)),
             "selected_epoch": self.best_epoch_,
@@ -2504,6 +2672,15 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
             ),
             "selected_metrics": selected_metrics,
             "selected_score": getattr(self, "selected_checkpoint_score_", None),
+            "selected_scores": dict(self.selected_checkpoint_scores_),
+            "selection_ranking": list(self.checkpoint_selection_ranking_),
+            "selection_ranking_scope": self.checkpoint_final_scope_,
+            "candidate_nominations": dict(
+                self.checkpoint_candidate_nominations_
+            ),
+            "diagnostic_rankings": dict(
+                self.checkpoint_diagnostic_rankings_
+            ),
             "clean_train_metrics_available": clean_available,
             "stop_reason": self.stop_reason_,
             "effective_configuration_reference": fit_context.get(
@@ -2532,9 +2709,10 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     ],
                     "selected_epoch": summary["selected_epoch"],
                     "selected_scorer": summary["checkpoint_policy"][
-                        "checkpoint_scorer"
+                        "final_checkpoint_score"
                     ],
                     "selected_score": summary["selected_score"],
+                    "selected_scores": summary["selected_scores"],
                     "selected_metrics": selected_metrics,
                 },
             )
@@ -2545,7 +2723,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
         self.alpha_optimizer_ = None
         self.fit_summary_ = summary
         if is_experiment_logging_configured():
-            scorer_name = summary["checkpoint_policy"]["checkpoint_scorer"]["name"]
+            scorer_name = summary["checkpoint_policy"]["final_checkpoint_score"]
             selected_score = summary["selected_score"]
             score_text = (
                 "n/a" if selected_score is None else f"{float(selected_score):.8f}"
@@ -2657,14 +2835,19 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
 
         if not y_all:
             raise RuntimeError("Evaluation loader produced no batches.")
+        y_true = np.concatenate(y_all)
+        probabilities = np.concatenate(p_all)
+        custom_metrics = {
+            metric.name: metric.evaluate(y_true, probabilities)
+            for metric in self.prediction_metrics
+        }
         return LoaderEvaluation(
             data_loss=data_loss_sum / n_batches,
             selector_regularization=selector_regularization_sum / n_batches,
             accuracy=n_correct / max(1, n_seen),
-            roc_auc=safe_roc_auc(
-                np.concatenate(y_all), np.concatenate(p_all), n_classes
-            ),
+            roc_auc=safe_roc_auc(y_true, probabilities, n_classes),
             selector_summary=_finalize_selector_diagnostics(selector_accumulators),
+            prediction_metrics=custom_metrics,
         )
 
     def _predict_logits(self, X) -> np.ndarray:

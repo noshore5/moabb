@@ -399,6 +399,18 @@ PIPELINE_PARAM_GRIDS = {
         "batch_size": [32],
     },
     "WCT-Evidence-GNN": {
+        # Checkpoint-policy defaults are explicit here so an experiment can replace
+        # each layer independently. See checkpoint_selection_probe.py for a filled
+        # deferred-candidate example using CheckpointScorer, PredictionMetric,
+        # ScoreRanking, CandidateSource, and CheckpointReporting.
+        "clean_train_mode": ["disabled"],
+        "final_checkpoint_score": ["val_loss"],
+        "checkpoint_scores": [()],
+        "clean_train_scores": [()],
+        "candidate_sources": [()],
+        "prediction_metrics": [()],
+        "checkpoint_reporting": [None],
+        "clean_train_interval": [1],
         "batch_size": [32],
         "readout_mode": ["flatten"],
         "evidence_norm": ["active_slots"],
