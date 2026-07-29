@@ -27,6 +27,18 @@ from coheriqs_contributions.moabb_pipelines.wct_evidence_gnn_classifier import (
     WCTEvidenceGNNCore,
 )
 from coheriqs_contributions.nn_components import CategoricalGateConfig, SelectPath
+from coheriqs_contributions.wct_cache import NoiseBankHandle
+
+
+@pytest.fixture
+def direct_initial_detail_output(monkeypatch) -> None:
+    """Select the legacy stdout path independently of process-global logging."""
+
+    monkeypatch.setattr(
+        "coheriqs_contributions.moabb_pipelines.common."
+        "is_experiment_logging_configured",
+        lambda: False,
+    )
 
 
 def _linear_layers(module: nn.Module) -> list[nn.Linear]:
@@ -517,7 +529,10 @@ def test_custom_model_summary_default_noop(capsys) -> None:
     assert capsys.readouterr().out == ""
 
 
-def test_wct_evidence_custom_model_summary_prints_mode_and_memory(capsys) -> None:
+def test_wct_evidence_custom_model_summary_prints_mode_and_memory(
+    capsys,
+    direct_initial_detail_output,
+) -> None:
     core = WCTEvidenceGNNCore(
         n_channels=3,
         nfreqs=4,
@@ -545,6 +560,7 @@ def test_wct_evidence_custom_model_summary_prints_mode_and_memory(capsys) -> Non
 
 def test_wct_evidence_summary_includes_selectable_message_mlp_diagnostics(
     capsys,
+    direct_initial_detail_output,
 ) -> None:
     core = WCTEvidenceGNNCore(
         n_channels=3,
@@ -948,13 +964,19 @@ def test_noise_channel_std_uses_training_split_after_resampling(monkeypatch) -> 
 
     def fake_noise_bank(**kwargs):
         captured.update(kwargs)
+        packed = np.zeros((3, 2, 5), dtype=np.complex64)
         return (
             (
                 torch.zeros(3, 2),
                 torch.zeros(3, 2, 4),
                 torch.zeros(3, 2, 4),
             ),
-            None,
+            NoiseBankHandle(
+                packed=packed,
+                hit=False,
+                key="test-noise-bank",
+                path=None,
+            ),
         )
 
     monkeypatch.setattr(
@@ -974,6 +996,10 @@ def test_noise_channel_std_uses_training_split_after_resampling(monkeypatch) -> 
     assert torch.equal(estimator.noise_channel_std_, expected)
     assert captured["bank_size"] == 3
     assert captured["segment_length"] == 8
+    assert estimator.noise_bank_cache_hit_ is False
+    assert estimator.noise_bank_cache_bytes_ == (
+        3 * 2 * 5 * np.dtype(np.complex64).itemsize
+    )
 
 
 def test_component_seed_grid_propagates_independently_to_core() -> None:
@@ -1634,7 +1660,10 @@ def test_message_seed_override_does_not_change_readout_seed_stream() -> None:
         assert torch.equal(first_param, second_param)
 
 
-def test_parameter_hashes_track_reproducible_initialization(capsys) -> None:
+def test_parameter_hashes_track_reproducible_initialization(
+    capsys,
+    direct_initial_detail_output,
+) -> None:
     first = WCTEvidenceGNNCore(3, 4, 2, model_init_seed=23)
     second = WCTEvidenceGNNCore(3, 4, 2, model_init_seed=23)
 
