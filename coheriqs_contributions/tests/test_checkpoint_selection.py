@@ -224,6 +224,51 @@ def test_disabled_keeps_clean_diagnostics_dormant_and_ranks_other_scores():
     assert "clean_train_roc_auc" in controller.policy_summary()["inactive_scores"]
 
 
+def test_default_epoch_event_includes_authoritative_selection_ranking():
+    controller = CheckpointController()
+    observation = controller.observe(
+        epoch=1,
+        metrics={"val_data_loss": 0.5},
+        state_factory=lambda: _state(1),
+    )
+
+    event_data = controller.epoch_event_data(
+        metrics={"epoch": 1, "val_data_loss": 0.5},
+        observation=observation,
+    )
+
+    assert event_data["checkpoint_rankings"] == {}
+    assert event_data["checkpoint_selection_ranking"] == {
+        "scorer": "val_loss",
+        "score": -0.5,
+        "rank": 1,
+        "top_k": 1,
+        "accepted": True,
+        "retained": True,
+        "selected": True,
+        "became_selected": True,
+    }
+
+
+def test_final_score_show_at_end_remains_user_controlled():
+    controller = CheckpointController(
+        reporting=CheckpointReporting(
+            score_rankings=(
+                ScoreRanking("val_loss", 1, show_at_end=True),
+            )
+        )
+    )
+    controller.observe(
+        epoch=1,
+        metrics={"val_data_loss": 0.5},
+        state_factory=lambda: _state(1),
+    )
+    controller.finalize()
+
+    diagnostics = controller.score_rankings_summary(only_show_at_end=True)
+    assert diagnostics["val_loss"][0]["selected"] is True
+
+
 def test_exact_ties_prefer_earlier_epoch_and_none_never_captures_state():
     scorer = CheckpointScorer(partial(_recent_score, window=2), name="warm")
     controller = CheckpointController(
@@ -361,7 +406,6 @@ def test_deferred_enriches_union_before_full_history_clean_scoring():
             selection_runner_ups=2,
             score_rankings=(
                 ScoreRanking("val_loss", 3),
-                ScoreRanking("final-clean", 3, show_at_end=True),
             ),
         ),
     )
@@ -388,6 +432,41 @@ def test_deferred_enriches_union_before_full_history_clean_scoring():
     assert controller.final_ranking_summary()[0]["candidate_sources"] == ["val_loss"]
     assert controller.candidate_nominations_summary()["val_loss"][1]["selected"]
     assert controller.final_ranking_scope == "enriched_candidate_union"
+
+
+def test_end_diagnostic_provenance_excludes_displaced_candidate_entries():
+    controller = CheckpointController(
+        mode="deferred_candidates",
+        final_checkpoint_score="clean_train_loss",
+        clean_train_scores=("clean_train_loss",),
+        candidate_sources=(CandidateSource("val_loss", 1),),
+        reporting=CheckpointReporting(
+            score_rankings=(
+                ScoreRanking("val_loss", 3, show_at_end=True),
+            )
+        ),
+    )
+    for epoch, loss in enumerate((0.5, 0.4, 0.3), start=1):
+        controller.observe(
+            epoch=epoch,
+            metrics={"val_data_loss": loss},
+            state_factory=lambda epoch=epoch: _state(epoch),
+        )
+
+    controller.finalize(
+        enrich_candidate=lambda candidate: {
+            "clean_train_data_loss": float(candidate.epoch)
+        }
+    )
+    entries = controller.score_rankings_summary(only_show_at_end=True)["val_loss"]
+
+    assert [entry["epoch"] for entry in entries] == [3, 2, 1]
+    assert entries[0]["candidate_sources"] == ["val_loss"]
+    assert entries[0]["candidate_source_ranks"] == {"val_loss": 1}
+    assert entries[1]["candidate_sources"] == []
+    assert entries[1]["candidate_source_ranks"] == {}
+    assert entries[2]["candidate_sources"] == []
+    assert entries[2]["candidate_source_ranks"] == {}
 
 
 def test_candidate_sources_share_epoch_state_and_release_prefixes():
@@ -597,8 +676,13 @@ def test_interval_fit_logging_summary_and_named_partial(monkeypatch):
         checkpoint_reporting=CheckpointReporting(
             selection_runner_ups=1,
             score_rankings=(
-                ScoreRanking("val_roc_auc", 3, show_each_epoch=True),
-                ScoreRanking(scorer.name, 2, show_each_epoch=True, show_at_end=True),
+                ScoreRanking(
+                    "val_roc_auc",
+                    3,
+                    show_each_epoch=True,
+                    show_at_end=True,
+                ),
+                ScoreRanking(scorer.name, 2, show_each_epoch=True),
             ),
             show_epoch_metrics=("val_brier_score",),
         ),
@@ -623,6 +707,10 @@ def test_interval_fit_logging_summary_and_named_partial(monkeypatch):
     assert "checkpoint_metrics" in epoch_event["data"]
     assert "checkpoint_scores" in epoch_event["data"]
     assert "checkpoint_rankings" in epoch_event["data"]
+    assert "checkpoint_selection_ranking" in epoch_event["data"]
+    assert epoch_event["data"]["checkpoint_selection_ranking"]["scorer"] == (
+        scorer.name
+    )
     assert any(
         "checkpoint_ranks:" in message
         for category, message, _ in events
@@ -635,6 +723,10 @@ def test_interval_fit_logging_summary_and_named_partial(monkeypatch):
     ]
     assert any("final runner-up rank=#2" in message for message in status_messages)
     assert any(
+        "diagnostic ranking=val_roc_auc" in message
+        for message in status_messages
+    )
+    assert not any(
         "diagnostic ranking=clean-loss-plus-auc" in message
         for message in status_messages
     )
@@ -696,6 +788,30 @@ def test_interval_early_stopping_counts_only_final_rank_opportunities():
     assert estimator.epochs_completed_ == 4
     assert estimator.best_epoch_ == 2
     assert estimator.stop_reason_ == "early_stopping"
+
+
+def test_deferred_early_stopping_counts_candidate_prefix_progress():
+    estimator = _ConstantEvalTinyClassifier(
+        epochs=8,
+        clean_train_mode="deferred_candidates",
+        final_checkpoint_score="clean_train_loss",
+        clean_train_scores=("clean_train_loss",),
+        candidate_sources=(CandidateSource("val_loss", 2),),
+        checkpoint_reporting=CheckpointReporting(
+            score_rankings=(ScoreRanking("val_loss", 2),)
+        ),
+        early_stopping_patience=1,
+    )
+    X, y = _tiny_data()
+    estimator.fit(X, y)
+
+    assert estimator.epochs_completed_ == 3
+    assert estimator.best_epoch_ == 1
+    assert estimator.stop_reason_ == "early_stopping"
+    assert [
+        entry["epoch"]
+        for entry in estimator.fit_summary_["candidate_nominations"]["val_loss"]
+    ] == [1, 2]
 
 
 def test_fit_discards_unrequested_optimizer_state_and_emits_schema_v2():

@@ -65,8 +65,9 @@ instead of failing the run. Per-group effective configuration and the optional
 
 ## Training / eval gotchas
 
-- Checkpointing uses validation **loss**; MOABB reports outer **ROC-AUC** — they
-  can disagree on small val splits.
+- Checkpointing defaults to validation **loss**, but may use any registered
+  final checkpoint score; MOABB reports outer **ROC-AUC**. The within-fit
+  selection utility and outer outcome can disagree on small validation splits.
 - The named checkpoint policy parameters are `final_checkpoint_score`,
   `checkpoint_scores`, `clean_train_scores`, `candidate_sources`,
   `prediction_metrics`, and `checkpoint_reporting`.
@@ -81,7 +82,10 @@ instead of failing the run. Per-group effective configuration and the optional
   final-score presentation and never retains runner-up states or triggers
   evaluation passes. `checkpoint_reporting` is operational and excluded from
   MOABB result identity; scoring, gating, prediction metrics, and candidate
-  depths remain semantic.
+  depths remain semantic. The final score already uses the authoritative
+  `selection_runner_ups` output, so its `ScoreRanking` normally keeps
+  `show_at_end=False`; setting it to `True` remains valid and deliberately adds
+  a second diagnostic rendering.
 - Non-clean-gated scores run after every validation record. Clean-gated scores
   run only with a fresh clean pass: on eligible epochs in `interval`, and over
   the fully enriched candidate union after training in `deferred_candidates`.
@@ -99,7 +103,10 @@ instead of failing the run. Per-group effective configuration and the optional
 - Schema-v2 fit summaries and readable checkpoint messages include the selected
   raw metrics and named scores, authoritative final ranking/scope, candidate
   nominations, configured end diagnostics, and inactive-score reasons.
-  Runner-up and diagnostic output reuses cached observations.
+  Runner-up and diagnostic output reuses cached observations. Structured epoch
+  data records the authoritative selection-ranking update independently of
+  optional observational rankings, and final nomination provenance excludes
+  epochs displaced from every candidate-source prefix.
 - Validation and clean-training checkpoint metrics use the same non-shuffled
   evaluation path. It temporarily switches the model to evaluation mode, runs
   without gradients, bypasses training-only input augmentation, and restores

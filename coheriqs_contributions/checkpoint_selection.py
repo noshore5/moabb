@@ -295,6 +295,7 @@ class SelectionObservation:
     progress: bool
     evaluated_scores: Mapping[str, float | None] = field(default_factory=dict)
     rankings: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    selection_ranking: Mapping[str, object] | None = None
     candidate_sources: tuple[str, ...] = ()
 
 
@@ -514,6 +515,21 @@ class CheckpointController:
 
         final_score = scores.get(self.final_score_name)
         final_progress = False
+        selection_ranking_status = None
+        if (
+            self.mode in {"disabled", "interval"}
+            and self.final_score_name in scores
+        ):
+            selection_ranking_status = {
+                "scorer": self.final_score_name,
+                "score": final_score,
+                "rank": None,
+                "top_k": self._final_capacity,
+                "accepted": False,
+                "retained": False,
+                "selected": False,
+                "became_selected": False,
+            }
         if self.mode in {"disabled", "interval"} and final_score is not None:
             self._insert_lightweight_ranking(
                 self._final_ranking,
@@ -539,6 +555,22 @@ class CheckpointController:
                     final_score=final_score,
                 )
                 final_progress = True
+            retained_epochs = [item.epoch for item in self._final_ranking]
+            current_rank = (
+                retained_epochs.index(int(epoch)) + 1
+                if int(epoch) in retained_epochs
+                else None
+            )
+            selection_ranking_status = {
+                "scorer": self.final_score_name,
+                "score": final_score,
+                "rank": current_rank,
+                "top_k": self._final_capacity,
+                "accepted": current_rank is not None,
+                "retained": current_rank is not None,
+                "selected": winner.epoch == int(epoch),
+                "became_selected": final_progress,
+            }
 
         retained_sources = []
         source_progress = False
@@ -569,9 +601,6 @@ class CheckpointController:
             )
             retained_sources.append(source.scorer)
             source_progress = True
-        if retained_sources:
-            self._mark_candidate_sources(int(epoch), retained_sources)
-
         if self.mode == "deferred_candidates":
             opportunity = ready_sources > 0
             progress = source_progress
@@ -583,6 +612,7 @@ class CheckpointController:
             progress=progress,
             evaluated_scores=scores,
             rankings=ranking_status,
+            selection_ranking=selection_ranking_status,
             candidate_sources=tuple(retained_sources),
         )
 
@@ -876,6 +906,11 @@ class CheckpointController:
                 name: dict(status)
                 for name, status in observation.rankings.items()
             },
+            "checkpoint_selection_ranking": (
+                None
+                if observation.selection_ranking is None
+                else dict(observation.selection_ranking)
+            ),
             "candidate_sources_retained": list(observation.candidate_sources),
         }
 
@@ -915,16 +950,6 @@ class CheckpointController:
                     positions[name] = rank
                     break
         return positions
-
-    def _mark_candidate_sources(
-        self,
-        epoch: int,
-        source_names: Sequence[str],
-    ) -> None:
-        for ranking in (*self._score_rankings.values(), self._final_ranking):
-            for entry in ranking:
-                if entry.epoch == epoch:
-                    entry.candidate_sources.update(source_names)
 
     def policy_summary(self) -> dict[str, object]:
         dormant = (
