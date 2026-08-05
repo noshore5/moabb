@@ -68,17 +68,14 @@ CANONICAL_CONFIG = {
         ],
     },
     "sparse": {
-        # Exploratory: full-resolution coherence + region-consolidated sparse
-        # events + learned per-channel embeddings, instead of fixed time
-        # windows. Validated only on subject 1 so far (mean test acc 0.750
-        # vs WCT-Evidence-GNN's 0.7135/0.753) -- see
-        # sparse_evidence_gnn_classifier.py docstring for the exploration
-        # history and caveats before trusting this beyond subject 1.
         "runner": "run_wct_gnn",
         "pipeline": "Sparse-Evidence-GNN",
         "args": [
             "--subjects",
             "1",
+            "2",
+            "3",
+            "4",
             "--pipeline",
             "Sparse-Evidence-GNN",
             "--run-id",
