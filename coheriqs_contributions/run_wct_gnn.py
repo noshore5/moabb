@@ -47,6 +47,9 @@ from coheriqs_contributions.moabb_pipelines.wct_phase_gnn_classifier import (
 from coheriqs_contributions.moabb_pipelines.wct_evidence_gnn_classifier import (
     WCTEvidenceGNNClassifier,
 )
+from coheriqs_contributions.moabb_pipelines.sparse_evidence_gnn_classifier import (
+    SparseEvidenceGNNClassifier,
+)
 from coheriqs_contributions.moabb_pipelines.xwt_phase_gnn_classifier import (
     XWTPhaseGNNClassifier,
     XWTPhaseGNNV2Classifier,
@@ -168,6 +171,42 @@ def _make_wct_evidence_gnn():
         optimizer_step_remainder_policy="flush",
         channel_subset=[1, 5, 7,8, 9, 10, 11, 13, 17],
         verbose=3,
+    )
+
+
+def _make_sparse_evidence_gnn():
+    # Exploratory: full-resolution coherence + region-consolidated sparse
+    # events + learned per-channel signal embeddings, instead of fixed time
+    # windows. Validated only on subject 1 (mean test acc 0.750, vs
+    # WCTEvidenceGNN's 0.7135 baseline / 0.753 with window_size=5) -- not
+    # yet robustness-checked across subjects the way the windowed pipeline's
+    # hyperparameters were. See sparse_evidence_gnn_classifier.py docstring.
+    return SparseEvidenceGNNClassifier(
+        sampling_rate=250,
+        lowest=8.0,
+        highest=35.0,
+        nfreqs=16,
+        cwt_resample_n_time=200,
+        coherence_threshold=0.5,
+        phase_threshold_deg=30.0,
+        hidden_dim=8,
+        channel_embed_dim=8,
+        epochs=50,
+        batch_size=16,
+        learning_rate=1e-3,
+        weight_decay=1e-4,
+        grad_clip_norm=0.1,
+        normalize_input=True,
+        noise_augmentation_enabled=False,
+        validation_split=0.2,
+        validation_group_column=None,
+        early_stopping_patience=None,
+        device="auto",
+        seed=42,
+        smooth_kernel_size=(5, 3),
+        smooth_kernel_sigma=(None, None),
+        channel_subset=[1, 5, 7, 8, 9, 10, 11, 13, 17],
+        verbose=2,
     )
 
 
@@ -329,6 +368,7 @@ PIPELINE_BUILDERS = {
     "CWT-CNN": _make_cwt_cnn,
     "EEGNet": _make_eegnet,
     "WCT-Evidence-GNN": _make_wct_evidence_gnn,
+    "Sparse-Evidence-GNN": _make_sparse_evidence_gnn,
     "WCT-Phase-GNN": _make_wct_phase_gnn,
     "WCT-Phase-GNN-V2": _make_wct_phase_gnn_v2,
     "Wavelet-RF": _make_wavelet_rf,
@@ -444,6 +484,18 @@ PIPELINE_PARAM_GRIDS = {
         "verbose": [2],
         "device": ["auto"],
 
+    },
+    "Sparse-Evidence-GNN": {
+        "batch_size": [16],
+        "epochs": [50],
+        "learning_rate": [1.0e-3],
+        "weight_decay": [1.0e-4],
+        "hidden_dim": [8],
+        "channel_embed_dim": [8],
+        "coherence_threshold": [0.5],
+        "phase_threshold_deg": [30.0],
+        "verbose": [2],
+        "device": ["auto"],
     },
     "WCT-Phase-GNN-V2": {
         "batch_size": [32],

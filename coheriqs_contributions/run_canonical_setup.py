@@ -11,8 +11,8 @@ from importlib import import_module
 CONTRIB_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CONTRIB_DIR.parent
 
-# Flip this between "msc", "wct" and "eegnet" to switch the canonical pipeline.
-CANONICAL_VARIANT = "wct"
+# Flip this between "msc", "wct", "eegnet", and "sparse" to switch the canonical pipeline.
+CANONICAL_VARIANT = "sparse"
 
 CANONICAL_CONFIG = {
     "msc": {
@@ -20,7 +20,7 @@ CANONICAL_CONFIG = {
         "pipeline": "MSC-Evidence-GNN",
         "args": [
             "--subjects",
-            "1",
+            "11",
             "--pipeline",
             "MSC-Evidence-GNN",
             "--run-id",
@@ -36,7 +36,7 @@ CANONICAL_CONFIG = {
         "pipeline": "WCT-Evidence-GNN",
         "args": [
             "--subjects",
-            "1",
+            "3",
             "--pipeline",
             "WCT-Evidence-GNN",
             "--run-id",
@@ -52,15 +52,37 @@ CANONICAL_CONFIG = {
         ],
     },
     "eegnet": {
-        "runner": "run_eegnet",
+        "runner": "run_wct_gnn",
         "pipeline": "EEGNet",
         "args": [
             "--subjects",
-            "1",
+            "3",
             "--pipeline",
             "EEGNet",
             "--run-id",
             "canonical-eegnet",
+            "--console-all",
+            "--no-console-train-steps",
+            "--console-selector-every",
+            "0",
+        ],
+    },
+    "sparse": {
+        # Exploratory: full-resolution coherence + region-consolidated sparse
+        # events + learned per-channel embeddings, instead of fixed time
+        # windows. Validated only on subject 1 so far (mean test acc 0.750
+        # vs WCT-Evidence-GNN's 0.7135/0.753) -- see
+        # sparse_evidence_gnn_classifier.py docstring for the exploration
+        # history and caveats before trusting this beyond subject 1.
+        "runner": "run_wct_gnn",
+        "pipeline": "Sparse-Evidence-GNN",
+        "args": [
+            "--subjects",
+            "1",
+            "--pipeline",
+            "Sparse-Evidence-GNN",
+            "--run-id",
+            "canonical-sparse",
             "--console-all",
             "--no-console-train-steps",
             "--console-selector-every",
@@ -75,7 +97,7 @@ def _canonical_config() -> dict[str, object]:
         return CANONICAL_CONFIG[CANONICAL_VARIANT]
     except KeyError as exc:
         raise ValueError(
-            "CANONICAL_VARIANT must be one of 'msc', 'wct', or 'eegnet'."
+            "CANONICAL_VARIANT must be one of 'msc', 'wct', 'eegnet', or 'sparse'."
         ) from exc
 
 
