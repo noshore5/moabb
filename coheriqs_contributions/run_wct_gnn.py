@@ -166,7 +166,7 @@ def _make_wct_evidence_gnn():
         optimizer_step_batch_size=None,
         optimizer_step_batch_mode="credit",
         optimizer_step_remainder_policy="flush",
-        channel_subset=[1, 5, 7, 8, 9, 10, 11, 13, 17],
+        channel_subset=[1, 5, 7,8, 9, 10, 11, 13, 17],
         verbose=3,
     )
 
@@ -387,7 +387,7 @@ PIPELINE_PARAM_GRIDS = {
         "batch_size": [32],
     },
     "WCT-Evidence-GNN": {
-        "batch_size": [32],
+        "batch_size": [16],
         "readout_mode": ["flatten"],
         "evidence_norm": ["active_slots"],
         "message_layer_norm": [False],
@@ -395,17 +395,19 @@ PIPELINE_PARAM_GRIDS = {
         # "message_init_seed": [43],
         # "readout_init_seed": [44],
         "select_message_mlp": [
-            # None,  # To enable selectable message MLP candidates, replace None with:
-            [
-                {"init_seed": 101},
-                {
-                    "init_seed": 103,
-                    # "message_dim": 16,
-                    # "message_layer_norm": True,
-                },
-                {"init_seed": 104},
-
-            ],
+            None,  # Disabled: the 3-candidate selector overfit on the small
+            # per-subject validation split (train/test gap +0.064 vs +0.001
+            # without it). To re-enable selectable message MLP candidates,
+            # replace None with:
+            # [
+            #     {"init_seed": 101},
+            #     {
+            #         "init_seed": 103,
+            #         # "message_dim": 16,
+            #         # "message_layer_norm": True,
+            #     },
+            #     {"init_seed": 104},
+            # ],
         ],
         "select_message_mlp_gate": [
             # None,

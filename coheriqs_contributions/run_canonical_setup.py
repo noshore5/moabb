@@ -11,7 +11,7 @@ from importlib import import_module
 CONTRIB_DIR = Path(__file__).resolve().parent
 REPO_ROOT = CONTRIB_DIR.parent
 
-# Flip this between "msc" and "wct" to switch the canonical pipeline.
+# Flip this between "msc", "wct" and "eegnet" to switch the canonical pipeline.
 CANONICAL_VARIANT = "wct"
 
 CANONICAL_CONFIG = {
@@ -51,6 +51,22 @@ CANONICAL_CONFIG = {
             "0",
         ],
     },
+    "eegnet": {
+        "runner": "run_eegnet",
+        "pipeline": "EEGNet",
+        "args": [
+            "--subjects",
+            "1",
+            "--pipeline",
+            "EEGNet",
+            "--run-id",
+            "canonical-eegnet",
+            "--console-all",
+            "--no-console-train-steps",
+            "--console-selector-every",
+            "0",
+        ],
+    },
 }
 
 
@@ -59,7 +75,7 @@ def _canonical_config() -> dict[str, object]:
         return CANONICAL_CONFIG[CANONICAL_VARIANT]
     except KeyError as exc:
         raise ValueError(
-            "CANONICAL_VARIANT must be either 'msc' or 'wct'."
+            "CANONICAL_VARIANT must be one of 'msc', 'wct', or 'eegnet'."
         ) from exc
 
 
