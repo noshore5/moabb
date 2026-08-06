@@ -712,11 +712,41 @@ class WCTEvidenceGNNCore(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         smooth_kernel, pad = smooth_kernel_and_pad
         batch_size, num_edges, n_time, nfreqs = xwt_real.shape
- 
+
         maps = torch.stack([xwt_real, xwt_imag, auto1, auto2], dim=2)
         maps = maps.view(batch_size * num_edges * 4, 1, n_time, nfreqs)
-        maps = torch.nn.functional.pad(maps, pad, mode=self.padding_mode)
-        smoothed = torch.nn.functional.conv2d(maps, smooth_kernel, stride=stride)
+
+        # smooth_kernel (from make_gaussian_weight2d) is separable by
+        # construction -- exp(-0.5*((h/sh)^2+(w/sw)^2)) is an outer product
+        # of two 1D gaussians before the joint normalization -- so a single
+        # conv2d over the full (kh, kw) kernel is mathematically identical
+        # to two sequential 1D convs (H then W). We use the latter because
+        # PyTorch's CPU conv2d im2col/unfold buffer scales with kh*kw*spatial,
+        # which blows up for elongated kernels (e.g. (25, 3) on this
+        # pipeline's edge-batched tensors materialized a ~21.6GB unfold and
+        # nearly OOM'd the machine); the separable form scales with
+        # (kh+kw)*spatial instead. The two 1D factors are recovered exactly
+        # from the 2D kernel's marginals (each already sums to 1 by
+        # construction: kernel[p,q] = kh_1d[p]*kw_1d[q]), so no extra
+        # arguments are needed and every existing caller/signature is
+        # unchanged.
+        pad_w_left, pad_w_right, pad_h_top, pad_h_bottom = pad
+        stride_h, stride_w = stride
+        kh_1d = smooth_kernel.sum(dim=-1, keepdim=True)  # [1, 1, kh, 1]
+        kw_1d = smooth_kernel.sum(dim=-2, keepdim=True)  # [1, 1, 1, kw]
+
+        if pad_h_top or pad_h_bottom:
+            maps = torch.nn.functional.pad(
+                maps, (0, 0, pad_h_top, pad_h_bottom), mode=self.padding_mode
+            )
+        maps = torch.nn.functional.conv2d(maps, kh_1d, stride=(stride_h, 1))
+
+        if pad_w_left or pad_w_right:
+            maps = torch.nn.functional.pad(
+                maps, (pad_w_left, pad_w_right, 0, 0), mode=self.padding_mode
+            )
+        smoothed = torch.nn.functional.conv2d(maps, kw_1d, stride=(1, stride_w))
+
         out_time, out_freq = smoothed.shape[-2:]
         smoothed = smoothed.view(batch_size, num_edges, 4, out_time, out_freq)
         smooth_cross = torch.complex(smoothed[:, :, 0], smoothed[:, :, 1])

@@ -186,9 +186,28 @@ def _make_sparse_evidence_gnn():
         lowest=8.0,
         highest=35.0,
         nfreqs=16,
-        cwt_resample_n_time=200,
+        # Native resolution (no post-CWT resample) + COI, standard
+        # thresholds. Root-caused the accuracy gap vs the old (pre-fix,
+        # resample=200) pipeline's ~0.80: it was NEVER the coherence/event
+        # pathway (density, COI, kernel size, thresholds, freq range were
+        # all tested and landed in [0.7606, 0.7623] regardless). It was
+        # ChannelSignalEncoder -- two kernel_size=9 convs give a fixed
+        # 17-sample receptive field, ~68ms at native 250Hz, too short to
+        # span even one mu-band cycle (~83-125ms). The old pipeline's
+        # resample-to-200 accidentally fixed this by giving that same
+        # 17-sample window a ~5x larger real-time span. Fixed properly via
+        # channel_encoder_dilation below instead of resampling raw_x (which
+        # would reintroduce the same real-signal-destroying resample bug we
+        # just removed from the coherence pathway, just relocated). See
+        # ChannelSignalEncoder's docstring in sparse_evidence_gnn_classifier.py.
+        cwt_resample_n_time=None,
         coherence_threshold=0.5,
         phase_threshold_deg=30.0,
+        # dilation=5 with kernel_size=9 -> receptive field = 1 + 8*5 + 8*5 =
+        # 81 samples = ~324ms at 250Hz -- ~3.2 cycles of an 8-12Hz mu rhythm.
+        # Grows the encoder's real-time window without resampling/discarding
+        # any raw signal and without growing the kernel's parameter count.
+        channel_encoder_dilation=5,
         hidden_dim=8,
         channel_embed_dim=8,
         epochs=50,
@@ -203,8 +222,17 @@ def _make_sparse_evidence_gnn():
         early_stopping_patience=None,
         device="auto",
         seed=42,
+        # (5,3): tested against (25,3) (restoring the old absolute smoothing
+        # window) and found no measurable difference -- kernel size isn't
+        # part of the accuracy story, so left at its original value.
+        # (25,3) is memory-safe now too: _smooth_wct_maps was switched to a
+        # separable (1D x 1D) conv (peak RSS ~2GB/precompute-chunk instead
+        # of a ~21.6GB conv2d im2col blowup; see wct_evidence_gnn_classifier.py).
         smooth_kernel_size=(5, 3),
         smooth_kernel_sigma=(None, None),
+        # Measured to cost ~0.0005 accuracy either way (noise-level) -- kept
+        # on since it's the physically-correct wavelet edge-of-support mask.
+        coi_enabled=True,
         channel_subset=[1, 5, 7, 8, 9, 10, 11, 13, 17],
         verbose=2,
     )

@@ -1026,6 +1026,15 @@ def augment_paired_cwt_batch(
 class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
     """Reusable sklearn-compatible PyTorch classifier lifecycle."""
 
+    # Label used in the per-epoch training log for the model's forward()
+    # aux/second-return-value (see _model_forward). Defaults to
+    # "edge_density" for backward compatibility with the WCT/XWT pipelines,
+    # where that aux value is genuinely a bounded [0,1] fraction of gated-on
+    # slots. Subclasses whose aux value means something else (e.g. a raw,
+    # unbounded count) should override this so the log doesn't misleadingly
+    # imply a percentage.
+    aux_metric_name: str = "edge_density"
+
     def _init_torch_classifier(
         self,
         *,
@@ -1713,7 +1722,7 @@ class TorchEEGClassifier(ClassifierMixin, BaseEstimator):
                     no_improve_epochs += 1
 
             epoch_time = time.perf_counter() - epoch_start
-            aux_suffix = "" if avg_aux is None else f" edge_density={avg_aux:.6f}"
+            aux_suffix = "" if avg_aux is None else f" {self.aux_metric_name}={avg_aux:.6f}"
             epoch_message = (
                 f"[Train][Epoch {epoch + 1}/{self.epochs}] "
                 f"loss={avg_loss:.6f} (improve {loss_delta:+.6f}) "
