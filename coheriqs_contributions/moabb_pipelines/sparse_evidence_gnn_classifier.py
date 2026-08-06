@@ -9,12 +9,14 @@ sin/cos(angle)) plus a learned per-channel signal embedding for its source
 and destination channel, and is routed into its destination node's evidence
 via the same graph topology as WCTEvidenceGNN.
 
-Validated in exploratory testing (subject 1, BNCI2014-001, cross-session):
-mean test accuracy 0.750 vs WCTEvidenceGNN baseline 0.7135 (window_size=25)
-and 0.753 (window_size=5) -- comparable to the best windowed result. Only
-tested on subject 1 with default architecture params; not yet validated for
-robustness across subjects the way the windowed pipeline's hyperparameters
-were (see run_wct_gnn.py's PIPELINE_PARAM_GRIDS comments for that history).
+Validated in exploratory testing (BNCI2014-001, cross-session, canonical
+4-subject run via run_canonical_setup.py): subj1=0.801 subj2=0.557 subj3=0.947
+subj4=0.539, pipeline mean=0.711. subj2/subj4 sitting near chance (0.5) is a
+property of those subjects, not this pipeline specifically -- EEGNet (100
+epochs) gets 0.603 on subject 2 too. Earlier single-subject number (0.750 on
+subject 1) is superseded by the above; not yet validated on subjects 5-9.
+See ChannelSignalEncoder's docstring below for the receptive-field fix
+(channel_encoder_dilation) that this accuracy depends on.
 
 This reuses WCTEvidenceGNNCore's buffers (src_idx/dst_idx from
 ordered_pair_indices) and its (non-trainable) coherence/phase computation
@@ -39,10 +41,14 @@ Two fixes validated via debug_plots/edge0_*.png before being wired in here:
     calls it once per trial (see _precompute_sparse_events) and forward()
     only does the trainable part (channel_encoder + sparse_message_mlp +
     sparse_classifier) every step. Measured ~9x faster end to end.
-The kernel_size=(5,3) smoothing was deliberately left unchanged: a bigger or
-scale-adaptive kernel measurably suppresses the estimator's own noise floor,
-but only by smearing away exactly the time/frequency resolution this sparse-
-event architecture is built to exploit.
+The kernel_size=(5,3) smoothing is deliberately left at this value: at native
+resolution (n_time~1001, 4.0ms/sample) it spans only ~20ms of time smoothing,
+vs ~100ms if the kernel were widened to (25,3) to match the smoothing width
+the old cwt_resample_n_time=200 pipeline had by accident. Re-tested (25,3)
+against (5,3) after the channel_encoder_dilation fix above -- 0.8008 vs
+0.7991 on subject 1, still noise-level -- so widening the kernel buys nothing
+and (5,3) is kept for the time/frequency resolution this sparse-event
+architecture is built to exploit.
 """
 
 from __future__ import annotations

@@ -56,7 +56,7 @@ CANONICAL_CONFIG = {
         "pipeline": "EEGNet",
         "args": [
             "--subjects",
-            "3",
+            "2",
             "--pipeline",
             "EEGNet",
             "--run-id",
@@ -70,6 +70,10 @@ CANONICAL_CONFIG = {
     "sparse": {
         "runner": "run_wct_gnn",
         "pipeline": "Sparse-Evidence-GNN",
+        # subjects 1-4: canonical validation set for Sparse-Evidence-GNN
+        # (2026-08-06). Last clean run: subj1=0.801 subj2=0.557 subj3=0.947
+        # subj4=0.538, mean=0.711 -- see sparse_evidence_gnn_classifier.py's
+        # module docstring and _make_sparse_evidence_gnn() in run_wct_gnn.py.
         "args": [
             "--subjects",
             "1",

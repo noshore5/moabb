@@ -177,10 +177,20 @@ def _make_wct_evidence_gnn():
 def _make_sparse_evidence_gnn():
     # Exploratory: full-resolution coherence + region-consolidated sparse
     # events + learned per-channel signal embeddings, instead of fixed time
-    # windows. Validated only on subject 1 (mean test acc 0.750, vs
-    # WCTEvidenceGNN's 0.7135 baseline / 0.753 with window_size=5) -- not
-    # yet robustness-checked across subjects the way the windowed pipeline's
-    # hyperparameters were. See sparse_evidence_gnn_classifier.py docstring.
+    # windows. With native (undamaged) CWT resolution everywhere plus the
+    # channel_encoder_dilation fix below, 4-subject canonical run:
+    # subj1=0.801 subj2=0.557 subj3=0.947 subj4=0.538, pipeline mean=0.711.
+    # subj2/subj4 near chance is a property of those subjects, not this
+    # pipeline: EEGNet (100 epochs) also only gets 0.603 on subject 2.
+    # See sparse_evidence_gnn_classifier.py's module docstring.
+    #
+    # CAUTION reading run output: run_canonical_setup.py's companion CSV/
+    # summary writer isn't safe against concurrent invocations against the
+    # same --run-id (see _write_group_artifacts's docstring below) -- if
+    # you run this while another instance is also running, "Per pipeline
+    # mean scores" can silently double-count a subject. Trust "Per
+    # subject/pipeline mean scores" (averaged by hand across subjects) over
+    # the pipeline-mean line if the two don't reconcile.
     return SparseEvidenceGNNClassifier(
         sampling_rate=250,
         lowest=8.0,
@@ -210,7 +220,7 @@ def _make_sparse_evidence_gnn():
         channel_encoder_dilation=5,
         hidden_dim=8,
         channel_embed_dim=8,
-        epochs=50,
+        epochs=100,
         batch_size=16,
         learning_rate=1e-3,
         weight_decay=1e-4,
@@ -222,12 +232,16 @@ def _make_sparse_evidence_gnn():
         early_stopping_patience=None,
         device="auto",
         seed=42,
-        # (5,3): tested against (25,3) (restoring the old absolute smoothing
-        # window) and found no measurable difference -- kernel size isn't
-        # part of the accuracy story, so left at its original value.
-        # (25,3) is memory-safe now too: _smooth_wct_maps was switched to a
-        # separable (1D x 1D) conv (peak RSS ~2GB/precompute-chunk instead
-        # of a ~21.6GB conv2d im2col blowup; see wct_evidence_gnn_classifier.py).
+        # (5,3): re-tested against (25,3) *after* the channel_encoder_dilation
+        # fix (so this time the ChannelSignalEncoder receptive-field
+        # bottleneck wasn't masking a possible effect). (5,3) at native
+        # n_time=1001 (4.0ms/sample) spans only ~20ms of time smoothing vs
+        # ~100ms for (25,3) -- a real 5x difference in effective smoothing
+        # width -- but subject 1 mean landed at 0.8008 with (25,3) vs 0.7991
+        # with (5,3): still noise-level. Native resolution's correctness
+        # fixes (no destructive resample, proper COI) are confirmed to be a
+        # wash for this architecture/task -- they eliminate bug risk without
+        # costing OR buying accuracy. Left at (5,3), its original value.
         smooth_kernel_size=(5, 3),
         smooth_kernel_sigma=(None, None),
         # Measured to cost ~0.0005 accuracy either way (noise-level) -- kept
@@ -829,7 +843,24 @@ def _write_group_artifacts(
     console_policy=None,
     overwrite=True,
 ):
-    """Write compact human-readable companions beside MOABB's HDF5 store."""
+    """Write compact human-readable companions beside MOABB's HDF5 store.
+
+    KNOWN BUG (found 2026-08-06, not yet fixed): `group_results.to_csv(...)`
+    below is a full overwrite, not an append, and has no file lock (unlike
+    MOABB's own HDF5 store, which writes a `.lock` file next to it). Running
+    two invocations of this script against the same --run-id concurrently
+    (e.g. a background run plus an IDE-triggered run) can interleave their
+    writes into one torn CSV -- observed as a subject's outer-CV rows
+    duplicated, which silently skews `results.groupby(["pipeline"])
+    ["score"].mean()` toward that subject since it's a row-weighted average,
+    not a subject-balanced one. Symptom: the printed "Per pipeline mean
+    scores" doesn't match the mean of "Per subject/pipeline mean scores"
+    directly above it. Fix would be an atomic write (temp file + os.replace)
+    plus a lock, mirroring the HDF5 store's own approach. Until then: don't
+    run this script twice against the same run-id at once, and if the two
+    summary tables don't reconcile, re-run and recompute the mean by hand
+    from the per-subject table instead of trusting the per-pipeline one.
+    """
     hdf5_path = Path(evaluation.results.filepath).resolve()
     artifact_dir = hdf5_path.parent
     scores_path = artifact_dir / f"scores_{group_id}.csv"
