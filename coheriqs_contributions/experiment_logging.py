@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 import logging
 import os
@@ -167,22 +168,39 @@ def resolve_experiment_log_path(
     moabb_results_root: str | os.PathLike[str],
     overwrite: bool,
 ) -> Path:
-    """Resolve an experiment log path under the runner's overwrite policy."""
+    """Resolve an experiment log path under the runner's overwrite policy.
+
+    Auto-generated paths (``requested_path`` is None) are timestamped, so
+    every run gets its own file instead of every rerun of the same run-id
+    silently truncating (``mode="w"``, see configure_experiment_logging)
+    the previous run's full epoch-by-epoch history at a fixed
+    ``<run-id>/experiment.log``. A ``<run-id>/experiment_latest.log`` symlink
+    is kept pointing at the newest one, so a stable path is still available
+    for tailing/scripting -- follow the symlink, don't grep the literal name.
+    Explicitly passing ``requested_path`` uses that exact path as-is (still
+    subject to ``overwrite``), for scripted/reproducible use where a stable
+    filename is wanted on purpose.
+    """
 
     if requested_path is not None:
         log_path = Path(requested_path).expanduser().resolve()
     else:
-        log_path = (
-            Path(moabb_results_root).expanduser().resolve()
-            / run_id
-            / "experiment.log"
-        )
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        run_dir = Path(moabb_results_root).expanduser().resolve() / run_id
+        log_path = run_dir / f"experiment_{timestamp}.log"
 
     if log_path.exists() and not overwrite:
         raise FileExistsError(
             f"Experiment log already exists; refusing to overwrite: {log_path}"
         )
     log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if requested_path is None:
+        latest_link = log_path.parent / "experiment_latest.log"
+        if latest_link.is_symlink() or latest_link.exists():
+            latest_link.unlink()
+        latest_link.symlink_to(log_path.name)
+
     return log_path
 
 

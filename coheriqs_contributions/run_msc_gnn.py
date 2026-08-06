@@ -407,8 +407,10 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--experiment-log",
         default=None,
         help=(
-            "Durable UTF-8 experiment log path. Defaults to "
-            "MOABB_RESULTS/<run-id>/experiment.log."
+            "Durable UTF-8 experiment log path. Defaults to a new "
+            "timestamped file per run under "
+            "MOABB_RESULTS/<run-id>/experiment_<timestamp>.log, with "
+            "experiment_latest.log symlinked to the newest one."
         ),
     )
     add_console_arguments(parser)

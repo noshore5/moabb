@@ -528,8 +528,8 @@ PIPELINE_PARAM_GRIDS = {
 
     },
     "Sparse-Evidence-GNN": {
-        "batch_size": [16],
-        "epochs": [50],
+        "batch_size": [8],
+        "epochs": [100],
         "learning_rate": [1.0e-3],
         "weight_decay": [1.0e-4],
         "hidden_dim": [8],
@@ -1048,8 +1048,10 @@ def _build_argument_parser() -> argparse.ArgumentParser:
         "--experiment-log",
         default=None,
         help=(
-            "Durable UTF-8 experiment log path. Defaults to "
-            "MOABB_RESULTS/<run-id>/experiment.log."
+            "Durable UTF-8 experiment log path. Defaults to a new "
+            "timestamped file per run under "
+            "MOABB_RESULTS/<run-id>/experiment_<timestamp>.log, with "
+            "experiment_latest.log symlinked to the newest one."
         ),
     )
     add_console_arguments(parser)

@@ -77,6 +77,9 @@ CANONICAL_CONFIG = {
         "args": [
             "--subjects",
             "1",
+            "2",
+            "3",
+            "4",
             "--pipeline",
             "Sparse-Evidence-GNN",
             "--run-id",
